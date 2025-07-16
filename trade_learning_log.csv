@@ -1,0 +1,19 @@
+symbol,session,score,direction,outcome
+BTCUSDT,US,7.5,long,win
+ETHUSDT,Asia,5.2,long,loss
+XRPUSDT,Europe,6.9,long,win2025-07-12 12:45:50,TRXUSDT,Unknown,6,long,loss
+2025-07-12 12:45:51,RVNUSDT,Unknown,5,long,loss
+2025-07-12 12:45:52,POLYXUSDT,Unknown,5,long,loss
+2025-07-12 12:45:52,SOLVUSDT,Unknown,6,long,loss
+2025-07-12 12:45:53,SXPUSDT,Unknown,4,long,loss
+2025-07-12 12:45:53,QKCUSDT,Unknown,5,long,loss
+2025-07-12 12:45:53,1INCHUSDT,Unknown,4,long,loss
+2025-07-12 12:45:54,MBOXUSDT,Unknown,4,long,loss
+2025-07-12 12:45:54,LOKAUSDT,Unknown,5,long,loss
+2025-07-12 12:49:00,BAKEUSDT,Unknown,4,long,win
+2025-07-12 15:38:20,HBARUSDT,Unknown,5,long,loss
+2025-07-12 15:38:21,TUSDT,Unknown,5,long,loss
+2025-07-12 15:38:21,XRPUSDT,Unknown,4,long,loss
+2025-07-12 15:45:10,FUNUSDT,Unknown,4,long,win
+2025-07-13 16:52:43,DOGEUSDT,unknown,7.75,long,early_exit,50.5,60,bullish,none,False,False,0,8.0
+2025-07-13 16:52:51,NEIROUSDT,unknown,7.3,long,sl,50.5,60,bullish,none,False,False,0,8.0
