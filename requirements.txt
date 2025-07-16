@@ -1,8 +1,9 @@
 setuptools>=65.5.0
 wheel
-pandas==1.5.3
-numpy==1.24.4
-ta
+numpy==1.24.4 --only-binary=:all:
+pandas==1.5.3 --only-binary=:all:
+ta==0.10.2
+python-binance==1.0.17
 python-dotenv
 requests
 ccxt
