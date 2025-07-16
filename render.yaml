@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: spot-ai-agent
+    env: python
+    plan: free
+    buildCommand: |
+      pip install --upgrade pip setuptools wheel
+      pip install -r requirements.txt
+    startCommand: python agent.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.13
