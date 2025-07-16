@@ -1,4 +1,4 @@
-setuptools>=65.5.0
+setuptools>=58.0.4
 wheel
 python-binance==1.0.17
 ta==0.10.2
