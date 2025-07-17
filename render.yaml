@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: spot-ai-agent
+    env: python
+    pythonVersion: 3.10.13
+    buildCommand: pip install -r requirements.txt
+    startCommand: python agent.py
