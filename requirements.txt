@@ -4,7 +4,7 @@ setuptools>=65.5.0         # ✅ greater than or equal uses >=
 Cython>=0.29.36
 python-binance==1.0.17
 ta==0.10.2
-python-dotenv>=0.21.0
+python-dotenv>=1.0.0
 requests
 ccxt
 yfinance
