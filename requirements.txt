@@ -1,13 +1,12 @@
 numpy==1.23.5
 pandas==1.5.3
-setuptools>=65.5.0
+setuptools>=65.5.0         # ✅ greater than or equal uses >=
 Cython>=0.29.36
 python-binance==1.0.17
 ta==0.10.2
+python-dotenv>=0.21.0
 requests
 ccxt
 yfinance
 streamlit
 openai
-python-dotenv>=0.21.0
-
