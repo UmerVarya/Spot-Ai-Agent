@@ -10,3 +10,5 @@ ccxt
 yfinance
 streamlit
 openai
+python-dotenv>=1.0.0
+dotenv
