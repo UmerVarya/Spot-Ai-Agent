@@ -7,6 +7,7 @@ from binance.client import Client
 from symbol_mapper import map_symbol_for_binance
 from datetime import datetime as dt
 from ta.volume import VolumeWeightedAveragePrice  # ✅ VWMA fix
+import json
 import os
 
 from price_action import detect_support_resistance_zones, is_price_near_zone
@@ -37,8 +38,9 @@ def calculate_indicators(df):
     df['macd_signal'] = macd.macd_signal()
     df['macd_hist'] = macd.macd_diff()
     df['rsi'] = RSIIndicator(df['close'], window=14).rsi()
-    adx = ADXIndicator(df['high'], df['low'], df['close'], window=14)
-    df['adx'] = adx.adx()
+    adx_series = ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
+    adx_series = adx_series.dropna().fillna(0)
+    df['adx'] = adx_series.reindex(df.index, fill_value=0)
     bb = BollingerBands(df['close'], window=20, window_dev=2)
     df['bb_upper'] = bb.bollinger_hband()
     df['bb_lower'] = bb.bollinger_lband()
@@ -215,6 +217,7 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
         macd_line = MACD(close).macd_diff()
         rsi = RSIIndicator(close, window=14).rsi()
         adx = ADXIndicator(high=high, low=low, close=close).adx()
+        adx = adx.dropna().fillna(0)
         bb = BollingerBands(close=close, window=20, window_dev=2)
         vwma_calc = VolumeWeightedAveragePrice(high=high, low=low, close=close, volume=volume, window=20)
         vwma = vwma_calc.volume_weighted_average_price()
@@ -223,17 +226,22 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
 
         print(f"🔍 [{symbol}] Volume: {volume.iloc[-1]:,.0f} | VWMA: {vwma.iloc[-1]:.2f} | Sentiment: {sentiment_bias}")
 
-        if volume.iloc[-1] < 250000:
+        if volume.iloc[-1] < 150000:
             print(f"⛔ Skipping due to low volume: {volume.iloc[-1]}")
             return 0, None, 0, None
-        
+
         vwma_value = vwma.iloc[-1]
         price_now = close.iloc[-1]
 
-        # Check if price is not significantly under VWMA (within ±3%)
-        if np.isnan(vwma_value) or abs(price_now - vwma_value) / price_now > 0.03:
-            print(f"⛔ Skipping due to VWMA mismatch | VWMA: {vwma_value}, Price: {price_now}")
+        if np.isnan(vwma_value):
+            print(f"⛔ Invalid VWMA for {symbol}")
             return 0, None, 0, None
+
+        vwma_threshold = 0.06 if sentiment_bias == "bullish" else 0.05
+        deviation = abs(price_now - vwma_value) / price_now
+        vwma_pass = deviation <= vwma_threshold
+        if not vwma_pass:
+            print(f"⚠️ VWMA deviation {deviation:.2%} exceeds {vwma_threshold:.0%} threshold")
         
     except Exception as e:
         print(f"⚠️ Error calculating indicators for {symbol}: {e}")
@@ -261,7 +269,7 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
         if adx.iloc[-1] > 20: 
             score += w["adx"]
             print(f"[DEBUG] ADX condition passed: {adx.iloc[-1]:.2f}")
-        if close.iloc[-1] > vwma.iloc[-1]: 
+        if close.iloc[-1] > vwma.iloc[-1] and vwma_pass:
             score += w["vwma"]
             print(f"[DEBUG] VWMA condition passed: {close.iloc[-1]:.2f} > {vwma.iloc[-1]:.2f}")
         if bb_lower.iloc[-1] < close.iloc[-1] < bb_upper.iloc[-1]: 
