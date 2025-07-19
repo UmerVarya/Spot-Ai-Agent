@@ -28,6 +28,8 @@ client = Client()
 # === Indicator Calculation ===
 def calculate_indicators(df):
     df = df.copy()
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.dropna(subset=['high', 'low', 'close'])
     df['ema_20'] = EMAIndicator(df['close'], window=20).ema_indicator()
     df['ema_50'] = EMAIndicator(df['close'], window=50).ema_indicator()
     macd = MACD(df['close'])
@@ -198,6 +200,9 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
         if price_data is None or price_data.empty or len(price_data) < 20:
             print(f"[DEBUG] Skipping {symbol}: insufficient price data.")
             return 0, None, 0, None
+        
+        price_data = price_data.replace([np.inf, -np.inf], np.nan)
+        price_data = price_data.dropna(subset=['high', 'low', 'close'])
 
         open_ = price_data['open']
         high = price_data['high']
