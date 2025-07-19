@@ -36,7 +36,11 @@ def auto_run_news():
         run_news_fetcher()
         time.sleep(NEWS_INTERVAL)
 
-def run_agent():
+def run_streamlit():
+    port = os.environ.get("PORT", "10000")
+    os.system(f"streamlit run dashboard.py --server.port {port} --server.headless true")
+
+def run_agent_loop():
     print("\n🤖 Spot AI Super Agent running in paper trading mode...\n")
     threading.Thread(target=auto_run_news, daemon=True).start()
 
@@ -177,11 +181,13 @@ def run_agent():
             time.sleep(10)
 
 if __name__ == "__main__":
-    run_agent()
+    threading.Thread(target=run_streamlit).start()
+    threading.Thread(target=run_agent_loop).start()
 
-    from sentiment import get_macro_sentiment  # ✅ Keep this one
+    # ✅ Hardcoded Top 30 (for other tasks if needed)
+    from sentiment import get_macro_sentiment
+    from trade_utils import get_price_data, evaluate_signal
 
-    # ✅ Hardcoded Top 30
     top_symbols = [
         "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT",
         "DOTUSDT", "MATICUSDT", "TRXUSDT", "LINKUSDT", "UNIUSDT", "LTCUSDT", "BCHUSDT", "ETCUSDT",
@@ -197,12 +203,10 @@ if __name__ == "__main__":
     for symbol in top_symbols:
         df = get_price_data(symbol)
         score, direction, position_size, pattern = evaluate_signal(df, symbol, sentiment_bias)
-
         symbol_scores[symbol] = {
             "score": score,
             "direction": direction
         }
 
-    # ✅ Save results to JSON
     with open("symbol_scores.json", "w") as f:
         json.dump(symbol_scores, f)
