@@ -16,7 +16,7 @@ from orderflow import detect_aggression
 from drawdown_guard import is_trading_blocked  # ✅ Drawdown Guard
 
 MAX_ACTIVE_TRADES = 2
-SCAN_INTERVAL = 60
+SCAN_INTERVAL = 15  # faster scanning for 5m timeframe
 NEWS_INTERVAL = 3600
 
 def load_active_trades():
@@ -82,6 +82,12 @@ def run_agent_loop():
                 continue
 
             active_trades = load_active_trades()
+            if len(active_trades) >= MAX_ACTIVE_TRADES:
+                print("🔒 2 concurrent trades already open. Waiting for a slot...\n")
+                manage_trades()
+                time.sleep(SCAN_INTERVAL)
+                continue
+
             top_symbols = get_top_symbols()
 
             for symbol in top_symbols:
@@ -102,8 +108,9 @@ def run_agent_loop():
                         print(f"⚠️ No direction for {symbol} despite score={score}. Forcing fallback 'long'.")
                         direction = "long"
 
-                    if not detect_aggression(price_data):
-                        print(f"🚫 No buy-side aggression detected in {symbol}. Skipping.")
+                    flow = detect_aggression(price_data)
+                    if flow != "bullish":
+                        print(f"🚫 No buy-side aggression in {symbol} (order flow = {flow}). Skipping.")
                         continue
 
                     indicators = {
@@ -120,7 +127,7 @@ def run_agent_loop():
                         indicators=indicators,
                         session="default",
                         pattern_name=pattern_name,
-                        orderflow="buy-side aggression",
+                        orderflow=flow,
                         sentiment=sentiment,
                         macro_news=sentiment
                     )
@@ -165,6 +172,8 @@ def run_agent_loop():
                         send_email(f"New Trade Opened: {symbol}", str(new_trade))
                         active_trades[symbol] = new_trade
                         save_active_trades(active_trades)
+                        if len(active_trades) >= MAX_ACTIVE_TRADES:
+                            break
 
                     else:
                         print(f"⛔ Skipped {symbol}: Score={score}, Dir={direction}, PosSize={position_size}")
