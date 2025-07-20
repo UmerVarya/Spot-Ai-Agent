@@ -242,3 +242,8 @@ def run_agent_loop():
         except Exception as e:
             print(f"❌ Main Loop Error: {e}")
             time.sleep(10)
+            
+if __name__ == "__main__":
+    logging.info("🚀 Starting Spot AI Super Agent loop...")
+    run_agent_loop()
+
