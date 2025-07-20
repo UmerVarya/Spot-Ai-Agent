@@ -57,7 +57,7 @@ def get_top_symbols(limit=30):
 def get_price_data(symbol):
     try:
         mapped_symbol = map_symbol_for_binance(symbol)
-        klines = client.get_klines(symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_15MINUTE, limit=100)
+        klines = client.get_klines(symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_5MINUTE, limit=100)
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
             'close_time', 'quote_asset_volume', 'number_of_trades',
@@ -192,6 +192,8 @@ def get_position_size(confidence):
         return 100
     elif confidence >= 6.5:
         return 80
+    elif confidence >= 5.5:
+        return 50
     else:
         return 0
 
@@ -214,6 +216,7 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
 
         ema_short = EMAIndicator(close, window=20).ema_indicator()
         ema_long = EMAIndicator(close, window=50).ema_indicator()
+        ema_60 = EMAIndicator(close, window=60).ema_indicator()
         macd_line = MACD(close).macd_diff()
         rsi = RSIIndicator(close, window=14).rsi()
         adx = ADXIndicator(high=high, low=low, close=close).adx()
@@ -226,8 +229,9 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
 
         print(f"🔍 [{symbol}] Volume: {volume.iloc[-1]:,.0f} | VWMA: {vwma.iloc[-1]:.2f} | Sentiment: {sentiment_bias}")
 
-        if volume.iloc[-1] < 150000:
-            print(f"⛔ Skipping due to low volume: {volume.iloc[-1]}")
+        avg_vol = volume.tail(20).mean()
+        if volume.iloc[-1] < max(50000, avg_vol * 0.5):
+            print(f"⛔ Low relative volume: {volume.iloc[-1]:,.0f} < 0.5×avg({avg_vol:,.0f})")
             return 0, None, 0, None
 
         vwma_value = vwma.iloc[-1]
@@ -237,11 +241,13 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
             print(f"⛔ Invalid VWMA for {symbol}")
             return 0, None, 0, None
 
-        vwma_threshold = 0.06 if sentiment_bias == "bullish" else 0.05
+        vwma_threshold = 0.05
         deviation = abs(price_now - vwma_value) / price_now
         vwma_pass = deviation <= vwma_threshold
-        if not vwma_pass:
-            print(f"⚠️ VWMA deviation {deviation:.2%} exceeds {vwma_threshold:.0%} threshold")
+        penalty = 0
+        if deviation > vwma_threshold:
+            penalty = (deviation - vwma_threshold) * 10
+            print(f"⚠️ Price far from VWMA (dev {deviation:.1%}), applying penalty {penalty:.2f}")
         
     except Exception as e:
         print(f"⚠️ Error calculating indicators for {symbol}: {e}")
@@ -257,9 +263,12 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
         reinforcement = get_reinforcement_bonus(symbol, session)
         score = 0
 
-        if ema_short.iloc[-1] > ema_long.iloc[-1]: 
+        if ema_short.iloc[-1] > ema_long.iloc[-1]:
             score += w["ema"]
             print(f"[DEBUG] EMA condition passed: {ema_short.iloc[-1]:.2f} > {ema_long.iloc[-1]:.2f}")
+        if close.iloc[-1] > ema_60.iloc[-1]:
+            score += 0.3
+            print(f"[DEBUG] Higher timeframe trend alignment")
         if macd_line.iloc[-1] > 0: 
             score += w["macd"]
             print(f"[DEBUG] MACD condition passed: {macd_line.iloc[-1]:.2f}")
@@ -291,12 +300,14 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
             print(f"[DEBUG] Flag pattern confirmed")
 
         aggression = detect_aggression(price_data)
-        if aggression == "buyers in control":
+        if aggression == "bullish":
             score += w["flow"]
             print(f"[DEBUG] Buy-side aggression detected")
-        elif aggression == "sellers in control":
+        elif aggression == "bearish":
             print(f"[DEBUG] Seller aggression detected — skipping.")
             return 0, None, 0, None
+
+        score -= penalty
         
         # 📊 Multi-Symbol Context Boost
         try:
@@ -331,9 +342,9 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
         direction = "long" if score_long > score_short and score_long >= 6.5 else None
 
         # 🧠 Fallback direction
-        if direction is None and score_long >= 5.0 and sentiment_bias == "bullish":
+        if direction is None and score_long >= 5.5 and sentiment_bias != "bearish":
             direction = "long"
-            print(f"[DEBUG] Fallback direction applied due to bullish sentiment and score: {score_long}")
+            print(f"[DEBUG] Fallback direction applied (Sentiment: {sentiment_bias}, Score: {score_long})")
 
         position_size = get_position_size(score_long)
 
