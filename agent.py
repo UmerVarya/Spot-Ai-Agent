@@ -23,6 +23,12 @@ from fear_greed import get_fear_greed_index
 from fetch_news import run_news_fetcher
 from orderflow import detect_aggression
 from drawdown_guard import is_trading_blocked  # ✅ Drawdown Guard
+import threading
+import os
+
+def run_streamlit():
+    port = os.environ.get("PORT", "10000")  # Render passes a dynamic port env
+    os.system(f"streamlit run dashboard.py --server.port {port} --server.headless true")
 
 MAX_ACTIVE_TRADES = 2
 SCAN_INTERVAL = 15  # reduced from 60s to 15s for faster scans
@@ -52,6 +58,7 @@ def run_streamlit():
 def run_agent_loop():
     print("\n🤖 Spot AI Super Agent running in paper trading mode...\n")
     threading.Thread(target=auto_run_news, daemon=True).start()
+    threading.Thread(target=run_streamlit, daemon=True).start()
 
     while True:
         try:
