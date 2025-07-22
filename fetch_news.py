@@ -9,44 +9,71 @@ import re
 
 load_dotenv()
 
-
 # === Fetch Crypto News ===
 def fetch_crypto_news():
     url = "https://cryptopanic.com/news/rss/"
+    events = []
     try:
-        response = requests.get(url)
-        soup = BeautifulSoup(response.content, features="xml")
-        items = soup.find_all("item")
-        events = []
-        for item in items[:10]:  # limit to 10
-            events.append({
-                "event": item.title.text,
-                "datetime": datetime.utcnow().isoformat() + "Z",
-                "impact": "medium"
-            })
-        return events
+        response = requests.get(url, timeout=10)
     except Exception as e:
         print("⚠️ Crypto news fetch failed:", e)
         return []
+    content = response.content
+    try:
+        soup = BeautifulSoup(content, features="xml")
+        items = soup.find_all("item")
+        if not items:
+            raise Exception("No items found in XML response")
+    except Exception as e_xml:
+        print("⚠️ Crypto news XML parse error:", e_xml)
+        try:
+            soup = BeautifulSoup(content, "html.parser")
+            items = soup.find_all("item")
+            if not items:
+                raise Exception("No items found with HTML parser")
+        except Exception as e_html:
+            print("⚠️ Crypto news parse failed:", e_html)
+            return []
+    for item in items[:10]:
+        events.append({
+            "event": item.title.text,
+            "datetime": datetime.utcnow().isoformat() + "Z",
+            "impact": "medium"
+        })
+    return events
 
 # === Fetch Macro News ===
 def fetch_macro_news():
     url = "https://www.fxstreet.com/rss/news"
+    events = []
     try:
-        response = requests.get(url)
-        soup = BeautifulSoup(response.content, features="xml")
-        items = soup.find_all("item")
-        events = []
-        for item in items[:10]:
-            events.append({
-                "event": item.title.text,
-                "datetime": datetime.utcnow().isoformat() + "Z",
-                "impact": "high" if "Fed" in item.title.text or "inflation" in item.title.text else "medium"
-            })
-        return events
+        response = requests.get(url, timeout=10)
     except Exception as e:
         print("⚠️ Macro news fetch failed:", e)
         return []
+    content = response.content
+    try:
+        soup = BeautifulSoup(content, features="xml")
+        items = soup.find_all("item")
+        if not items:
+            raise Exception("No items found in XML response")
+    except Exception as e_xml:
+        print("⚠️ Macro news XML parse error:", e_xml)
+        try:
+            soup = BeautifulSoup(content, "html.parser")
+            items = soup.find_all("item")
+            if not items:
+                raise Exception("No items found with HTML parser")
+        except Exception as e_html:
+            print("⚠️ Macro news parse failed:", e_html)
+            return []
+    for item in items[:10]:
+        events.append({
+            "event": item.title.text,
+            "datetime": datetime.utcnow().isoformat() + "Z",
+            "impact": "high" if ("Fed" in item.title.text or "inflation" in item.title.text) else "medium"
+        })
+    return events
 
 # === Save to JSON ===
 def save_events(events, path="news_events.json"):
@@ -142,7 +169,6 @@ def run_news_fetcher():
 
     result = analyze_news_with_llm(all_events)
     print("\n🧠 Groq News Analysis:", result)
-
 
 if __name__ == "__main__":
     run_news_fetcher()
