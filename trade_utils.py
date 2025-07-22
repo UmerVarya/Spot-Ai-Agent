@@ -61,8 +61,9 @@ def get_price_data(symbol):
             'close_time', 'quote_asset_volume', 'number_of_trades',
             'taker_buy_base', 'taker_buy_quote', 'ignore'
         ])
-        df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
-        return df[['open', 'high', 'low', 'close', 'volume']]
+        df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume']].astype(float)
+        df['quote_volume'] = df['quote_asset_volume']
+        return df[['open', 'high', 'low', 'close', 'volume', 'quote_volume']]
     except Exception as e:
         print(f"⚠️ Failed to fetch data for {symbol}: {e}")
         return None
@@ -148,9 +149,9 @@ def get_position_size(confidence):
     if confidence >= 8.5:
         return 100   # 100% position (max size)
     elif confidence >= 6.5:
-        return 80    # 80% position for confidence 6.5–8.4
+        return 80    # 80% position (high confidence)
     elif confidence >= 5.5:
-        return 50    # 50% position for confidence 5.5–6.4
+        return 50    # 50% position (moderate confidence)
     else:
         return 0     # no trade if confidence below 5.5
 
@@ -186,17 +187,19 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
         latest_vol = volume.iloc[-1]
         latest_vwma = vwma.iloc[-1]
         print(f"🔍 [{symbol}] Volume: {latest_vol:,.0f} | VWMA: {latest_vwma:.2f} | Sentiment: {sentiment_bias}")
+        price_now = close.iloc[-1]
 
-        # ✅ Dynamic Volume Filter: require current volume at least 50% of 20-bar average (with 50k USDT absolute minimum)
+        # ✅ Dynamic Volume Filter: require current volume at least 50% of 20-bar average (with 20k USDT absolute minimum)
         avg_vol_20 = volume.iloc[-20:].mean()
-        vol_threshold = max(0.5 * avg_vol_20, 50000)
-        if latest_vol < vol_threshold:
-            print(f"⛔ Skipping due to low volume: {latest_vol:,.0f} < {vol_threshold:,.0f} (50% of 20-bar avg)")
+        avg_quote_vol_20 = price_data['quote_volume'].iloc[-20:].mean() if 'quote_volume' in price_data else avg_vol_20 * price_now
+        latest_quote_vol = price_data['quote_volume'].iloc[-1] if 'quote_volume' in price_data else latest_vol * price_now
+        vol_threshold = max(0.5 * avg_quote_vol_20, 20000)
+        if latest_quote_vol < vol_threshold:
+            print(f"⛔ Skipping due to low volume: {latest_quote_vol:,.0f} < {vol_threshold:,.0f} (50% of 20-bar avg)")
             return 0, None, 0, None
 
         # ✅ VWMA Deviation Logic: no hard filter, use soft adjustment
         vwma_value = latest_vwma
-        price_now = close.iloc[-1]
         vwma_dev = abs(price_now - vwma_value) / price_now if price_now != 0 else 0.0
 
         # Determine trading session for weight profile
@@ -366,5 +369,3 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
     except Exception as e:
         print(f"⚠️ Signal evaluation error in {symbol}: {e}")
         return 0, None, 0, None
-
-
