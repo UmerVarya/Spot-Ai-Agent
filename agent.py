@@ -7,14 +7,16 @@ try:
     pass
 except Exception as e:
     logging.error(f"Unhandled exception: {e}", exc_info=True)
+
 import time
 import os
 from dotenv import load_dotenv
 load_dotenv()
 import json
 import threading
+
 from trade_utils import get_top_symbols, get_price_data, evaluate_signal
-from trade_manager import manage_trades, create_new_trade, save_active_trades
+from trade_manager import manage_trades, load_active_trades, save_active_trades
 from notifier import send_email
 from brain import should_trade
 from sentiment import get_macro_sentiment
@@ -23,27 +25,10 @@ from fear_greed import get_fear_greed_index
 from fetch_news import run_news_fetcher
 from orderflow import detect_aggression
 from drawdown_guard import is_trading_blocked  # ✅ Drawdown Guard
-import threading
-import os
-
-def run_streamlit():
-    port = os.environ.get("PORT", "10000")  # Render passes a dynamic port env
-    os.system(f"streamlit run dashboard.py --server.port {port} --server.headless true")
 
 MAX_ACTIVE_TRADES = 2
-SCAN_INTERVAL = 15  # reduced from 60s to 15s for faster scans
+SCAN_INTERVAL = 15   # scan more frequently (15s)
 NEWS_INTERVAL = 3600
-
-def load_active_trades():
-    try:
-        with open("active_trades.json", "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-
-def save_active_trades(trades):
-    with open("active_trades.json", "w") as f:
-        json.dump(trades, f, indent=4)
 
 def auto_run_news():
     while True:
@@ -52,7 +37,7 @@ def auto_run_news():
         time.sleep(NEWS_INTERVAL)
 
 def run_streamlit():
-    port = os.environ.get("PORT", "10000")
+    port = os.environ.get("PORT", "10000")  # Render provides a dynamic port
     os.system(f"streamlit run dashboard.py --server.port {port} --server.headless true")
 
 def run_agent_loop():
@@ -64,13 +49,13 @@ def run_agent_loop():
         try:
             print(f"=== Scan @ {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
 
-            # Check if trading is temporarily blocked (e.g., due to drawdown limits)
+            # Check if trading is temporarily blocked (e.g., drawdown limit hit)
             if is_trading_blocked():
                 print("⛔ Drawdown limit reached. Skipping trading for today.\n")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # Get macro context
+            # Get macro context indicators
             btc_d = get_btc_dominance()
             fg = get_fear_greed_index()
             sentiment = get_macro_sentiment()
@@ -90,27 +75,33 @@ def run_agent_loop():
 
             print(f"🌐 BTC Dominance: {btc_d:.2f}% | Fear & Greed: {fg} | Sentiment: {sentiment_bias} (Confidence: {sentiment_confidence})")
 
-            # Market sentiment gating – only block if conditions indicate strongly bearish environment
+            # Market sentiment gating – skip trading if conditions indicate a strongly bearish environment
             if (sentiment_bias == "bearish" and sentiment_confidence >= 7) or fg < 20 or btc_d > 60:
-                reason = []
+                reasons = []
                 if sentiment_bias == "bearish" and sentiment_confidence >= 7:
-                    reason.append("strong bearish sentiment")
+                    reasons.append("strong bearish sentiment")
                 if fg < 20:
-                    reason.append("extreme Fear & Greed index")
+                    reasons.append("extreme Fear & Greed index")
                 if btc_d > 60:
-                    reason.append("very high BTC dominance")
-                reason_text = " + ".join(reason) if reason else "unfavorable conditions"
+                    reasons.append("very high BTC dominance")
+                reason_text = " + ".join(reasons) if reasons else "unfavorable conditions"
                 print(f"🛑 Market unfavorable ({reason_text}). Skipping scan.\n")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
             active_trades = load_active_trades()
+            # Purge any remaining short trades from active trades (spot-only mode)
+            for sym, trade in list(active_trades.items()):
+                if trade.get("direction") == "short":
+                    print(f"⛔ Removing non-long trade {sym} from active trades (spot-only mode).")
+                    del active_trades[sym]
+            save_active_trades(active_trades)
+
             top_symbols = get_top_symbols(limit=30)
             potential_trades = []  # collect potential trade signals
 
             for symbol in top_symbols:
-                # Enforce max concurrency: still scan all symbols for logging, but do not open beyond cap
-                # Skip symbols that already have an active trade open
+                # Enforce max concurrency but still evaluate all symbols for logging
                 if symbol in active_trades:
                     print(f"⚠️ Skipping {symbol}: already in an active trade.")
                     continue
@@ -122,17 +113,17 @@ def run_agent_loop():
                         continue
 
                     score, direction, position_size, pattern_name = evaluate_signal(price_data, symbol)
-                    # ✅ Fallback: if no direction but score meets threshold, assume long (for neutral sentiment scenarios)
+                    # ✅ If no clear direction but score meets threshold, assume long (neutral sentiment fallback)
                     if direction is None and score >= 5.5:
-                        print(f"⚠️ No clear direction for {symbol} despite score={score:.2f}. Forcing fallback 'long'.")
+                        print(f"⚠️ No clear direction for {symbol} despite score={score:.2f}. Forcing 'long' direction.")
                         direction = "long"
 
-                    # Skip if signal does not qualify (no long direction or position size 0)
+                    # Skip if signal does not qualify (we only trade long spot positions)
                     if direction != "long" or position_size <= 0:
-                        # Log skip reasons were already printed during evaluate_signal (volume, VWMA, sentiment, zone filters, etc.)
+                        # Skip reason already logged in evaluate_signal
                         continue
 
-                    # Order flow check (must have bullish aggression)
+                    # Order flow check – require bullish aggression
                     flow_status = detect_aggression(price_data)
                     if flow_status != "buyers in control":
                         if flow_status == "sellers in control":
@@ -141,7 +132,7 @@ def run_agent_loop():
                             print(f"🚫 No buy-side aggression detected in {symbol}. Skipping trade.")
                         continue
 
-                    # If we reach here, we have a valid potential long trade signal
+                    # If we reach here, we have a valid potential **long** trade signal
                     potential_trades.append({
                         "symbol": symbol,
                         "score": score,
@@ -155,7 +146,7 @@ def run_agent_loop():
                     print(f"❌ Error evaluating {symbol}: {e}")
                     continue
 
-            # Rank all potential trades by score (descending) to prioritize top signals
+            # Rank potential trades by score (highest first)
             potential_trades.sort(key=lambda x: x['score'], reverse=True)
 
             # Determine how many new trades we can open this cycle
@@ -171,18 +162,18 @@ def run_agent_loop():
                 price_data = signal["price_data"]
 
                 if opened_count >= allowed_new:
-                    # Concurrency limit reached for this cycle - highlight skipped trade
                     print(f"⚠️ Skipping {symbol} due to concurrency cap (max {MAX_ACTIVE_TRADES} trades).")
                     continue
 
-                # Prepare indicators for brain decision and call should_trade
+                # Prepare indicators for decision and consult the brain module
                 indicators = {
                     "rsi": price_data["rsi"].iloc[-1] if "rsi" in price_data else 50,
                     "macd": price_data["macd"].iloc[-1] if "macd" in price_data else 0,
                     "adx": price_data["adx"].iloc[-1] if "adx" in price_data else 20,
                     "volume": price_data["volume"].iloc[-1] if "volume" in price_data else 0,
                 }
-                orderflow_tag = "buy-side aggression"  # we've ensured buy-side flow is present
+                orderflow_tag = "buy-side aggression"  # we ensured buy-side flow above
+
                 decision_obj = should_trade(
                     symbol=symbol,
                     score=score,
@@ -192,20 +183,20 @@ def run_agent_loop():
                     pattern_name=pattern_name,
                     orderflow=orderflow_tag,
                     sentiment=sentiment,
-                    macro_news=sentiment
+                    macro_news=sentiment  # using macro sentiment as macro_news context
                 )
                 decision = decision_obj.get("decision", False)
                 final_conf = decision_obj.get("confidence", 0.0)
                 narrative = decision_obj.get("narrative", "")
 
-                # Log brain decision outcome with confidence and reason/narrative
+                # Log the brain's decision and reasoning
                 if decision:
                     print(f"🤖 Brain Decision for {symbol}: True | Confidence: {final_conf:.2f}\n{narrative}\n")
                 else:
                     reason = decision_obj.get("reason", "Unknown reason")
                     print(f"🤖 Brain Decision for {symbol}: False | Confidence: {final_conf:.2f}\nReason: {reason}\n")
 
-                # If brain approves the trade, execute in paper mode
+                # If brain approves the trade, simulate executing it (paper trade)
                 if decision and direction == "long" and position_size > 0:
                     entry_price = round(price_data['close'].iloc[-1], 6)
                     sl = round(entry_price - entry_price * 0.01, 6)
@@ -235,21 +226,20 @@ def run_agent_loop():
                     }
 
                     print(f"📖 Narrative:\n{narrative}\n")
-                    print(f"✅ Trade: {symbol} | Score: {score:.2f} | Size: ${position_size}")
+                    print(f"✅ Trade: {symbol} | Score: {score:.2f} | Position Size: ${position_size}")
                     active_trades[symbol] = new_trade
-                    save_active_trades(active_trades)  # update persistent active trades
+                    save_active_trades(active_trades)
                     send_email(f"New Trade Opened: {symbol}", str(new_trade))
                     opened_count += 1
-                # If decision was False or position_size 0, we do not open trade (already logged reason above).
 
-            # Manage existing trades (update SL/TP, handle exits) and then pause until next scan
+            # Update and manage any open trades, then pause
             manage_trades()
             time.sleep(SCAN_INTERVAL)
 
         except Exception as e:
             print(f"❌ Main Loop Error: {e}")
             time.sleep(10)
-            
+
 if __name__ == "__main__":
     logging.info("🚀 Starting Spot AI Super Agent loop...")
     run_agent_loop()
