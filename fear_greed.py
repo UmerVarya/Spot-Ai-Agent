@@ -1,5 +1,12 @@
-# fear_greed.py
+import requests
 
 def get_fear_greed_index():
-    # Fallback static value (replace with API if needed)
-    return 60
+    try:
+        url = "https://api.alternative.me/fng/"
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        index_value = int(data['data'][0]['value'])
+        return index_value
+    except Exception as e:
+        print(f"⚠️ Failed to fetch Fear & Greed Index: {e}")
+        return 50
