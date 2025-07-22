@@ -32,8 +32,6 @@ def should_exit_early(trade, current_price, price_data):
     # 1. Price reversed significantly
     if direction == "long" and current_price < entry * (1 - EARLY_EXIT_THRESHOLD):
         return True, "Price dropped beyond early exit threshold"
-    if direction == "short" and current_price > entry * (1 + EARLY_EXIT_THRESHOLD):
-        return True, "Price rose beyond early exit threshold"
 
     # 2. Indicator Weakness
     indicators = calculate_indicators(price_data)
@@ -47,12 +45,7 @@ def should_exit_early(trade, current_price, price_data):
 
     if direction == "long" and rsi < 45:
         return True, f"Weak RSI: {rsi:.2f}"
-    if direction == "short" and rsi > 55:
-        return True, f"Weak RSI: {rsi:.2f}"
-
     if direction == "long" and macd_hist < 0:
-        return True, f"MACD histogram reversed: {macd_hist:.4f}"
-    if direction == "short" and macd_hist > 0:
         return True, f"MACD histogram reversed: {macd_hist:.4f}"
 
     # 3. Macro Shift
@@ -101,6 +94,7 @@ def manage_trades():
             adx = adx.iloc[-1]
 
         if direction == "long":
+            # Trailing take-profit hit conditions for long trades
             if not trade['status']['tp1'] and current_price >= tp1:
                 trade['status']['tp1'] = True
                 trade['sl'] = entry
@@ -114,7 +108,7 @@ def manage_trades():
             elif trade['status']['tp2'] and not trade['status']['tp3'] and current_price >= tp3:
                 trade['status']['tp3'] = True
                 trade['profit_riding'] = True  # ✅ Enable TP4 mode
-                trade['sl'] = tp2  # Set SL just below
+                trade['sl'] = tp2  # Move SL up to secure profits
                 print(f"🚀 {symbol} hit TP3 — Entering TP4 Profit Riding Mode")
                 continue
 
@@ -127,6 +121,7 @@ def manage_trades():
                 send_email(f"🛑 Stop Loss Hit: {symbol}", f"{trade}\n\n🧠 Narrative:\n{trade.get('narrative', 'N/A')}")
                 continue
 
+            # Tighten stop-loss if momentum fades after TP1 (no TP4 mode)
             if trade['status']['tp1'] and not trade.get('profit_riding'):
                 if adx < 15 or macd_hist < 0:
                     tightened_sl = round(current_price - atr, 6)
@@ -134,7 +129,7 @@ def manage_trades():
                         trade['sl'] = tightened_sl
                         print(f"🔒 SL tightened for {symbol} to {trade['sl']}")
 
-            # ✅ TP4 Profit Riding
+            # ✅ TP4 Profit Riding logic
             if trade.get("profit_riding"):
                 if adx > 25 and macd_hist > 0:
                     trail_sl = round(current_price - atr, 6)
@@ -150,43 +145,7 @@ def manage_trades():
                     send_email(f"✅ TP4 Exit: {symbol}", f"{trade}\n\n🧠 Narrative:\n{trade.get('narrative', 'N/A')}")
                     continue
 
-        # === SHORT logic remains unchanged
-        elif direction == "short":
-            if not trade['status']['tp1'] and current_price <= tp1:
-                trade['status']['tp1'] = True
-                trade['sl'] = entry
-                print(f"🎯 {symbol} hit TP1 — SL moved to Entry")
-
-            elif trade['status']['tp1'] and not trade['status']['tp2'] and current_price <= tp2:
-                trade['status']['tp2'] = True
-                trade['sl'] = tp1
-                print(f"🎯 {symbol} hit TP2 — SL moved to TP1")
-
-            elif trade['status']['tp2'] and not trade['status']['tp3'] and current_price <= tp3:
-                trade['status']['tp3'] = True
-                trade['exit_price'] = tp3
-                trade['exit_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                trade['outcome'] = "tp3"
-                log_trade_result(trade, outcome="tp3", exit_price=tp3)
-                send_email(f"✅ TP3 Hit: {symbol}", f"{trade}\n\n🧠 Narrative:\n{trade.get('narrative', 'N/A')}")
-                continue
-
-            elif current_price >= sl:
-                print(f"🛑 {symbol} hit Stop Loss!")
-                trade['exit_price'] = sl
-                trade['exit_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                trade['outcome'] = "sl"
-                log_trade_result(trade, outcome="sl", exit_price=sl)
-                send_email(f"🛑 Stop Loss Hit: {symbol}", f"{trade}\n\n🧠 Narrative:\n{trade.get('narrative', 'N/A')}")
-                continue
-
-            if trade['status']['tp1'] and not trade['status']['tp3']:
-                if adx < 15 or macd_hist > 0:
-                    tightened_sl = round(current_price + atr, 6)
-                    if tightened_sl < trade['sl']:
-                        trade['sl'] = tightened_sl
-                        print(f"🔒 SL tightened for {symbol} to {trade['sl']}")
-
+        # (No short trade logic needed for spot-only mode)
         updated_trades[symbol] = trade
 
     save_active_trades(updated_trades)
