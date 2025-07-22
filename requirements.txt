@@ -13,3 +13,6 @@ openai>=1.0.0
 feedparser
 groq
 streamlit-autorefresh
+lxml
+beautifulsoup4
+requests
