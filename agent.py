@@ -99,6 +99,7 @@ def run_agent_loop():
 
             top_symbols = get_top_symbols(limit=30)
             potential_trades = []  # collect potential trade signals
+            symbol_scores = {}  # save scores for context boosting
 
             for symbol in top_symbols:
                 # Enforce max concurrency but still evaluate all symbols for logging
@@ -113,6 +114,7 @@ def run_agent_loop():
                         continue
 
                     score, direction, position_size, pattern_name = evaluate_signal(price_data, symbol)
+                    symbol_scores[symbol] = {"score": score, "direction": direction}
                     # ✅ If no clear direction but score meets threshold, assume long (neutral sentiment fallback)
                     if direction is None and score >= 5.5:
                         print(f"⚠️ No clear direction for {symbol} despite score={score:.2f}. Forcing 'long' direction.")
@@ -234,6 +236,10 @@ def run_agent_loop():
 
             # Update and manage any open trades, then pause
             manage_trades()
+            # Save symbol_scores to JSON file
+            with open("symbol_scores.json", "w") as f:
+                json.dump(symbol_scores, f, indent=4)
+            print("💾 Saved symbol scores.")
             time.sleep(SCAN_INTERVAL)
 
         except Exception as e:
@@ -243,4 +249,3 @@ def run_agent_loop():
 if __name__ == "__main__":
     logging.info("🚀 Starting Spot AI Super Agent loop...")
     run_agent_loop()
-
