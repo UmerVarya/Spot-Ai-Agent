@@ -14,6 +14,53 @@ from orderflow import detect_aggression
 from pattern_memory import recall_pattern_confidence  # ✅ Pattern memory
 from datetime import datetime
 
+def simulate_slippage(executed_price: float, expected_price: float) -> float:
+    """
+    Calculate slippage as a percentage difference between the executed price and expected price.
+    Positive slippage means the executed price was worse for the trader (e.g., higher buy price or lower sell price),
+    negative slippage means an executed price better than expected.
+    Args:
+        executed_price (float): The price at which the trade was actually executed.
+        expected_price (float): The price that was anticipated (e.g., at signal generation time).
+    Returns:
+        float: Slippage percentage (rounded to 4 decimal places). 0.0 if expected_price is 0 or no slippage.
+    """
+    if expected_price == 0 or expected_price is None:
+        return 0.0  # Avoid division by zero or undefined expected price
+    slippage_pct = (executed_price - expected_price) / expected_price * 100
+    return round(slippage_pct, 4)
+
+def estimate_commission(symbol: str, quantity: int, price: float, broker: str = "generic") -> float:
+    """
+    Estimate the commission cost for a trade based on the specified broker model.
+    - "generic": A generic brokerage with $0.005 per share and $1 minimum commission.
+    - "free": Commission-free trading (e.g., many crypto exchanges or zero-commission brokers).
+    - "percent": Commission as 0.1% of trade value with $1 minimum.
+    Args:
+        symbol (str): The trading symbol (not used in calculation for generic model, but left for extensibility).
+        quantity (int): Number of shares or units traded.
+        price (float): Price per share or unit.
+        broker (str): Commission model ("generic", "free", "percent").
+    Returns:
+        float: Estimated commission in dollars for the trade.
+    """
+    # Calculate commission based on the chosen broker model
+    if broker == "generic":
+        cost_per_unit = 0.005  # $0.005 per share/unit
+        commission = quantity * cost_per_unit
+        return round(max(commission, 1.0), 4)  # enforce a minimum of $1.00
+
+    elif broker == "free":
+        return 0.0  # no commission
+
+    elif broker == "percent":
+        commission = quantity * price * 0.001  # 0.1% of trade value
+        return round(max(commission, 1.0), 4)  # minimum $1.00
+
+    else:
+        # If an unknown broker model is passed, default to no commission
+        return 0.0
+
 def get_current_session():
     now = datetime.utcnow().hour
     if 0 <= now < 8:
