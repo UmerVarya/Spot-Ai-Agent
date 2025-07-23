@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 load_dotenv()
 import json
 import threading
-
+from fetch_news import fetch_news
+from trade_utils import simulate_slippage, estimate_commission
 from trade_utils import get_top_symbols, get_price_data, evaluate_signal
 from trade_manager import manage_trades, load_active_trades, save_active_trades
 from notifier import send_email
@@ -22,9 +23,24 @@ from brain import should_trade
 from sentiment import get_macro_sentiment
 from btc_dominance import get_btc_dominance
 from fear_greed import get_fear_greed_index
-from fetch_news import run_news_fetcher
 from orderflow import detect_aggression
 from drawdown_guard import is_trading_blocked  # ✅ Drawdown Guard
+
+class Agent:
+    def __init__(self, symbol, starting_balance=10000.0, trade_quantity=1):
+        """
+        Initialize the trading agent.
+        Args:
+            symbol (str): The trading symbol (e.g., stock ticker or crypto pair).
+            starting_balance (float): Starting account balance for the agent.
+            trade_quantity (int): Default quantity of shares/units to trade.
+        """
+        self.symbol = symbol
+        self.balance = starting_balance
+        self.trade_quantity = trade_quantity
+        self.in_position = False      # Whether currently holding an open position
+        self.entry_price = None       # Price at which current position was entered
+        self.total_profit = 0.0       # Cumulative profit/loss
 
 MAX_ACTIVE_TRADES = 2
 SCAN_INTERVAL = 15   # scan more frequently (15s)
@@ -245,7 +261,97 @@ def run_agent_loop():
         except Exception as e:
             print(f"❌ Main Loop Error: {e}")
             time.sleep(10)
+def run(self):
+        """
+        Main loop to run the trading agent continuously.
+        Continuously checks for trade signals and executes trades with risk management.
+        """
+        print(f"Starting agent for {self.symbol}...")
+        while True:
+            # 1. Fetch latest market data and generate trade signal (buy/sell/hold)
+            signal = self.generate_trade_signal()  # (Assume this method exists and is unchanged)
+            # ... (any other pre-trade logic remains unchanged) ...
 
+            # 2. Incorporate news-based filter before executing any trade
+            if signal is not None and signal in ["BUY", "SELL"]:
+                news_articles = fetch_news(self.symbol)
+                negative_news = False
+                positive_news = False
+                # Analyze recent news headlines for sentiment keywords
+                for article in news_articles:
+                    title = article.get('title', '').lower()
+                    if any(word in title for word in ["plunge", "tumble", "crash", "fraud", "scandal", "down", "falls", "drops", "misses"]):
+                        negative_news = True
+                    if any(word in title for word in ["soar", "surge", "jump", "rise", "record high", "beats", "profit", "upward"]):
+                        positive_news = True
+                # If buying but news is negative, skip the trade; if selling (or shorting) but news is positive, skip.
+                if signal == "BUY" and negative_news:
+                    print(f"Negative news detected for {self.symbol}. Skipping BUY signal.")
+                    signal = None
+                elif signal == "SELL" and positive_news:
+                    print(f"Positive news detected for {self.symbol}. Skipping SELL signal.")
+                    signal = None
+
+            # 3. Execute trade based on signal (if not filtered out)
+            if signal == "BUY" and not self.in_position:
+                current_price = self.get_current_price()  # (Assume this method provides latest market price)
+                quantity = self.trade_quantity
+                # Place buy order (simulate immediate execution at current_price)
+                executed_price = current_price
+                self.in_position = True
+                self.entry_price = executed_price
+                print(f"Entered BUY position at {executed_price:.2f} for {quantity} units of {self.symbol}")
+                # Calculate slippage (if any) compared to intended price (current_price here)
+                slippage_pct = simulate_slippage(executed_price, current_price)
+                # Calculate commission for the trade
+                commission_cost = estimate_commission(self.symbol, quantity, executed_price)
+                # Update balance for commission cost
+                self.balance -= commission_cost
+                self.total_profit -= commission_cost  # account for commission as an immediate cost
+                # Log slippage and commission
+                if slippage_pct != 0:
+                    print(f"Trade slippage: {slippage_pct:+.4f}% on BUY order.")
+                print(f"Commission paid: ${commission_cost:.2f}")
+
+            elif signal == "SELL" and self.in_position:
+                current_price = self.get_current_price()  # current market price at which we'll sell
+                quantity = self.trade_quantity
+                # Place sell order (simulate execution at current_price)
+                executed_price = current_price
+                print(f"Executing SELL at {executed_price:.2f} for {quantity} units of {self.symbol}")
+                # Calculate slippage (if any) for the sell relative to intended price
+                slippage_pct = simulate_slippage(executed_price, current_price)
+                # Calculate commission for the trade
+                commission_cost = estimate_commission(self.symbol, quantity, executed_price)
+                # Compute profit from the trade (difference between sell and buy prices)
+                trade_profit = 0.0
+                if self.entry_price is not None:
+                    # Profit (or loss) = (sell_price - entry_price) * quantity
+                    trade_profit = (executed_price - self.entry_price) * quantity
+                # Subtract commission cost from profit and update balance and total_profit
+                trade_profit -= commission_cost
+                self.balance += executed_price * quantity  # add proceeds from selling back to balance
+                self.balance -= commission_cost           # subtract commission from balance
+                self.total_profit += trade_profit
+                # Reset position
+                self.in_position = False
+                self.entry_price = None
+                # Log results of the trade
+                if slippage_pct != 0:
+                    print(f"Trade slippage: {slippage_pct:+.4f}% on SELL order.")
+                print(f"Commission paid: ${commission_cost:.2f}")
+                if trade_profit >= 0:
+                    print(f"Trade closed with profit: ${trade_profit:.2f}")
+                else:
+                    print(f"Trade closed with loss: ${-trade_profit:.2f}")
+                print(f"Total cumulative profit: ${self.total_profit:.2f}")
+
+            # 4. (Optional) Implement stop-loss or take-profit checks if needed
+            # ... (any existing risk management logic remains unchanged) ...
+
+            # 5. Wait for a short interval before next iteration (to avoid high-frequency churn)
+            time.sleep(1)  # Adjust sleep as needed for desired trading frequency
+            
 if __name__ == "__main__":
     logging.info("🚀 Starting Spot AI Super Agent loop...")
     run_agent_loop()
