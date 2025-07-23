@@ -1,13 +1,66 @@
 import os
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
 from groq import Groq
 import json
 from dotenv import load_dotenv
 import re
-
+import time
+from datetime import datetime, timedelta
 load_dotenv()
+
+# Configuration: News API settings (ensure to insert your API key)
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "YOUR_NEWSAPI_KEY_HERE")
+# Define how frequently to fetch fresh news (in seconds)
+NEWS_REFRESH_INTERVAL = 5 * 60  # 5 minutes
+
+# Module-level cache for news results and last fetch time
+_last_news_fetch = 0.0
+_cached_news = []
+
+def fetch_news(symbol: str):
+    """
+    Fetch recent news articles for the given symbol, with caching to avoid frequent API calls.
+    Uses NewsAPI to retrieve the latest news related to the symbol. If called again within a short interval,
+    it will return cached results instead of making a new API request.
+    Args:
+        symbol (str): The keyword or ticker symbol to search news for.
+    Returns:
+        list: A list of news articles (each article is a dict with keys like 'title', 'description', 'url', etc.).
+    """
+    global _last_news_fetch, _cached_news
+    # Check if we recently fetched news and can use cached data
+    current_time = time.time()
+    if _last_news_fetch and (current_time - _last_news_fetch < NEWS_REFRESH_INTERVAL) and _cached_news:
+        return _cached_news
+
+    # Prepare NewsAPI request for latest news about the symbol
+    query = symbol
+    # Limit search to recent news (last day) and English language for relevance
+    from_date = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+    url = (
+        f"https://newsapi.org/v2/everything?q={query}&from={from_date}"
+        f"&sortBy=publishedAt&language=en&pageSize=5&apiKey={NEWS_API_KEY}"
+    )
+
+    try:
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        print(f"Warning: Failed to fetch news for {symbol} - {e}")
+        # If the fetch fails, return the last cached news if available, otherwise empty list
+        return _cached_news if _cached_news else []
+
+    # Parse the response data
+    articles = data.get("articles", [])
+    # Update cache
+    _cached_news = articles
+    _last_news_fetch = current_time
+
+    return articles
+
+# ... (any additional helper functions for news processing remain unchanged or can be added here) ...
 
 # === Fetch Crypto News ===
 def fetch_crypto_news():
