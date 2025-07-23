@@ -61,6 +61,12 @@ def run_agent_loop():
     threading.Thread(target=auto_run_news, daemon=True).start()
     threading.Thread(target=run_streamlit, daemon=True).start()
 
+    # Ensure symbol_scores.json exists
+    if not os.path.exists("symbol_scores.json"):
+        with open("symbol_scores.json", "w") as f:
+            json.dump({}, f)
+        print("ℹ️ Initialized empty symbol_scores.json")
+
     while True:
         try:
             print(f"=== Scan @ {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
@@ -115,7 +121,7 @@ def run_agent_loop():
 
             top_symbols = get_top_symbols(limit=30)
             potential_trades = []  # collect potential trade signals
-            symbol_scores = {}  # save scores for context boosting
+            symbol_scores = {}     # save scores for context boosting
 
             for symbol in top_symbols:
                 # Enforce max concurrency but still evaluate all symbols for logging
@@ -220,7 +226,7 @@ def run_agent_loop():
                     sl = round(entry_price - entry_price * 0.01, 6)
                     tp1 = round(entry_price + entry_price * 0.01, 6)
                     tp2 = round(entry_price + entry_price * 0.015, 6)
-                    tp3 = round(entry_price + entry_price * 0.025, 6)
+                    tp3 = round entry_price + entry_price * 0.025, 6)
 
                     new_trade = {
                         "symbol": symbol,
@@ -252,106 +258,22 @@ def run_agent_loop():
 
             # Update and manage any open trades, then pause
             manage_trades()
-            # Save symbol_scores to JSON file
+            # Save symbol_scores to JSON (persistent)
+            try:
+                with open("symbol_scores.json", "r") as f:
+                    old_data = json.load(f)
+            except FileNotFoundError:
+                old_data = {}
+            old_data.update(symbol_scores)
             with open("symbol_scores.json", "w") as f:
-                json.dump(symbol_scores, f, indent=4)
-            print("💾 Saved symbol scores.")
+                json.dump(old_data, f, indent=4)
+            print("💾 Saved symbol scores (persistent memory updated).")
             time.sleep(SCAN_INTERVAL)
 
         except Exception as e:
             print(f"❌ Main Loop Error: {e}")
             time.sleep(10)
-def run(self):
-        """
-        Main loop to run the trading agent continuously.
-        Continuously checks for trade signals and executes trades with risk management.
-        """
-        print(f"Starting agent for {self.symbol}...")
-        while True:
-            # 1. Fetch latest market data and generate trade signal (buy/sell/hold)
-            signal = self.generate_trade_signal()  # (Assume this method exists and is unchanged)
-            # ... (any other pre-trade logic remains unchanged) ...
 
-            # 2. Incorporate news-based filter before executing any trade
-            if signal is not None and signal in ["BUY", "SELL"]:
-                news_articles = fetch_news(self.symbol)
-                negative_news = False
-                positive_news = False
-                # Analyze recent news headlines for sentiment keywords
-                for article in news_articles:
-                    title = article.get('title', '').lower()
-                    if any(word in title for word in ["plunge", "tumble", "crash", "fraud", "scandal", "down", "falls", "drops", "misses"]):
-                        negative_news = True
-                    if any(word in title for word in ["soar", "surge", "jump", "rise", "record high", "beats", "profit", "upward"]):
-                        positive_news = True
-                # If buying but news is negative, skip the trade; if selling (or shorting) but news is positive, skip.
-                if signal == "BUY" and negative_news:
-                    print(f"Negative news detected for {self.symbol}. Skipping BUY signal.")
-                    signal = None
-                elif signal == "SELL" and positive_news:
-                    print(f"Positive news detected for {self.symbol}. Skipping SELL signal.")
-                    signal = None
-
-            # 3. Execute trade based on signal (if not filtered out)
-            if signal == "BUY" and not self.in_position:
-                current_price = self.get_current_price()  # (Assume this method provides latest market price)
-                quantity = self.trade_quantity
-                # Place buy order (simulate immediate execution at current_price)
-                executed_price = current_price
-                self.in_position = True
-                self.entry_price = executed_price
-                print(f"Entered BUY position at {executed_price:.2f} for {quantity} units of {self.symbol}")
-                # Calculate slippage (if any) compared to intended price (current_price here)
-                slippage_pct = simulate_slippage(executed_price, current_price)
-                # Calculate commission for the trade
-                commission_cost = estimate_commission(self.symbol, quantity, executed_price)
-                # Update balance for commission cost
-                self.balance -= commission_cost
-                self.total_profit -= commission_cost  # account for commission as an immediate cost
-                # Log slippage and commission
-                if slippage_pct != 0:
-                    print(f"Trade slippage: {slippage_pct:+.4f}% on BUY order.")
-                print(f"Commission paid: ${commission_cost:.2f}")
-
-            elif signal == "SELL" and self.in_position:
-                current_price = self.get_current_price()  # current market price at which we'll sell
-                quantity = self.trade_quantity
-                # Place sell order (simulate execution at current_price)
-                executed_price = current_price
-                print(f"Executing SELL at {executed_price:.2f} for {quantity} units of {self.symbol}")
-                # Calculate slippage (if any) for the sell relative to intended price
-                slippage_pct = simulate_slippage(executed_price, current_price)
-                # Calculate commission for the trade
-                commission_cost = estimate_commission(self.symbol, quantity, executed_price)
-                # Compute profit from the trade (difference between sell and buy prices)
-                trade_profit = 0.0
-                if self.entry_price is not None:
-                    # Profit (or loss) = (sell_price - entry_price) * quantity
-                    trade_profit = (executed_price - self.entry_price) * quantity
-                # Subtract commission cost from profit and update balance and total_profit
-                trade_profit -= commission_cost
-                self.balance += executed_price * quantity  # add proceeds from selling back to balance
-                self.balance -= commission_cost           # subtract commission from balance
-                self.total_profit += trade_profit
-                # Reset position
-                self.in_position = False
-                self.entry_price = None
-                # Log results of the trade
-                if slippage_pct != 0:
-                    print(f"Trade slippage: {slippage_pct:+.4f}% on SELL order.")
-                print(f"Commission paid: ${commission_cost:.2f}")
-                if trade_profit >= 0:
-                    print(f"Trade closed with profit: ${trade_profit:.2f}")
-                else:
-                    print(f"Trade closed with loss: ${-trade_profit:.2f}")
-                print(f"Total cumulative profit: ${self.total_profit:.2f}")
-
-            # 4. (Optional) Implement stop-loss or take-profit checks if needed
-            # ... (any existing risk management logic remains unchanged) ...
-
-            # 5. Wait for a short interval before next iteration (to avoid high-frequency churn)
-            time.sleep(1)  # Adjust sleep as needed for desired trading frequency
-            
 if __name__ == "__main__":
     logging.info("🚀 Starting Spot AI Super Agent loop...")
     run_agent_loop()
