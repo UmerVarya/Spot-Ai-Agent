@@ -14,11 +14,11 @@ from dotenv import load_dotenv
 load_dotenv()
 import json
 import threading
-from fetch_news import fetch_news
+from fetch_news import fetch_news, run_news_fetcher
 from trade_utils import simulate_slippage, estimate_commission
 from trade_utils import get_top_symbols, get_price_data, evaluate_signal
 from trade_manager import manage_trades, load_active_trades, save_active_trades
-from notifier import send_email
+from notifier import send_email, log_rejection
 from brain import should_trade
 from sentiment import get_macro_sentiment
 from btc_dominance import get_btc_dominance
@@ -219,6 +219,7 @@ def run_agent_loop():
                 else:
                     reason = decision_obj.get("reason", "Unknown reason")
                     print(f"🤖 Brain Decision for {symbol}: False | Confidence: {final_conf:.2f}\nReason: {reason}\n")
+                    log_rejection(symbol, reason)
 
                 # If brain approves the trade, simulate executing it (paper trade)
                 if decision and direction == "long" and position_size > 0:
@@ -226,7 +227,7 @@ def run_agent_loop():
                     sl = round(entry_price - entry_price * 0.01, 6)
                     tp1 = round(entry_price + entry_price * 0.01, 6)
                     tp2 = round(entry_price + entry_price * 0.015, 6)
-                    tp3 = round entry_price + entry_price * 0.025, 6)
+                    tp3 = round(entry_price + entry_price * 0.025, 6)
 
                     new_trade = {
                         "symbol": symbol,
