@@ -2,12 +2,6 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logging.info("agent.py starting...")
 
-try:
-    # Your existing code here
-    pass
-except Exception as e:
-    logging.error(f"Unhandled exception: {e}", exc_info=True)
-
 import time
 import os
 from dotenv import load_dotenv
