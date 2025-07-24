@@ -140,14 +140,10 @@ def build_news_prompt(events):
     filtered_events = []
     prompt = (
         "You're a macro risk analyst for crypto markets.\n"
-        "Evaluate the following events for potential impact on crypto within the next 6 hours.\n"
-        "Return a JSON array of objects like:\n"
-        "[\n"
-        "  {\"safe\": true, \"sensitivity\": 2, \"reason\": \"...\"},\n"
-        "  {\"safe\": false, \"sensitivity\": 9, \"reason\": \"...\"}\n"
-        "]\n\n"
-        "Here is the list of events (in JSON):\n\n"
-        "```json\n"
+        "Evaluate the following events for their 6-hour crypto market impact.\n"
+        "Respond ONLY with a JSON array of objects, no extra text or markdown.\n"
+        "Each object should have: \"safe\" (bool), \"sensitivity\" (1-10), \"reason\" (string).\n\n"
+        "Events JSON:\n```json\n"
     )
 
     for event in events:
@@ -179,30 +175,48 @@ def analyze_news_with_llm(events):
         raw_reply = chat_completion.choices[0].message.content
         print("\n🔍 Raw LLM Reply:\n", raw_reply)
 
-        # Extract JSON array from response
-        json_match = re.search(r"\[\s*{.*?}\s*\]", raw_reply, re.DOTALL)
-        if json_match:
-            parsed = json.loads(json_match.group(0))
-            if not parsed:
-                return {
-                    "safe": True,
-                    "sensitivity": 0,
-                    "reason": "No actionable events detected."
-                }
+        parsed = None
+        # 1. Try direct JSON parse
+        try:
+            parsed = json.loads(raw_reply.strip())
+        except Exception:
+            # 2. Try JSON within fenced code block
+            match = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", raw_reply)
+            if match:
+                try:
+                    parsed = json.loads(match.group(1))
+                except Exception:
+                    parsed = None
+            # 3. Fallback: first '[' to last ']'
+            if parsed is None:
+                start = raw_reply.find('[')
+                end = raw_reply.rfind(']')
+                if start != -1 and end != -1:
+                    try:
+                        parsed = json.loads(raw_reply[start:end+1])
+                    except Exception:
+                        parsed = None
 
-            high_risk = [e for e in parsed if not e["safe"] and e["sensitivity"] >= 7]
-            return {
-                "safe": len(high_risk) == 0,
-                "sensitivity": max(e["sensitivity"] for e in parsed),
-                "reason": high_risk[0]["reason"] if high_risk else "No major risk detected."
-            }
-
-        else:
+        if parsed is None:
             return {
                 "safe": True,
                 "sensitivity": 0,
-                "reason": "Failed to extract JSON block from LLM reply."
+                "reason": "Failed to parse LLM JSON reply."
             }
+
+        if not parsed:
+            return {
+                "safe": True,
+                "sensitivity": 0,
+                "reason": "No actionable events detected."
+            }
+
+        high_risk = [e for e in parsed if not e["safe"] and e["sensitivity"] >= 7]
+        return {
+            "safe": len(high_risk) == 0,
+            "sensitivity": max(e["sensitivity"] for e in parsed),
+            "reason": high_risk[0]["reason"] if high_risk else "No major risk detected."
+        }
 
     except Exception as e:
         print("⚠️ Groq LLM analysis failed:", e)
