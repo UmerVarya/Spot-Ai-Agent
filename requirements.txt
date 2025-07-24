@@ -15,4 +15,3 @@ groq
 streamlit-autorefresh
 lxml
 beautifulsoup4
-requests
