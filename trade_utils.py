@@ -72,7 +72,6 @@ def get_current_session():
 
 client = Client()
 
-# === Indicator Calculation ===
 def calculate_indicators(df):
     df = df.copy()
     df = df.replace([np.inf, -np.inf], np.nan)
@@ -84,8 +83,11 @@ def calculate_indicators(df):
     df['macd'] = macd.macd_diff()  # MACD histogram (diff between MACD and signal)
     df['macd_signal'] = macd.macd_signal()
     df['rsi'] = RSIIndicator(df['close'], window=14).rsi()
-    adx = ADXIndicator(df['high'], df['low'], df['close'], window=14)
-    df['adx'] = adx.adx()
+    # ✅ Suppress RuntimeWarnings for ADX calculation
+    with np.errstate(invalid='ignore', divide='ignore'):
+        adx_indicator = ADXIndicator(df['high'], df['low'], df['close'], window=14)
+        df['adx'] = adx_indicator.adx()
+    df['adx'] = df['adx'].fillna(0)  # ✅ Fill NaNs to suppress warnings
     bb = BollingerBands(df['close'], window=20, window_dev=2)
     df['bb_upper'] = bb.bollinger_hband()
     df['bb_lower'] = bb.bollinger_lband()
@@ -223,7 +225,10 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
         ema_long = EMAIndicator(close, window=50).ema_indicator()
         macd_line = MACD(close).macd_diff()  # MACD histogram
         rsi = RSIIndicator(close, window=14).rsi()
-        adx = ADXIndicator(high=high, low=low, close=close).adx().fillna(0)
+        # ✅ Suppress RuntimeWarnings for ADX calculation
+        with np.errstate(invalid='ignore', divide='ignore'):
+            adx_series = ADXIndicator(high=high, low=low, close=close, window=14).adx()
+        adx = adx_series.fillna(0)  # ✅ Fill NaNs to avoid warnings
         bb = BollingerBands(close=close, window=20, window_dev=2)
         vwma_calc = VolumeWeightedAveragePrice(high=high, low=low, close=close, volume=volume, window=20)
         vwma = vwma_calc.volume_weighted_average_price()
@@ -391,9 +396,13 @@ def evaluate_signal(price_data, symbol="", sentiment_bias="neutral"):
         zones = zones.to_dict() if isinstance(zones, pd.Series) else (zones or {"support": [], "resistance": []})
         current_price = float(close.iloc[-1])
         if direction == "long":
+            # ✅ Allow high-confidence trade even if near resistance
             if is_price_near_zone(current_price, zones, 'resistance', 0.005):
-                print(f"[ZONE FILTER] Skipping long trade near resistance at {current_price}")
-                return 0, None, 0, None
+                if normalized_score >= 7.0:
+                    print(f"[ZONE FILTER] Price near resistance at {current_price} overridden by high score {normalized_score:.2f} (trade allowed).")
+                else:
+                    print(f"[ZONE FILTER] Skipping long trade near resistance at {current_price}")
+                    return 0, None, 0, None
             if not is_price_near_zone(current_price, zones, 'support', 0.015 if sentiment_bias == "bullish" else 0.01):
                 print(f"[ZONE FILTER] Skipping long trade with no nearby support at {current_price}")
                 return 0, None, 0, None
