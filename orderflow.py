@@ -4,9 +4,16 @@ def detect_aggression(df: pd.DataFrame) -> str:
     """
     Detect order flow aggression based on price and volume behavior.
 
-    Returns:
-        "bullish" if there's clear aggressive buying,
-        "bearish" if there's clear aggressive selling,
+    A bullish scenario occurs when price is rising and the most recent candle's volume is
+    meaningfully above the recent average. Likewise, a bearish scenario is when price
+    drops under the same volume conditions.  This function returns strings that are
+    compatible with the downstream trading logic used by agent.py and trade_utils.evaluate_signal.
+
+    Returns
+    -------
+    str
+        "buyers in control" if there's clear aggressive buying,
+        "sellers in control" if there's clear aggressive selling,
         "neutral" otherwise.
     """
     if df is None or df.empty or len(df) < 5:
@@ -26,8 +33,8 @@ def detect_aggression(df: pd.DataFrame) -> str:
     bearish = price_change < 0 and recent['volume'].iloc[-1] > avg_volume * 1.2
 
     if bullish:
-        return "bullish"
+        return "buyers in control"
     elif bearish:
-        return "bearish"
+        return "sellers in control"
     else:
         return "neutral"
