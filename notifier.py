@@ -1,5 +1,7 @@
 import smtplib
 import os
+import csv
+from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
@@ -11,6 +13,8 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
+
+__all__ = ["send_email", "log_rejection"]
 
 def send_email(subject, trade_details):
     try:
@@ -50,3 +54,30 @@ def send_email(subject, trade_details):
 
     except Exception as e:
         print(f"❌ Email sending failed: {e}")
+
+
+def log_rejection(symbol: str, reason: str) -> None:
+    """Append a rejected trade and reason to ``rejected_trades.csv``.
+
+    Parameters
+    ----------
+    symbol : str
+        The trading symbol that was rejected.
+    reason : str
+        Explanation for why the trade was rejected.
+    """
+
+    log_file = "rejected_trades.csv"
+    headers = ["timestamp", "symbol", "reason"]
+    row = {
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": symbol,
+        "reason": reason,
+    }
+
+    file_exists = os.path.isfile(log_file)
+    with open(log_file, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
