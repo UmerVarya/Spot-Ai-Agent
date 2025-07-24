@@ -1,7 +1,7 @@
 """
 Helper module to interact with the Groq LLM API for trade decision support.
 
-This module defines a single function, `get_llm_judgment`, which sends a prompt to
+This module defines a single function, ``get_llm_judgment``, which sends a prompt to
 Groq's hosted LLaMA3 model and returns the text of its response.  The prompt is
 augmented with instructions so that the language model returns a simple yes/no
 decision, a numerical confidence rating (0–10) and a brief reason.  Downstream
@@ -21,11 +21,12 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
+
 def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 500) -> str:
     """
     Query Groq LLM with a prompt asking for trade advice.
 
-    The language model is instructed to answer with `Yes` or `No` to indicate
+    The language model is instructed to answer with ``Yes`` or ``No`` to indicate
     whether the trade should be taken, followed by a numeric confidence rating
     from 0 to 10 and a brief reason.  The rating allows the calling code to
     combine the model's perceived confidence with its own quantitative score.
