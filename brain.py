@@ -1,4 +1,5 @@
 import random
+import re
 from sentiment import get_macro_sentiment
 from groq_llm import get_llm_judgment
 from confidence_guard import get_adaptive_conf_threshold
@@ -10,6 +11,15 @@ from narrative_builder import generate_trade_narrative  # ✅ Corrected import
 symbol_context_cache = {}
 
 def should_trade(symbol, score, direction, indicators, session, pattern_name, orderflow, sentiment, macro_news):
+    """
+    Decide whether to take a long trade based on quantitative metrics and LLM guidance.
+
+    This function aggregates various signals—technical indicator scores, sentiment bias,
+    pattern memory, historical win rates, and order‑flow cues—into a unified
+    confidence score.  It then queries a language model for a sanity check,
+    optionally blending the model's confidence rating with its own.  A narrative
+    explaining the rationale is generated on success.
+    """
     try:
         # === Sentiment interpretation ===
         sentiment_bias = sentiment.get("bias", "neutral")
@@ -23,8 +33,11 @@ def should_trade(symbol, score, direction, indicators, session, pattern_name, or
                 "reason": "Macro news unsafe: " + macro_news.get("reason", "unknown")
             }
 
-        # === Adaptive Score Threshold (base threshold 5.5) ===
-        base_threshold = 5.5
+        # === Adaptive Score Threshold ===
+        # Use historical performance to adapt the base threshold.  If the learning log
+        # contains enough data, get_adaptive_conf_threshold() will return a
+        # context‑aware value.  Otherwise fall back to 5.5.
+        base_threshold = get_adaptive_conf_threshold() or 5.5
         if sentiment_bias == "bullish":
             score_threshold = base_threshold - 0.3  # slightly easier if bullish sentiment
         elif sentiment_bias == "bearish":
@@ -123,9 +136,25 @@ def should_trade(symbol, score, direction, indicators, session, pattern_name, or
             f"Sentiment: {sentiment_bias} (Confidence: {sentiment_confidence})\n"
             f"Pattern: {pattern_name}\n"
             f"Indicators: RSI {indicators.get('rsi', 0):.1f}, MACD {indicators.get('macd', 0):.4f}, ADX {indicators.get('adx', 0):.1f}\n"
-            "Should we take this trade? Answer with Yes or No and a brief reason."
+            "Should we take this trade?"
         )
         llm_response = get_llm_judgment(advisor_prompt)
+
+        # Extract numeric rating from LLM response if provided
+        advisor_rating = None
+        if llm_response:
+            match = re.search(r'(\d+(?:\.\d+)?)', llm_response)
+            if match:
+                try:
+                    advisor_rating = float(match.group(1))
+                except ValueError:
+                    advisor_rating = None
+        if advisor_rating is not None:
+            # Clamp rating to [0,10] and blend with existing confidence
+            advisor_rating = max(0.0, min(advisor_rating, 10.0))
+            final_confidence = round((final_confidence + advisor_rating) / 2.0, 2)
+
+        # Check LLM decision (must start with "yes")
         if not llm_response or not llm_response.strip().lower().startswith("yes"):
             reason_text = llm_response.strip() if llm_response else "No response from LLM advisor"
             return {
@@ -166,4 +195,3 @@ def should_trade(symbol, score, direction, indicators, session, pattern_name, or
             "confidence": 0.0,
             "reason": f"Error in should_trade(): {e}"
         }
-
