@@ -10,6 +10,7 @@ from narrative_builder import generate_trade_narrative  # ✅ Corrected import
 # Global symbol context memory
 symbol_context_cache = {}
 
+
 def should_trade(symbol, score, direction, indicators, session, pattern_name, orderflow, sentiment, macro_news):
     """
     Decide whether to take a long trade based on quantitative metrics and LLM guidance.
@@ -36,10 +37,13 @@ def should_trade(symbol, score, direction, indicators, session, pattern_name, or
         # === Adaptive Score Threshold ===
         # Use historical performance to adapt the base threshold.  If the learning log
         # contains enough data, get_adaptive_conf_threshold() will return a
-        # context‑aware value.  Otherwise fall back to 5.5.
-        base_threshold = get_adaptive_conf_threshold() or 5.5
+        # context‑aware value.  Otherwise fall back to a lower default (4.5).  A
+        # slightly lower base allows more trades to be considered while still
+        # leaving room for further confidence gating later.  Sentiment bias
+        # adjusts this threshold up/down modestly.
+        base_threshold = get_adaptive_conf_threshold() or 4.5
         if sentiment_bias == "bullish":
-            score_threshold = base_threshold - 0.3  # slightly easier if bullish sentiment
+            score_threshold = base_threshold - 0.3  # easier if bullish sentiment
         elif sentiment_bias == "bearish":
             score_threshold = base_threshold + 0.3  # stricter if bearish sentiment
         else:
@@ -120,7 +124,10 @@ def should_trade(symbol, score, direction, indicators, session, pattern_name, or
                 "confidence": final_confidence,
                 "reason": f"Score {score:.2f} below threshold {score_threshold:.2f}"
             }
-        if final_confidence < 5.5:
+        # Allow lower confidence trades to progress to the LLM if they still
+        # exceed a more permissive floor.  This encourages exploration of
+        # promising but not perfect setups.  Trades below 4.5 are vetoed here.
+        if final_confidence < 4.5:
             return {
                 "decision": False,
                 "confidence": final_confidence,
