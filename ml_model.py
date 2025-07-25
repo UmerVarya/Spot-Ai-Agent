@@ -32,7 +32,14 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 
-from .confidence import calculate_historical_confidence  # for potential feature expansion
+# Optional: import confidence calculation if available.  We avoid
+# relative imports here because this module may be imported as a
+# top-level module outside of a package context.  If needed, you can
+# import calculate_historical_confidence from confidence directly.
+try:
+    from confidence import calculate_historical_confidence  # noqa: F401
+except Exception:
+    calculate_historical_confidence = None  # type: ignore
 
 # Path constants
 ROOT_DIR = os.path.dirname(__file__)
