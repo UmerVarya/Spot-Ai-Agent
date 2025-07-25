@@ -29,7 +29,9 @@ import pandas as pd
 
 from typing import List, Dict
 
-from .trade_utils import get_price_data
+# Note: Do not use relative import here because this module may be executed
+# as a top-level module.  Import directly from trade_utils.
+from trade_utils import get_price_data
 
 
 def _compute_returns(symbol: str, lookback: int = 100) -> pd.Series | None:
