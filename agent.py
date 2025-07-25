@@ -177,21 +177,26 @@ def run_agent_loop() -> None:
                 decision = brain_decision.get("decision", False)
                 conf = brain_decision.get("confidence", 0.0)
                 narrative = brain_decision.get("narrative", "")
-                # Apply ML probability if model available
+                # Apply ML probability if model available.  The predict_success_probability
+                # function accepts individual features rather than a single list.  Pass
+                # score, confidence, session id (0=Asia,1=Europe,2=US), btc dominance,
+                # fear‑greed index, sentiment confidence and pattern length.  Default
+                # probability is 0.5 if the model is missing or errors.
                 ml_prob = 0.5
                 if predict_success_probability is not None:
                     try:
-                        # Feature vector: score, conf, session id (0=Asia,1=Europe,2=US), btc_d, fg, sentiment_conf
                         session_map = {"Asia": 0, "Europe": 1, "US": 2}
-                        features = [
+                        session_id = session_map.get(session, 2)
+                        pattern_len = len(pattern) if pattern else 0
+                        ml_prob = predict_success_probability(
                             score,
                             conf,
-                            session_map.get(session, 2),
+                            session_id,
                             btc_d,
                             fg,
                             sentiment_conf,
-                        ]
-                        ml_prob = predict_success_probability(features)
+                            pattern_len
+                        )
                     except Exception as e:
                         logger.warning(f"ML prediction error: {e}")
                         ml_prob = 0.5
@@ -234,7 +239,17 @@ def run_agent_loop() -> None:
                 }
                 # Persist trade and log open
                 active_trades[symbol] = new_trade
-                save_active_trades(active_trades)
+                # Save via trade_manager; on permission error, fall back to /tmp
+                try:
+                    save_active_trades(active_trades)
+                except Exception as e:
+                    # Attempt to write directly to configured file or /tmp
+                    fallback_path = os.getenv("ACTIVE_TRADES_FILE", "/tmp/active_trades.json")
+                    try:
+                        with open(fallback_path, "w") as f:
+                            json.dump(active_trades, f, indent=2)
+                    except Exception as e2:
+                        logger.warning(f"Unable to save active trades: {e2}")
                 log_trade_result(new_trade, outcome="open")
                 send_email(f"New Trade Opened: {symbol}", json.dumps(new_trade, indent=2))
                 logger.info(f"✅ Opened trade {symbol} @ {entry_price} | ML={ml_prob:.2f} | Conf={conf:.2f}")
