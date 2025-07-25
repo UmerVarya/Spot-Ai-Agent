@@ -19,6 +19,8 @@ from sentiment import get_macro_sentiment
 from btc_dominance import get_btc_dominance
 from fear_greed import get_fear_greed_index
 from orderflow import detect_aggression
+from diversify import select_diversified_signals  # diversification helper
+from ml_model import predict_success_probability  # ML success predictor
 from drawdown_guard import is_trading_blocked  # ✅ Drawdown Guard
 
 # Maximum concurrent open trades
@@ -107,7 +109,7 @@ def run_agent_loop():
             top_symbols = get_top_symbols(limit=30)
             # Determine the current market session for logging and learning
             session = get_market_session()
-            potential_trades = []  # collect potential trade signals
+            potential_trades = []  # collect potential trade signals (unsorted)
             symbol_scores = {}     # save scores for context boosting
 
             for symbol in top_symbols:
@@ -156,12 +158,15 @@ def run_agent_loop():
 
             # Rank potential trades by score (highest first)
             potential_trades.sort(key=lambda x: x['score'], reverse=True)
-
             # Determine how many new trades we can open this cycle
             allowed_new = MAX_ACTIVE_TRADES - len(active_trades)
             opened_count = 0
 
-            for signal in potential_trades:
+            # Diversify signals: avoid opening highly correlated trades
+            # Only select up to ``allowed_new`` trades.
+            diversified_signals = select_diversified_signals(potential_trades, max_corr=0.8, max_trades=allowed_new)
+
+            for signal in diversified_signals:
                 symbol = signal["symbol"]
                 score = signal["score"]
                 direction = signal["direction"]
@@ -182,12 +187,13 @@ def run_agent_loop():
                 }
                 orderflow_tag = "buy-side aggression" if detect_aggression(price_data) == "buyers in control" else "neutral flow"
 
+                # Pass the actual session to the brain for session-specific adjustments
                 decision_obj = should_trade(
                     symbol=symbol,
                     score=score,
                     direction=direction,
                     indicators=indicators,
-                    session="default",
+                    session=session,
                     pattern_name=pattern_name,
                     orderflow=orderflow_tag,
                     sentiment=sentiment,
@@ -197,16 +203,39 @@ def run_agent_loop():
                 final_conf = decision_obj.get("confidence", 0.0)
                 narrative = decision_obj.get("narrative", "")
 
-                # Log the brain's decision and reasoning
-                if decision:
-                    print(f"🤖 Brain Decision for {symbol}: True | Confidence: {final_conf:.2f}\n{narrative}\n")
-                else:
+                # --- Machine Learning Adjustment ---
+                # Use the trained ML model to predict probability of success
+                try:
+                    ml_prob = predict_success_probability(
+                        score=score,
+                        confidence=final_conf,
+                        session=session,
+                        btc_d=btc_d,
+                        fg=fg,
+                        sentiment_conf=sentiment_confidence,
+                        pattern=pattern_name
+                    )
+                except Exception:
+                    ml_prob = 0.5
+                # If predicted probability is low, skip the trade
+                if ml_prob < 0.5:
+                    print(f"🤖 ML model predicted low success probability ({ml_prob:.2f}) for {symbol}. Skipping trade.")
+                    log_rejection(symbol, f"ML prob {ml_prob:.2f} too low")
+                    continue
+                # Blend the ML probability into the final confidence
+                final_conf = round((final_conf + ml_prob * 10) / 2.0, 2)
+
+                # Re-evaluate decision: we rely on brain's LLM decision as gate
+                if not decision:
                     reason = decision_obj.get("reason", "Unknown reason")
                     print(f"🤖 Brain Decision for {symbol}: False | Confidence: {final_conf:.2f}\nReason: {reason}\n")
                     log_rejection(symbol, reason)
+                    continue
+                else:
+                    print(f"🤖 Brain Decision for {symbol}: True | Confidence: {final_conf:.2f}\n{narrative}\n")
 
-                # If brain approves the trade, simulate executing it (paper trade)
-                if decision and direction == "long" and position_size > 0:
+                # If brain approves and ML confidence is acceptable, execute trade
+                if direction == "long" and position_size > 0:
                     entry_price = round(price_data['close'].iloc[-1], 6)
                     sl = round(entry_price - entry_price * 0.01, 6)
                     tp1 = round(entry_price + entry_price * 0.01, 6)
@@ -235,17 +264,15 @@ def run_agent_loop():
                         "sentiment_summary": sentiment.get("summary", ""),
                         "pattern": pattern_name,
                         "narrative": narrative,
+                        "ml_prob": ml_prob,
                         "status": {"tp1": False, "tp2": False, "tp3": False},
                         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
                     }
 
                     print(f"📖 Narrative:\n{narrative}\n")
                     print(f"✅ Trade: {symbol} | Score: {score:.2f} | Position Size: ${position_size}")
-                    # Persist the new trade in the active trades file
                     active_trades[symbol] = new_trade
-                    # Use create_new_trade to ensure consistent file path
                     create_new_trade(new_trade)
-                    # Immediately log the trade entry for learning purposes
                     try:
                         log_trade_result(new_trade, outcome="open")
                     except Exception as e:
