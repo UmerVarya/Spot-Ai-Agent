@@ -10,9 +10,10 @@ import json
 import threading
 from fetch_news import fetch_news, run_news_fetcher
 from trade_utils import simulate_slippage, estimate_commission
-from trade_utils import get_top_symbols, get_price_data, evaluate_signal
-from trade_manager import manage_trades, load_active_trades, save_active_trades
+from trade_utils import get_top_symbols, get_price_data, evaluate_signal, get_market_session
+from trade_manager import manage_trades, load_active_trades, save_active_trades, create_new_trade
 from notifier import send_email, log_rejection
+from trade_logger import log_trade_result  # record entries
 from brain import should_trade
 from sentiment import get_macro_sentiment
 from btc_dominance import get_btc_dominance
@@ -20,25 +21,13 @@ from fear_greed import get_fear_greed_index
 from orderflow import detect_aggression
 from drawdown_guard import is_trading_blocked  # ✅ Drawdown Guard
 
-class Agent:
-    def __init__(self, symbol, starting_balance=10000.0, trade_quantity=1):
-        """
-        Initialize the trading agent.
-        Args:
-            symbol (str): The trading symbol (e.g., stock ticker or crypto pair).
-            starting_balance (float): Starting account balance for the agent.
-            trade_quantity (int): Default quantity of shares/units to trade.
-        """
-        self.symbol = symbol
-        self.balance = starting_balance
-        self.trade_quantity = trade_quantity
-        self.in_position = False      # Whether currently holding an open position
-        self.entry_price = None       # Price at which current position was entered
-        self.total_profit = 0.0       # Cumulative profit/loss
-
+# Maximum concurrent open trades
 MAX_ACTIVE_TRADES = 2
-SCAN_INTERVAL = 15   # scan more frequently (15s)
+# Interval between scans (in seconds)
+SCAN_INTERVAL = 15
+# Interval between news fetches (in seconds)
 NEWS_INTERVAL = 3600
+
 
 def auto_run_news():
     while True:
@@ -46,9 +35,11 @@ def auto_run_news():
         run_news_fetcher()
         time.sleep(NEWS_INTERVAL)
 
+
 def run_streamlit():
     port = os.environ.get("PORT", "10000")  # Render provides a dynamic port
     os.system(f"streamlit run dashboard.py --server.port {port} --server.headless true")
+
 
 def run_agent_loop():
     print("\n🤖 Spot AI Super Agent running in paper trading mode...\n")
@@ -114,6 +105,8 @@ def run_agent_loop():
             save_active_trades(active_trades)
 
             top_symbols = get_top_symbols(limit=30)
+            # Determine the current market session for logging and learning
+            session = get_market_session()
             potential_trades = []  # collect potential trade signals
             symbol_scores = {}     # save scores for context boosting
 
@@ -132,7 +125,7 @@ def run_agent_loop():
                     score, direction, position_size, pattern_name = evaluate_signal(price_data, symbol)
                     symbol_scores[symbol] = {"score": score, "direction": direction}
                     # ✅ If no clear direction but score meets threshold, assume long (neutral sentiment fallback)
-                    if direction is None and score >= 5.5:
+                    if direction is None and score >= 4.5:  # lower fallback threshold to align with evaluate_signal
                         print(f"⚠️ No clear direction for {symbol} despite score={score:.2f}. Forcing 'long' direction.")
                         direction = "long"
 
@@ -141,14 +134,11 @@ def run_agent_loop():
                         # Skip reason already logged in evaluate_signal
                         continue
 
-                    # Order flow check – require bullish aggression
+                    # Order flow check – treat bearish aggression as penalty, not veto
                     flow_status = detect_aggression(price_data)
-                    if flow_status != "buyers in control":
-                        if flow_status == "sellers in control":
-                            print(f"🚫 Bearish order flow detected in {symbol}. Skipping trade.")
-                        else:
-                            print(f"🚫 No buy-side aggression detected in {symbol}. Skipping trade.")
-                        continue
+                    if flow_status == "sellers in control":
+                        print(f"⚠️ Bearish order flow detected in {symbol}. Proceeding with caution (penalized score handled in evaluate_signal).")
+                    # No explicit skip for neutral flow; rely on evaluate_signal/brain to decide
 
                     # If we reach here, we have a valid potential **long** trade signal
                     potential_trades.append({
@@ -190,7 +180,7 @@ def run_agent_loop():
                     "adx": price_data["adx"].iloc[-1] if "adx" in price_data else 20,
                     "volume": price_data["volume"].iloc[-1] if "volume" in price_data else 0,
                 }
-                orderflow_tag = "buy-side aggression"  # we ensured buy-side flow above
+                orderflow_tag = "buy-side aggression" if detect_aggression(price_data) == "buyers in control" else "neutral flow"
 
                 decision_obj = should_trade(
                     symbol=symbol,
@@ -232,7 +222,12 @@ def run_agent_loop():
                         "tp2": tp2,
                         "tp3": tp3,
                         "position_size": position_size,
+                        # Store the final blended confidence for learning log
                         "confidence": final_conf,
+                        # Persist the normalized technical score for learning log
+                        "score": score,
+                        # Add session to allow session-specific learning
+                        "session": session,
                         "btc_dominance": btc_d,
                         "fear_greed": fg,
                         "sentiment_bias": sentiment_bias,
@@ -246,7 +241,15 @@ def run_agent_loop():
 
                     print(f"📖 Narrative:\n{narrative}\n")
                     print(f"✅ Trade: {symbol} | Score: {score:.2f} | Position Size: ${position_size}")
+                    # Persist the new trade in the active trades file
                     active_trades[symbol] = new_trade
+                    # Use create_new_trade to ensure consistent file path
+                    create_new_trade(new_trade)
+                    # Immediately log the trade entry for learning purposes
+                    try:
+                        log_trade_result(new_trade, outcome="open")
+                    except Exception as e:
+                        print(f"⚠️ Failed to log new trade {symbol}: {e}")
                     save_active_trades(active_trades)
                     send_email(f"New Trade Opened: {symbol}", str(new_trade))
                     opened_count += 1
@@ -268,6 +271,7 @@ def run_agent_loop():
         except Exception as e:
             print(f"❌ Main Loop Error: {e}")
             time.sleep(10)
+
 
 if __name__ == "__main__":
     logging.info("🚀 Starting Spot AI Super Agent loop...")
