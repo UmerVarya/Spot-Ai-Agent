@@ -6,6 +6,7 @@ from confidence_guard import get_adaptive_conf_threshold
 from pattern_memory import recall_pattern_confidence
 from confidence import calculate_historical_confidence
 from narrative_builder import generate_trade_narrative  # ✅ Corrected import
+from memory_retriever import get_recent_trade_summary  # retrieval augmentation
 
 # Global symbol context memory
 symbol_context_cache = {}
@@ -135,15 +136,23 @@ def should_trade(symbol, score, direction, indicators, session, pattern_name, or
             }
 
         # === LLM Advisor Check ===
+        # Retrieve recent similar trades for context augmentation
+        recent_summary = get_recent_trade_summary(symbol=symbol, pattern=pattern_name, max_entries=3)
+        # Build a richer prompt that encourages step‑by‑step reasoning.
         advisor_prompt = (
             f"Symbol: {symbol}\n"
             f"Direction: {direction}\n"
             f"Technical Score: {score:.2f}\n"
-            f"Confidence: {final_confidence:.2f}\n"
-            f"Sentiment: {sentiment_bias} (Confidence: {sentiment_confidence})\n"
+            f"Current Confidence (pre‑LLM): {final_confidence:.2f}\n"
+            f"Macro Sentiment: {sentiment_bias} (Confidence: {sentiment_confidence})\n"
             f"Pattern: {pattern_name}\n"
             f"Indicators: RSI {indicators.get('rsi', 0):.1f}, MACD {indicators.get('macd', 0):.4f}, ADX {indicators.get('adx', 0):.1f}\n"
-            "Should we take this trade?"
+            f"Recent similar trades: {recent_summary}\n\n"
+            "Please perform the following analysis:\n"
+            "1. Summarise the macro sentiment and any relevant macro news (if provided).\n"
+            "2. Discuss any conflicting technical indicators or signals.\n"
+            "3. Provide your overall trading thesis for this setup.\n"
+            "Finally, respond with 'Yes' or 'No' to indicate whether to take the trade, followed by a numerical confidence rating from 0 to 10 and a brief reason."
         )
         llm_response = get_llm_judgment(advisor_prompt)
 
