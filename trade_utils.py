@@ -8,6 +8,10 @@ from symbol_mapper import map_symbol_for_binance
 from datetime import datetime as dt
 from ta.volume import VolumeWeightedAveragePrice
 import os
+
+# Path to persistent symbol scores file.  Use a fixed path relative to
+# this module to ensure the agent and dashboard share the same file.
+SYMBOL_SCORES_FILE = os.path.join(os.path.dirname(__file__), "symbol_scores.json")
 import json
 from price_action import detect_support_resistance_zones, is_price_near_zone
 from orderflow import detect_aggression
@@ -152,6 +156,14 @@ def get_market_session():
 
 
 def log_signal(symbol, session, score, direction, weights, candle_patterns, chart_pattern):
+    """Append a signal entry to the trades log.
+
+    This function records the technical score and metadata for every
+    evaluated symbol.  It writes to a CSV file located alongside this
+    module.  If the file does not exist, headers are included.  Using a
+    fixed path prevents inconsistencies across different working
+    directories.
+    """
     log_entry = {
         "timestamp": dt.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "symbol": symbol,
@@ -168,23 +180,36 @@ def log_signal(symbol, session, score, direction, weights, candle_patterns, char
         "chart_pattern": chart_pattern if chart_pattern else "None"
     }
     df_entry = pd.DataFrame([log_entry])
-    path = "trades_log.csv"
-    if os.path.exists(path):
-        df_entry.to_csv(path, mode='a', header=False, index=False)
+    # Use a consistent file path relative to this module
+    log_path = os.path.join(os.path.dirname(__file__), "trades_log.csv")
+    if os.path.exists(log_path):
+        df_entry.to_csv(log_path, mode='a', header=False, index=False)
     else:
-        df_entry.to_csv(path, index=False)
+        df_entry.to_csv(log_path, index=False)
 
 
 def get_reinforcement_bonus(symbol: str, session: str):
+    """
+    Compute a reinforcement bonus based on historical trade outcomes.
+
+    The function reads ``trade_learning_log.csv`` and filters rows for the
+    given symbol and session.  It then computes the win rate and returns a
+    multiplier between roughly 0.5 and 1.5 to nudge the scoring mechanism.
+
+    To guard against malformed CSV lines (e.g., due to log concatenation), the
+    CSV is read with ``on_bad_lines='skip'`` and the slower ``python`` engine,
+    which tolerates variable numbers of fields per line.
+    """
     try:
-        df = pd.read_csv("trade_learning_log.csv")
-        df = df[(df['symbol'] == symbol) & (df['session'] == session)]
+        df = pd.read_csv("trade_learning_log.csv", engine="python", on_bad_lines="skip")
+        df = df[(df.get('symbol') == symbol) & (df.get('session') == session)]
         if df.empty:
             return 1.0
-        win_rate = df[df['outcome'] == 'win'].shape[0] / df.shape[0]
+        win_rate = df[df.get('outcome') == 'win'].shape[0] / df.shape[0]
         # Bonus = 1 + (win_rate - 0.5), range roughly 0.5 to 1.5
         return round(1.0 + (win_rate - 0.5), 2)
-    except:
+    except Exception as e:
+        # If file doesn't exist or parsing fails, return neutral bonus
         return 1.0
 
 
@@ -319,9 +344,9 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             score -= w["flow"]
             print(f"[DEBUG] Seller aggression detected — penalizing score.")
 
-        # Context boost from correlated symbols (existing symbol_scores.json)
+        # Context boost from correlated symbols (existing symbol scores file)
         try:
-            with open("symbol_scores.json", "r") as f:
+            with open(SYMBOL_SCORES_FILE, "r") as f:
                 scores_data = json.load(f)
             bullish_allies = sum(
                 1 for sym, data in scores_data.items()
@@ -405,6 +430,25 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
 
         # Log the signal for learning analysis
         log_signal(symbol, session, normalized_score, direction, w, candle_patterns, chart_pattern)
+
+        # Persist symbol scores for external dashboard/analysis
+        try:
+            scores = {}
+            if os.path.exists(SYMBOL_SCORES_FILE):
+                with open(SYMBOL_SCORES_FILE, "r") as f:
+                    scores = json.load(f)
+            scores[symbol] = {
+                "timestamp": dt.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "score": normalized_score,
+                "direction": direction,
+                "position_size": position_size,
+                "pattern": pattern_name
+            }
+            with open(SYMBOL_SCORES_FILE, "w") as f:
+                json.dump(scores, f, indent=2)
+        except Exception as e:
+            print(f"[SYMBOL SCORES] Failed to update symbol_scores.json: {e}")
+
         return normalized_score, direction, position_size, pattern_name
 
     except Exception as e:
