@@ -41,11 +41,17 @@ from trade_logger import log_trade_result
 EARLY_EXIT_THRESHOLD = 0.015  # 1.5% move against entry
 MACRO_CONFIDENCE_EXIT_THRESHOLD = 4
 
-# Path to the JSON file storing active trades.  Use a fixed absolute path
-# based on this module's location.  This ensures that both the agent and
-# dashboard processes read and write the same file regardless of their
-# current working directory.
-ACTIVE_TRADES_FILE = os.path.join(os.path.dirname(__file__), "active_trades.json")
+# Path to the JSON file storing active trades.  We allow overriding via
+# an environment variable ``ACTIVE_TRADES_FILE``.  Otherwise, the default
+# location is in the system temporary directory.  This ensures that
+# both the agent and dashboard running in the same environment read
+# and write the same file.  Using a temp directory avoids issues on
+# platforms (e.g., Render) where the repository directory is read‑only.
+import tempfile
+ACTIVE_TRADES_FILE = os.environ.get(
+    "ACTIVE_TRADES_FILE",
+    os.path.join(tempfile.gettempdir(), "active_trades.json")
+)
 
 
 def load_active_trades() -> Dict[str, dict]:
