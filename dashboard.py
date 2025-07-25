@@ -31,7 +31,11 @@ st.set_page_config(page_title="📈 Spot AI Super Agent Dashboard", layout="wide
 st.title("🤖 Spot AI Super Agent – Live Trade Dashboard")
 
 # === Paths ===
-ACTIVE_TRADES_FILE = os.path.join(os.path.dirname(__file__), "active_trades.json")
+import tempfile
+ACTIVE_TRADES_FILE = os.environ.get(
+    "ACTIVE_TRADES_FILE",
+    os.path.join(tempfile.gettempdir(), "active_trades.json")
+)
 
 
 def load_active_trades() -> dict:
