@@ -1,149 +1,219 @@
 """
-Streamlit dashboard for visualising active Spot AI trades.
+Enhanced Streamlit dashboard for the Spot AI Super Agent.
 
-This dashboard reads the active trades file created by the agent and
-calculates live mark‑to‑market P&L using real‑time prices from Binance.
-It refreshes automatically at an interval chosen by the user and
-displays a table of open positions with their stop‑loss and take‑profit
-levels and a status indicator.
+This dashboard reads the current set of active trades from a JSON file
+whose location is determined by the ``ACTIVE_TRADES_FILE`` environment
+variable (falling back to a temporary file if unset).  It also reads
+historical trade performance from ``trade_learning_log.csv`` and
+``trades_log.csv`` to display statistics such as win rate and daily
+profit & loss.  A professional‑looking set of summary cards presents
+high‑level metrics at a glance, and an expanded table lists each
+active trade with detailed fields including pattern, technical score,
+LLM confidence and machine‑learning probability.
 
-Modifications: The dashboard now loads the ``active_trades.json`` file
-using a constant path relative to this script.  This ensures that
-regardless of the working directory, the file is found correctly.
+To run this dashboard locally:
+
+    streamlit run dashboard.py
+
+Ensure that the agent process is writing to the same
+``ACTIVE_TRADES_FILE`` so the dashboard can display live trades.
 """
 
-import streamlit as st
-import json
-import pandas as pd
-from binance.client import Client
-from dotenv import load_dotenv
 import os
-from streamlit_autorefresh import st_autorefresh
+import json
+from datetime import datetime
+from typing import Dict, Any
 
-# === Load API Keys ===
-load_dotenv()
-api_key = os.getenv("BINANCE_API_KEY")
-api_secret = os.getenv("BINANCE_API_SECRET")
-client = Client(api_key, api_secret)
+import pandas as pd
+import streamlit as st
+from binance.client import Client
 
-# === Streamlit Page Settings ===
-st.set_page_config(page_title="📈 Spot AI Super Agent Dashboard", layout="wide")
-st.title("🤖 Spot AI Super Agent – Live Trade Dashboard")
+from trade_utils import get_market_session
 
-# === Paths ===
-import tempfile
-ACTIVE_TRADES_FILE = os.environ.get(
-    "ACTIVE_TRADES_FILE",
-    os.path.join(tempfile.gettempdir(), "active_trades.json")
-)
+# Attempt to import our ML model; if unavailable, treat probabilities as 0.5
+try:
+    from ml_model import predict_success_probability
+except Exception:
+    predict_success_probability = None
 
 
-def load_active_trades() -> dict:
-    """Load open trades from the JSON file.
+def get_active_trades_path() -> str:
+    """Return the path to the active trades JSON file.
 
-    Returns
-    -------
-    dict
-        Mapping of symbol to trade information.  An empty dict is returned
-        if the file is missing or malformed.
+    The location is controlled by the ``ACTIVE_TRADES_FILE`` environment
+    variable.  If this variable is not set, default to a file in
+    ``/tmp`` so that both the agent and dashboard can write and read it.
     """
+    return os.getenv("ACTIVE_TRADES_FILE", "/tmp/active_trades.json")
+
+
+def load_active_trades() -> Dict[str, Any]:
+    """Load the dictionary of active trades from the configured file.
+
+    Returns an empty dict if the file is missing or unreadable.
+    """
+    path = get_active_trades_path()
     try:
-        with open(ACTIVE_TRADES_FILE, "r") as f:
-            return json.load(f)
+        with open(path, "r") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
     except Exception:
-        return {}
+        pass
+    return {}
 
 
 def get_live_price(symbol: str) -> float:
     """Fetch the latest price for a symbol from Binance.
 
-    If the API call fails, ``None`` is returned.
+    If the API call fails (e.g. network error or invalid symbol),
+    return ``None`` so that callers can handle missing data gracefully.
     """
     try:
-        res = client.get_symbol_ticker(symbol=symbol)
-        return float(res['price'])
+        client = Client()
+        mapped = symbol  # The agent uses unmapped symbols for display
+        ticker = client.get_symbol_ticker(symbol=mapped)
+        return float(ticker["price"])
     except Exception:
         return None
 
 
-def format_trade_row(symbol: str, data: dict) -> dict:
-    """Prepare a trade dict for display in a DataFrame.
+def load_log(csv_path: str) -> pd.DataFrame:
+    """Load a CSV log into a DataFrame with tolerant parsing.
 
-    This function computes the percentage P&L for the trade and formats
-    stop‑loss and take‑profit values.  It also concatenates status
-    flags to give a quick at‑a‑glance view of progress through the
-    profit ladder.
+    The function attempts to read with ``on_bad_lines='skip'`` so
+    partially corrupted rows are ignored rather than raising an exception.
+    Returns an empty DataFrame if the file is missing.
     """
-    entry = data.get("entry")
-    direction = data.get("direction")
-    sl = data.get("sl")
-    tp1 = data.get("tp1")
-    tp2 = data.get("tp2")
-    tp3 = data.get("tp3")
-    leverage = data.get("leverage", 1)
-    size = data.get("position_size", 0)
-    status = data.get("status", {})
+    try:
+        if not os.path.exists(csv_path):
+            return pd.DataFrame()
+        return pd.read_csv(csv_path, engine="python", on_bad_lines="skip")
+    except Exception:
+        return pd.DataFrame()
 
-    current_price = get_live_price(symbol)
-    if current_price is None or entry is None:
-        return None
 
-    if direction == "long":
-        pnl_percent = ((current_price - entry) / entry) * 100
-    else:
-        pnl_percent = ((entry - current_price) / entry) * 100
-    pnl_percent *= leverage
-
-    # Status string
-    status_flags = []
-    if status.get("tp1"):
-        status_flags.append("✅ TP1")
-    if status.get("tp2"):
-        status_flags.append("✅ TP2")
-    if status.get("tp3"):
-        status_flags.append("🎯 TP3")
-    if status.get("sl"):
-        status_flags.append("🛑 SL Hit")
-    status_str = " | ".join(status_flags) if status_flags else "⏳ In Progress"
-
+def compute_summary_metrics(trades: Dict[str, Any]) -> Dict[str, Any]:
+    """Compute high‑level summary statistics from the active trades dict."""
+    total_trades = len(trades)
+    if total_trades == 0:
+        return {
+            "count": 0,
+            "avg_conf": 0.0,
+            "avg_ml_prob": 0.0,
+            "exposure": 0.0,
+        }
+    confidences = []
+    ml_probs = []
+    exposure = 0.0
+    for trade in trades.values():
+        conf = float(trade.get("confidence", 0))
+        confidences.append(conf)
+        ml = float(trade.get("ml_prob", 0))
+        ml_probs.append(ml)
+        price = float(trade.get("entry", 0))
+        size = int(trade.get("position_size", 0))
+        exposure += price * size
+    avg_conf = sum(confidences) / total_trades
+    avg_ml = sum(ml_probs) / total_trades if ml_probs else 0.0
     return {
-        "Symbol": symbol,
-        "Direction": direction,
-        "Entry": round(entry, 4),
-        "Price": round(current_price, 4),
-        "SL": round(sl, 4) if sl else None,
-        "TP1": round(tp1, 4) if tp1 else None,
-        "TP2": round(tp2, 4) if tp2 else None,
-        "TP3": round(tp3, 4) if tp3 else None,
-        "Leverage": leverage,
-        "Position ($)": size,
-        "PnL %": round(pnl_percent, 2),
-        "Status": status_str,
+        "count": total_trades,
+        "avg_conf": round(avg_conf, 2),
+        "avg_ml_prob": round(avg_ml, 2),
+        "exposure": round(exposure, 2),
     }
 
-# === Sidebar Refresh Control ===
-refresh_interval = st.sidebar.slider("⏱️ Refresh Interval (seconds)", 10, 60, 30)
-st.sidebar.markdown("---")
-st.sidebar.markdown("Built for 🔥 **Spot AI Super Agent**")
 
-# Auto-refresh every N seconds
-st_autorefresh(interval=refresh_interval * 1000, key="refresh")
-
-# === Display Live Trades ===
-trades = load_active_trades()
-rows = []
-for sym, data in trades.items():
-    row = format_trade_row(sym, data)
-    if row:
+def build_trade_rows(trades: Dict[str, Any]) -> pd.DataFrame:
+    """Build a DataFrame with detailed fields for each active trade."""
+    rows = []
+    for sym, trade in trades.items():
+        entry = float(trade.get("entry", 0))
+        size = int(trade.get("position_size", 0))
+        live_price = get_live_price(sym)
+        pnl = None
+        if live_price is not None and entry != 0:
+            pnl = round((live_price - entry) * size, 4)
+        row = {
+            "Symbol": sym,
+            "Direction": trade.get("direction"),
+            "Entry": entry,
+            "Size": size,
+            "Current Price": live_price,
+            "PnL": pnl,
+            "Score": float(trade.get("score", 0)),
+            "Confidence": float(trade.get("confidence", 0)),
+            "ML Prob": float(trade.get("ml_prob", 0)),
+            "Pattern": trade.get("pattern"),
+            "Session": trade.get("session"),
+            "Opened": trade.get("timestamp"),
+        }
         rows.append(row)
+    if rows:
+        return pd.DataFrame(rows).sort_values(by=["Symbol"])
+    return pd.DataFrame()
 
-st.subheader("📊 Live PnL – Active Trades")
 
-if rows:
-    df = pd.DataFrame(rows)
-    # Colour code PnL in a separate column for clarity
-    df["🟩 PnL %"] = df["PnL %"].apply(lambda x: f"🟢 {x:.2f}%" if x >= 0 else f"🔴 {x:.2f}%")
-    df = df.drop(columns=["PnL %"])  # remove the original column
-    st.dataframe(df, use_container_width=True)
-else:
-    st.warning("No active trades found.")
+def display_performance_summary(log_df: pd.DataFrame) -> None:
+    """Display historical performance metrics and charts."""
+    if log_df.empty:
+        st.info("No historical trades to display yet.")
+        return
+    # Ensure required columns exist
+    if not {"timestamp", "outcome", "confidence"}.issubset(log_df.columns):
+        st.info("Historical log missing columns for performance summary.")
+        return
+    # Convert timestamp to datetime and derive date
+    log_df["date"] = pd.to_datetime(log_df["timestamp"]).dt.date
+    # Compute win rate
+    total = len(log_df)
+    wins = len(log_df[log_df["outcome"] == "win"])
+    win_rate = wins / total if total > 0 else 0.0
+    st.subheader("Historical Performance")
+    st.write(f"Total trades: {total} | Wins: {wins} | Win rate: {win_rate:.2%}")
+    # Aggregate PnL by date if available
+    if {"exit_price", "entry", "position_size"}.issubset(log_df.columns):
+        def calc_pnl(row):
+            try:
+                return (row["exit_price"] - row["entry"]) * row["position_size"]
+            except Exception:
+                return 0
+        log_df["pnl"] = log_df.apply(calc_pnl, axis=1)
+        daily_pnl = log_df.groupby("date")["pnl"].sum()
+        st.bar_chart(daily_pnl)
+
+
+def main() -> None:
+    st.set_page_config(page_title="Spot AI Super Agent", layout="wide")
+    st.title("🤖 Spot AI Super Agent – Live Trade Dashboard")
+    # Sidebar refresh interval
+    refresh = st.sidebar.slider("Refresh Interval (seconds)", 10, 60, 30)
+    # Load active trades
+    trades = load_active_trades()
+    # Summary cards
+    metrics = compute_summary_metrics(trades)
+    cols = st.columns(4)
+    cols[0].metric("Active Trades", metrics["count"])
+    cols[1].metric("Avg Confidence", metrics["avg_conf"])
+    cols[2].metric("Avg ML Prob", metrics["avg_ml_prob"])
+    cols[3].metric("Total Exposure", f"${metrics['exposure']:.2f}")
+    st.markdown("---")
+    # Detailed trade table
+    if trades:
+        df_trades = build_trade_rows(trades)
+        st.subheader("Active Trades – Details")
+        st.dataframe(df_trades, use_container_width=True)
+    else:
+        st.info("No active trades found.")
+    st.markdown("---")
+    # Load and display historical logs
+    learning_log_path = os.getenv("TRADE_LEARNING_FILE", "trade_learning_log.csv")
+    df_learning = load_log(learning_log_path)
+    if not df_learning.empty:
+        display_performance_summary(df_learning)
+    st.markdown("---")
+    st.caption("Built for Spot AI Super Agent")
+
+
+if __name__ == "__main__":
+    main()
