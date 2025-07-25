@@ -268,10 +268,11 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             avg_quote_vol_20 = volume.iloc[-20:].mean() * price_now
             latest_quote_vol = latest_vol * price_now
 
+        # Relaxed volume filter: smaller fraction of the 20-bar average and lower minimum
         session_name = get_market_session()
-        session_factor = {"Asia": 0.3, "Europe": 0.3, "US": 0.4}
-        vol_factor = session_factor.get(session_name, 0.4)
-        vol_threshold = max(vol_factor * avg_quote_vol_20, 50_000)
+        session_factor = {"Asia": 0.2, "Europe": 0.2, "US": 0.3}
+        vol_factor = session_factor.get(session_name, 0.3)
+        vol_threshold = max(vol_factor * avg_quote_vol_20, 30_000)
         if latest_quote_vol < vol_threshold:
             print(f"⛔ Skipping due to low volume: {latest_quote_vol:,.0f} < {vol_threshold:,.0f} ({vol_factor*100:.0f}% of 20-bar avg)")
             return 0, None, 0, None
@@ -407,13 +408,10 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         zones = zones.to_dict() if isinstance(zones, pd.Series) else (zones or {"support": [], "resistance": []})
         current_price = float(close.iloc[-1])
         if direction == "long":
-            near_resistance = is_price_near_zone(current_price, zones, 'resistance', 0.005)
-            near_support = is_price_near_zone(current_price, zones, 'support', 0.015 if sentiment_bias == "bullish" else 0.01)
-            if near_resistance and normalized_score < 7.0:
+            # Relaxed zone filter: skip only when very close to resistance (0.7%) and score is mediocre (<6.0)
+            near_resistance = is_price_near_zone(current_price, zones, 'resistance', 0.007)
+            if near_resistance and normalized_score < 6.0:
                 print(f"[ZONE FILTER] Skipping long trade near resistance at {current_price}")
-                return 0, None, 0, None
-            if not near_support and normalized_score < 6.5:
-                print(f"[ZONE FILTER] Skipping long trade with no nearby support at {current_price}")
                 return 0, None, 0, None
 
         # Log final evaluated score and direction
