@@ -1,26 +1,66 @@
+"""
+Adaptive confidence threshold guard based on recent trade outcomes.
+
+This module reads ``trade_learning_log.csv`` to compute a dynamic confidence
+threshold that adapts to your strategy's performance.  If the log file is
+missing, contains too few entries, or has malformed lines, a conservative
+default threshold is returned.  You can use the returned value in your
+brain/decision logic to calibrate how strict the bot should be.
+"""
+
 import pandas as pd
 import os
 
-LEARNING_LOG = "trade_learning_log.csv"
+import os
 
-def get_adaptive_conf_threshold():
+# Path to the learning log CSV.  Use a fixed path relative to this module
+# so it is consistent regardless of the current working directory.
+LEARNING_LOG = os.path.join(os.path.dirname(__file__), "trade_learning_log.csv")
+
+
+def get_adaptive_conf_threshold() -> float:
+    """
+    Calculate an adaptive confidence threshold based on recent performance.
+
+    The function reads the last 25 entries of ``trade_learning_log.csv`` and
+    computes the win rate and average confidence.  If the win rate is
+    exceptionally high (>=70%), the threshold is lowered slightly; if the
+    win rate is low (<=40%), the threshold is raised slightly.  Otherwise,
+    the average confidence is used directly.
+
+    Returns
+    -------
+    float
+        The adapted confidence threshold.  Defaults to 5.5 if insufficient
+        history or the file is missing.  The result is clamped to a
+        reasonable range (4.5 to 7.5).
+    """
     if not os.path.exists(LEARNING_LOG):
-        return 6.0  # Default if no data
+        return 5.5  # Default if no data
 
-    df = pd.read_csv(LEARNING_LOG)
+    try:
+        # Use python engine and skip bad lines to handle inconsistent log entries
+        df = pd.read_csv(LEARNING_LOG, engine="python", on_bad_lines="skip")
+    except Exception:
+        return 5.5
+
     if len(df) < 10:
-        return 6.0  # Not enough history to adapt
+        return 5.5  # Not enough history to adapt
 
     recent = df.tail(25)
-    wins = recent[recent["outcome"] == "win"]
+    wins = recent[recent.get("outcome") == "win"]
     win_rate = len(wins) / len(recent)
+    try:
+        avg_conf = float(recent.get("confidence").mean())
+    except Exception:
+        avg_conf = 5.5
 
-    avg_conf = recent["confidence"].mean()
-
-    # Base threshold is 6.0 — adapt up or down
+    # Base threshold is the average confidence; adapt up or down
     if win_rate >= 0.7:
-        return max(5.0, avg_conf - 0.5)
+        threshold = max(4.5, avg_conf - 0.5)
     elif win_rate <= 0.4:
-        return min(7.5, avg_conf + 0.5)
+        threshold = min(7.5, avg_conf + 0.5)
     else:
-        return round(avg_conf, 2)
+        threshold = avg_conf
+
+    return round(threshold, 2)
