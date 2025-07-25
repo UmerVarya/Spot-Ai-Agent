@@ -1,3 +1,17 @@
+"""
+Streamlit dashboard for visualising active Spot AI trades.
+
+This dashboard reads the active trades file created by the agent and
+calculates live mark‑to‑market P&L using real‑time prices from Binance.
+It refreshes automatically at an interval chosen by the user and
+displays a table of open positions with their stop‑loss and take‑profit
+levels and a status indicator.
+
+Modifications: The dashboard now loads the ``active_trades.json`` file
+using a constant path relative to this script.  This ensures that
+regardless of the working directory, the file is found correctly.
+"""
+
 import streamlit as st
 import json
 import pandas as pd
@@ -16,24 +30,46 @@ client = Client(api_key, api_secret)
 st.set_page_config(page_title="📈 Spot AI Super Agent Dashboard", layout="wide")
 st.title("🤖 Spot AI Super Agent – Live Trade Dashboard")
 
-# === Load Trades ===
-def load_active_trades():
+# === Paths ===
+ACTIVE_TRADES_FILE = os.path.join(os.path.dirname(__file__), "active_trades.json")
+
+
+def load_active_trades() -> dict:
+    """Load open trades from the JSON file.
+
+    Returns
+    -------
+    dict
+        Mapping of symbol to trade information.  An empty dict is returned
+        if the file is missing or malformed.
+    """
     try:
-        with open("active_trades.json", "r") as f:
+        with open(ACTIVE_TRADES_FILE, "r") as f:
             return json.load(f)
-    except:
+    except Exception:
         return {}
 
-# === Fetch Live Price ===
-def get_live_price(symbol):
+
+def get_live_price(symbol: str) -> float:
+    """Fetch the latest price for a symbol from Binance.
+
+    If the API call fails, ``None`` is returned.
+    """
     try:
         res = client.get_symbol_ticker(symbol=symbol)
         return float(res['price'])
-    except:
+    except Exception:
         return None
 
-# === Format Trade Data ===
-def format_trade_row(symbol, data):
+
+def format_trade_row(symbol: str, data: dict) -> dict:
+    """Prepare a trade dict for display in a DataFrame.
+
+    This function computes the percentage P&L for the trade and formats
+    stop‑loss and take‑profit values.  It also concatenates status
+    flags to give a quick at‑a‑glance view of progress through the
+    profit ladder.
+    """
     entry = data.get("entry")
     direction = data.get("direction")
     sl = data.get("sl")
@@ -52,15 +88,18 @@ def format_trade_row(symbol, data):
         pnl_percent = ((current_price - entry) / entry) * 100
     else:
         pnl_percent = ((entry - current_price) / entry) * 100
-
     pnl_percent *= leverage
 
     # Status string
     status_flags = []
-    if status.get("tp1"): status_flags.append("✅ TP1")
-    if status.get("tp2"): status_flags.append("✅ TP2")
-    if status.get("tp3"): status_flags.append("🎯 TP3")
-    if status.get("sl"): status_flags.append("🛑 SL Hit")
+    if status.get("tp1"):
+        status_flags.append("✅ TP1")
+    if status.get("tp2"):
+        status_flags.append("✅ TP2")
+    if status.get("tp3"):
+        status_flags.append("🎯 TP3")
+    if status.get("sl"):
+        status_flags.append("🛑 SL Hit")
     status_str = " | ".join(status_flags) if status_flags else "⏳ In Progress"
 
     return {
@@ -75,7 +114,7 @@ def format_trade_row(symbol, data):
         "Leverage": leverage,
         "Position ($)": size,
         "PnL %": round(pnl_percent, 2),
-        "Status": status_str
+        "Status": status_str,
     }
 
 # === Sidebar Refresh Control ===
@@ -89,8 +128,8 @@ st_autorefresh(interval=refresh_interval * 1000, key="refresh")
 # === Display Live Trades ===
 trades = load_active_trades()
 rows = []
-for symbol, data in trades.items():
-    row = format_trade_row(symbol, data)
+for sym, data in trades.items():
+    row = format_trade_row(sym, data)
     if row:
         rows.append(row)
 
@@ -98,8 +137,9 @@ st.subheader("📊 Live PnL – Active Trades")
 
 if rows:
     df = pd.DataFrame(rows)
+    # Colour code PnL in a separate column for clarity
     df["🟩 PnL %"] = df["PnL %"].apply(lambda x: f"🟢 {x:.2f}%" if x >= 0 else f"🔴 {x:.2f}%")
-    df = df.drop(columns=["PnL %"])  # Clean old column
+    df = df.drop(columns=["PnL %"])  # remove the original column
     st.dataframe(df, use_container_width=True)
 else:
     st.warning("No active trades found.")
