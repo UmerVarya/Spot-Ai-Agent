@@ -38,7 +38,10 @@ client = Client()
 
 # Environment variables
 LOCAL_TIMEZONE = os.getenv("LOCAL_TIMEZONE", "Asia/Karachi")
-MIN_VOLUME_USDT = float(os.getenv("MIN_VOLUME_USDT", 100000))
+# Default minimum 24h quote volume threshold for selecting symbols.  A lower
+# default (30000 USDT) yields a broader universe; adjust via the
+# ``MIN_VOLUME_USDT`` environment variable if needed.
+MIN_VOLUME_USDT = float(os.getenv("MIN_VOLUME_USDT", 30000))
 KLINES_LIMIT = int(os.getenv("KLINES_LIMIT", 500))
 
 
@@ -75,7 +78,9 @@ def get_top_symbols(limit: int = 30) -> List[str]:
     candidates: list[tuple[str, float]] = []
     for t in tickers:
         symbol = t.get("symbol")
-        # Only USDT pairs, ignore BUSD and non‑USDT
+        # Only consider USDT pairs (exclude BUSD pairs).  We no longer call
+        # ``client.get_symbol_info`` here to avoid rate limiting; invalid
+        # symbols will be filtered out later by ``get_price_data``.
         if not symbol or not symbol.endswith("USDT") or symbol.endswith("BUSD"):
             continue
         try:
@@ -85,18 +90,12 @@ def get_top_symbols(limit: int = 30) -> List[str]:
         # Skip low volume pairs
         if vol < MIN_VOLUME_USDT:
             continue
-        # Validate symbol exists using get_symbol_info; skip if not found
-        try:
-            info = client.get_symbol_info(symbol)
-            if not info:
-                continue
-        except Exception:
-            continue
         candidates.append((symbol, vol))
     if not candidates:
         return []
     sorted_syms = sorted(candidates, key=lambda x: x[1], reverse=True)
-    return [s[0] for s in sorted_syms[:limit]]
+    # Return only the symbols; invalid pairs will be filtered later in ``get_price_data``
+    return [s for s, _ in sorted_syms[:limit]]
 
 
 def get_price_data(symbol: str) -> pd.DataFrame | None:
