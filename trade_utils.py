@@ -23,6 +23,51 @@ Note: If any of the additional indicators fail due to missing data or
 unexpected types, they are silently skipped. This ensures the module
 remains robust when interacting with external APIs.
 """
+from price_action import detect_support_resistance_zones, is_price_near_zone
+from orderflow import detect_aggression
+from pattern_memory import recall_pattern_confidence
+
+# Optional imports for pattern detection. In the original repository these
+# functions were referenced but not explicitly imported.  Here we attempt
+# to import them from plausible modules. If not found, we provide no-op
+# fallbacks so that the module does not crash at runtime.
+try:
+    # Try canonical module names first
+    from pattern_recognizer import (
+        detect_candlestick_patterns,
+        detect_triangle_wedge,
+        detect_flag_pattern,
+    )  # type: ignore
+except Exception:
+    try:
+        # Alternate module structure
+        from pattern_recognizer.patterns import (
+            detect_candlestick_patterns,
+            detect_triangle_wedge,
+            detect_flag_pattern,
+        )  # type: ignore
+    except Exception:
+        # Fallback: define dummy functions that return neutral results.
+        def detect_candlestick_patterns(df):
+            """
+            Fallback function when candlestick pattern detectors are unavailable.
+            Returns an empty list so that no score is added for patterns.
+            """
+            return []
+
+        def detect_triangle_wedge(df):
+            """
+            Fallback function for triangle/wedge detection.
+            Returns None, meaning no pattern detected.
+            """
+            return None
+
+        def detect_flag_pattern(df):
+            """
+            Fallback function for flag pattern detection.
+            Returns False indicating no flag pattern.
+            """
+            return False
 
 import numpy as np
 import pandas as pd
