@@ -54,14 +54,13 @@ from macro_sentiment import analyze_macro_sentiment
 from notifier import send_email
 from trade_logger import log_trade_result
 
-# Path to the JSON file storing active trades
+# Path to JSON file storing active trades
 import tempfile
 ACTIVE_TRADES_FILE = os.environ.get(
-    "ACTIVE_TRADES_FILE",
-    os.path.join(tempfile.gettempdir(), "active_trades.json"),
+    "ACTIVE_TRADES_FILE", os.path.join(tempfile.gettempdir(), "active_trades.json")
 )
 
-# Risk parameters configurable via environment variables
+# Risk parameters via environment variables
 EARLY_EXIT_ATR_MULTIPLIER = float(os.getenv("EARLY_EXIT_ATR_MULTIPLIER", 1.5))
 TRAILING_ATR_MULTIPLIER = float(os.getenv("TRAILING_ATR_MULTIPLIER", 1.0))
 MACRO_CONFIDENCE_EXIT_THRESHOLD = float(os.getenv("MACRO_CONFIDENCE_EXIT_THRESHOLD", 4))
@@ -93,18 +92,12 @@ def create_new_trade(trade: dict) -> None:
 
 
 def should_exit_early(trade: dict, current_price: float, price_data) -> Tuple[bool, Optional[str]]:
-    """Evaluate if a trade should exit early before reaching TP or SL.
-
-    Early exit triggers if the price moves against the entry by more
-    than ``EARLY_EXIT_ATR_MULTIPLIER`` times the ATR, if RSI and MACD
-    show weakening momentum, or if macro sentiment flips bearish with
-    low confidence.  Only long trades are considered.
-    """
+    """Evaluate if a trade should exit early before reaching TP or SL."""
     entry = trade.get('entry')
     direction = trade.get('direction')
     if entry is None or direction != "long":
         return False, None
-    # Compute latest indicators to obtain ATR, RSI and MACD histogram
+    # Compute indicators to obtain ATR, RSI and MACD histogram
     try:
         indicators = calculate_indicators(price_data)
         atr_series = indicators.get("atr", 0)
@@ -114,17 +107,16 @@ def should_exit_early(trade: dict, current_price: float, price_data) -> Tuple[bo
         rsi = float(rsi_series.iloc[-1]) if hasattr(rsi_series, 'iloc') else float(rsi_series)
         macd_hist = float(macd_series.iloc[-1]) if hasattr(macd_series, 'iloc') else float(macd_series)
     except Exception:
-        # If indicator computation fails, skip early exit
         return False, None
     # 1. Price moved adversely relative to ATR
     if current_price < entry - atr * EARLY_EXIT_ATR_MULTIPLIER:
         return True, f"Price dropped {EARLY_EXIT_ATR_MULTIPLIER}× ATR below entry"
-    # 2. Weakening momentum based on RSI and MACD histogram
+    # 2. Weakening momentum
     if rsi < 45:
         return True, f"Weak RSI: {rsi:.2f}"
     if macd_hist < 0:
         return True, f"MACD histogram reversed: {macd_hist:.4f}"
-    # 3. Macro sentiment turned bearish with low confidence
+    # 3. Macro sentiment turned bearish
     macro = analyze_macro_sentiment()
     if macro.get('bias') == 'bearish' and float(macro.get('confidence', 0)) < MACRO_CONFIDENCE_EXIT_THRESHOLD:
         return True, f"Macro sentiment bearish (Confidence: {macro.get('confidence')})"
@@ -170,12 +162,11 @@ def manage_trades() -> None:
         atr = float(atr_series.iloc[-1]) if hasattr(atr_series, 'iloc') else float(atr_series)
         # Only long trades supported
         if direction == "long":
-            # Take profit hits update status and stop loss
             status = trade.setdefault('status', {})
             # Hit TP1
             if not status.get('tp1') and current_price >= tp1:
                 status['tp1'] = True
-                trade['sl'] = entry  # move stop to entry price
+                trade['sl'] = entry
                 print(f"🎯 {symbol} hit TP1 — SL moved to entry")
             # Hit TP2
             elif status.get('tp1') and not status.get('tp2') and current_price >= tp2:
@@ -201,7 +192,6 @@ def manage_trades() -> None:
                 continue
             # Tighten SL after TP1 before TP3
             if status.get('tp1') and not trade.get('profit_riding'):
-                # If ADX is low or MACD histogram negative, tighten stop by ATR * TRAILING_ATR_MULTIPLIER
                 if adx < 15 or macd_hist < 0:
                     tightened_sl = round(current_price - atr * TRAILING_ATR_MULTIPLIER, 6)
                     if tightened_sl > trade['sl']:
