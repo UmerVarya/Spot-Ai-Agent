@@ -1,20 +1,19 @@
 """
 Professional Streamlit dashboard for the Spot AI Super Agent.
 
-This dashboard presents an organised view of current and historical
-trading activity.  It is designed with a modern aesthetic and provides
-additional risk metrics beyond the original implementation.  Where
-available, Plotly charts are used for interactivity; otherwise, the
-dashboard falls back to Streamlit's built‑in charting functions.  The
-dashboard reads data from shared CSV and JSON files produced by the
-agent and trade manager.
+This file is a copy of the enhanced dashboard implementation from the
+`updated_repo` directory, moved to the project root so that
+``agent.py`` can find it.  The dashboard presents an organised
+summary of live and historical trades, computes key risk metrics and
+plots daily PnL.  It binds to the port specified by the ``PORT``
+environment variable to satisfy hosting providers like Render.
 
-Usage
------
-Run ``streamlit run dashboard.py`` from the project root.  The
-refresh interval can be adjusted via the sidebar.  Ensure that the
-agent process writes to the same ``ACTIVE_TRADES_FILE`` path so that
-live trades are visible.
+To run the dashboard on its own use:
+
+    streamlit run dashboard.py
+
+In production the agent will launch the dashboard automatically on
+startup via a background thread.
 """
 
 from __future__ import annotations
@@ -25,6 +24,16 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 
 import pandas as pd
+
+# Configure Streamlit port and address before importing the library.
+# Some hosting providers (e.g., Render) require your web process to bind
+# to the port specified in the PORT environment variable.  Setting
+# these environment variables instructs Streamlit to listen on the
+# correct host and port.  If PORT is not set, Streamlit will default
+# to 8501.
+os.environ.setdefault("STREAMLIT_SERVER_PORT", os.getenv("PORT", "8501"))
+os.environ.setdefault("STREAMLIT_SERVER_ADDRESS", "0.0.0.0")
+
 import streamlit as st
 
 # Try to import Plotly for interactive charts
@@ -46,7 +55,7 @@ except Exception:
 
 def get_active_trades_path() -> str:
     """Return the path to the active trades JSON file."""
-    return os.getenv("ACTIVE_TRADES_FILE", "/tmp/active_trades.json")
+    return os.getenv("ACTIVE_TRADES_FILE", os.path.join(os.path.expanduser("~"), "active_trades.json"))
 
 
 def load_active_trades() -> Dict[str, Any]:
@@ -209,8 +218,6 @@ def main() -> None:
     # Sidebar controls
     st.sidebar.title("Settings")
     refresh = st.sidebar.slider("Refresh Interval (seconds)", 10, 60, 30)
-    # Auto refresh using Streamlit's experimental function
-    st_autorefresh = getattr(st, "experimental_rerun", None)
     # Display session information
     st.sidebar.write(f"**Market Session:** {get_market_session()}")
     # Load data
@@ -233,7 +240,9 @@ def main() -> None:
         st.info("No active trades found.")
     st.markdown("---")
     # Historical performance
-    learning_log_path = os.getenv("TRADE_LEARNING_FILE", os.path.join(os.path.dirname(__file__), "trade_learning_log.csv"))
+    learning_log_path = os.getenv(
+        "TRADE_LEARNING_FILE", os.path.join(os.path.dirname(__file__), "trade_learning_log.csv")
+    )
     df_learning = load_log(learning_log_path)
     if not df_learning.empty:
         display_performance_summary(df_learning)
