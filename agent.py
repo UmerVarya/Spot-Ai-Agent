@@ -1,14 +1,16 @@
 """
-Entry point for the Spot AI Super Agent.
+Improved main entry point for the Spot AI Super Agent.
 
-This module orchestrates the scanning of market symbols, evaluates
-potential trades using technical indicators, sentiment analysis, a
-language model (LLM) and optional machine‑learning predictions.  When
-conditions are satisfied, the agent opens paper trades and logs them
-for subsequent learning.  Active trades are persisted to a JSON file
-whose path is determined by the ``ACTIVE_TRADES_FILE`` environment
-variable.  The agent also periodically fetches macro news and drives
-the Streamlit dashboard in a separate thread.
+This version incorporates several enhancements:
+
+* Dynamic stop‑loss and take‑profit levels based on Average True Range (ATR) rather
+  than fixed percentages.  ATR multipliers can be adjusted via constants
+  defined at the top of the module.
+* All major logging now uses the ``logging`` module instead of bare ``print``
+  statements.
+* Minor refactoring to improve readability.
+
+Other core logic remains unchanged from the original implementation.
 """
 
 import json
@@ -20,6 +22,8 @@ from datetime import datetime
 from typing import Dict, Any, List
 
 from dotenv import load_dotenv
+from ta.volatility import AverageTrueRange
+
 load_dotenv()
 
 from btc_dominance import get_btc_dominance
@@ -43,9 +47,18 @@ except Exception:
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-MAX_ACTIVE_TRADES = 2  # Maximum number of concurrent trades
-SCAN_INTERVAL = 15     # Seconds between scans
-NEWS_INTERVAL = 3600   # Seconds between macro news fetches
+# Maximum number of concurrent trades
+MAX_ACTIVE_TRADES = 2
+# Seconds between scans
+SCAN_INTERVAL = 15
+# Seconds between macro news fetches
+NEWS_INTERVAL = 3600
+
+# ATR multipliers for dynamic risk management
+ATR_SL_MULT = float(os.getenv("ATR_SL_MULT", 1.0))
+ATR_TP1_MULT = float(os.getenv("ATR_TP1_MULT", 1.0))
+ATR_TP2_MULT = float(os.getenv("ATR_TP2_MULT", 1.5))
+ATR_TP3_MULT = float(os.getenv("ATR_TP3_MULT", 2.0))
 
 
 def auto_run_news() -> None:
@@ -61,7 +74,6 @@ def auto_run_news() -> None:
 
 def start_dashboard() -> None:
     """Launch the Streamlit dashboard on the configured port in a thread."""
-    # Streamlit picks up the PORT environment variable if provided
     port = os.environ.get("PORT", "10000")
     cmd = f"streamlit run dashboard.py --server.port {port} --server.headless true"
     os.system(cmd)
@@ -95,9 +107,10 @@ def run_agent_loop() -> None:
             sentiment_bias = sentiment.get("bias", "neutral")
             sentiment_conf = float(sentiment.get("confidence", 5.0))
             logger.info(
-                f"🌐 BTC Dominance: {btc_d:.2f}% | Fear & Greed: {fg} | Sentiment: {sentiment_bias} (Confidence: {sentiment_conf})"
+                f"🌐 BTC Dominance: {btc_d:.2f}% | Fear & Greed: {fg} | "
+                f"Sentiment: {sentiment_bias} (Confidence: {sentiment_conf})"
             )
-            # Apply basic macro gating: skip if extreme fear or high BTC dominance
+            # Macro gating
             if (sentiment_bias == "bearish" and sentiment_conf >= 7) or fg < 20 or btc_d > 65:
                 logger.warning("🛑 Market conditions unfavorable. Skipping this cycle.")
                 time.sleep(SCAN_INTERVAL)
@@ -130,7 +143,6 @@ def run_agent_loop() -> None:
                         direction = "long"
                     if direction != "long" or position_size <= 0:
                         continue
-                    # Penalty for bearish flow handled in evaluate_signal; no hard skip
                     potential.append({
                         "symbol": symbol,
                         "score": score,
@@ -177,11 +189,7 @@ def run_agent_loop() -> None:
                 decision = brain_decision.get("decision", False)
                 conf = brain_decision.get("confidence", 0.0)
                 narrative = brain_decision.get("narrative", "")
-                # Apply ML probability if model available.  The predict_success_probability
-                # function accepts individual features rather than a single list.  Pass
-                # score, confidence, session id (0=Asia,1=Europe,2=US), btc dominance,
-                # fear‑greed index, sentiment confidence and pattern length.  Default
-                # probability is 0.5 if the model is missing or errors.
+                # Apply ML probability if model available
                 ml_prob = 0.5
                 if predict_success_probability is not None:
                     try:
@@ -191,7 +199,7 @@ def run_agent_loop() -> None:
                         ml_prob = predict_success_probability(
                             score,
                             conf,
-                            session_id,
+                            session,
                             btc_d,
                             fg,
                             sentiment_conf,
@@ -208,12 +216,18 @@ def run_agent_loop() -> None:
                 if not decision:
                     log_rejection(symbol, brain_decision.get("reason", "Brain veto"))
                     continue
-                # Open trade
+                # Determine dynamic SL/TP using ATR
+                try:
+                    atr_indicator = AverageTrueRange(high=data['high'], low=data['low'], close=data['close'], window=14)
+                    atr_series = atr_indicator.average_true_range()
+                    atr_val = float(atr_series.iloc[-1]) if not atr_series.empty else 0.0
+                except Exception:
+                    atr_val = data['close'].iloc[-1] * 0.01  # fallback 1% of price
                 entry_price = round(data["close"].iloc[-1], 6)
-                sl = round(entry_price * 0.99, 6)
-                tp1 = round(entry_price * 1.01, 6)
-                tp2 = round(entry_price * 1.015, 6)
-                tp3 = round(entry_price * 1.025, 6)
+                sl = round(entry_price - atr_val * ATR_SL_MULT, 6)
+                tp1 = round(entry_price + atr_val * ATR_TP1_MULT, 6)
+                tp2 = round(entry_price + atr_val * ATR_TP2_MULT, 6)
+                tp3 = round(entry_price + atr_val * ATR_TP3_MULT, 6)
                 new_trade = {
                     "symbol": symbol,
                     "direction": "long",
@@ -239,11 +253,9 @@ def run_agent_loop() -> None:
                 }
                 # Persist trade and log open
                 active_trades[symbol] = new_trade
-                # Save via trade_manager; on permission error, fall back to /tmp
                 try:
                     save_active_trades(active_trades)
                 except Exception as e:
-                    # Attempt to write directly to configured file or /tmp
                     fallback_path = os.getenv("ACTIVE_TRADES_FILE", "/tmp/active_trades.json")
                     try:
                         with open(fallback_path, "w") as f:
@@ -251,8 +263,8 @@ def run_agent_loop() -> None:
                     except Exception as e2:
                         logger.warning(f"Unable to save active trades: {e2}")
                 log_trade_result(new_trade, outcome="open")
-                send_email(f"New Trade Opened: {symbol}", json.dumps(new_trade, indent=2))
-                logger.info(f"✅ Opened trade {symbol} @ {entry_price} | ML={ml_prob:.2f} | Conf={conf:.2f}")
+                send_email(f"New Trade Opened: {symbol}", new_trade)
+                logger.info(f"✅ Opened trade {symbol} @ {entry_price} | ATR={atr_val:.6f} | ML={ml_prob:.2f} | Conf={conf:.2f}")
                 opened += 1
             # Save symbol scores for context boosting
             try:
