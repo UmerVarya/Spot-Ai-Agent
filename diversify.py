@@ -37,7 +37,7 @@ import pandas as pd
 
 from trade_utils import get_price_data  # avoid relative import issues
 
-# --- Configuration via environment variables ---
+# Configuration via environment variables
 DIVERSIFY_LOOKBACK_SHORT = int(os.getenv("DIVERSIFY_LOOKBACK_SHORT", 96))
 DIVERSIFY_LOOKBACK_LONG = int(os.getenv("DIVERSIFY_LOOKBACK_LONG", 288))
 DIVERSIFY_MAX_CORR = float(os.getenv("DIVERSIFY_MAX_CORR", 0.7))
@@ -45,10 +45,7 @@ DIVERSIFY_MAX_TRADES = int(os.getenv("DIVERSIFY_MAX_TRADES", 3))
 
 
 def _compute_returns(symbol: str, lookback: int) -> Optional[pd.Series]:
-    """Compute log returns for a symbol given a lookback.
-
-    Returns ``None`` if insufficient data.
-    """
+    """Compute log returns for a symbol given a lookback.  Returns None if insufficient data."""
     try:
         df = get_price_data(symbol)
     except Exception:
@@ -63,9 +60,7 @@ def _compute_returns(symbol: str, lookback: int) -> Optional[pd.Series]:
 
 
 def _compute_corr_matrix(symbols: List[str], lookback: int) -> Optional[pd.DataFrame]:
-    """Compute a correlation matrix for a list of symbols and lookback.
-    Returns ``None`` if insufficient data.
-    """
+    """Compute a correlation matrix for a list of symbols and lookback."""
     returns_map: Dict[str, pd.Series] = {}
     for sym in symbols:
         r = _compute_returns(sym, lookback)
@@ -80,9 +75,6 @@ def _compute_corr_matrix(symbols: List[str], lookback: int) -> Optional[pd.DataF
 
 
 def _max_abs_corr(sym: str, sel_sym: str, corr_short: Optional[pd.DataFrame], corr_long: Optional[pd.DataFrame]) -> float:
-    """Return the maximum absolute correlation between two symbols across windows.
-    If correlation cannot be computed, returns 0.0.
-    """
     values = []
     for corr in (corr_short, corr_long):
         if corr is None:
@@ -96,32 +88,7 @@ def _max_abs_corr(sym: str, sel_sym: str, corr_short: Optional[pd.DataFrame], co
 
 
 def select_diversified_signals(signals: List[Dict], max_corr: Optional[float] = None, max_trades: Optional[int] = None) -> List[Dict]:
-    """Select a diversified subset of candidate signals.
-
-    Parameters
-    ----------
-    signals : list of dict
-        Candidate trade signals sorted by desirability.
-    max_corr : float, optional
-        Override the default correlation threshold.  If ``None`` uses the
-        environment default ``DIVERSIFY_MAX_CORR``.
-    max_trades : int, optional
-        Maximum number of trades to select.  If ``None`` uses the
-        environment default ``DIVERSIFY_MAX_TRADES``.
-
-    Returns
-    -------
-    list of dict
-        Selected trade signals that are sufficiently diversified.
-
-    Notes
-    -----
-    The function always selects the top signal.  It then iterates
-    through the remaining signals and adds each one only if its
-    correlation with every already selected symbol is below the
-    threshold.  Correlations are measured across both short and long
-    lookbacks, and the maximum absolute value is used.
-    """
+    """Select a diversified subset of candidate signals."""
     if not signals:
         return []
     max_corr_val = max_corr if max_corr is not None else DIVERSIFY_MAX_CORR
