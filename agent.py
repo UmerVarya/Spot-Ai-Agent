@@ -57,7 +57,13 @@ except Exception:
     predict_success_probability = None  # type: ignore
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+# Configure logging level based on LOG_LEVEL environment variable.  Defaults to INFO.
+_log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+try:
+    _log_level = getattr(logging, _log_level_str)
+except Exception:
+    _log_level = logging.INFO
+logging.basicConfig(level=_log_level)
 
 # Maximum number of concurrent trades
 MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", 2))
@@ -149,6 +155,10 @@ def run_agent_loop() -> None:
                 try:
                     price_data = get_price_data(symbol)
                     if price_data is None or price_data.empty or len(price_data) < 20:
+                        logger.debug(
+                            f"Skip {symbol}: insufficient price data "
+                            f"({len(price_data) if price_data is not None else 'N/A'})"
+                        )
                         continue
                     score, direction, position_size, pattern_name = evaluate_signal(price_data, symbol)
                     symbol_scores[symbol] = {"score": score, "direction": direction}
@@ -156,6 +166,9 @@ def run_agent_loop() -> None:
                     if direction is None and score >= 4.5:
                         direction = "long"
                     if direction != "long" or position_size <= 0:
+                        logger.debug(
+                            f"Skip {symbol}: direction {direction}, position_size {position_size}, score {score:.2f}"
+                        )
                         continue
                     potential.append({
                         "symbol": symbol,
@@ -222,10 +235,14 @@ def run_agent_loop() -> None:
                         ml_prob = 0.5
                 # If ML model strongly negative, veto trade
                 if ml_prob < 0.4:
+                    logger.debug(f"Skip {symbol}: ML prob {ml_prob:.2f} below threshold")
                     log_rejection(symbol, f"ML model probability too low ({ml_prob:.2f})")
                     continue
                 # Veto if brain declines
                 if not decision:
+                    logger.debug(
+                        f"Skip {symbol}: brain veto — {brain_decision.get('reason', 'No reason provided')}"
+                    )
                     log_rejection(symbol, brain_decision.get("reason", "Brain veto"))
                     continue
                 # Determine dynamic SL/TP using ATR
