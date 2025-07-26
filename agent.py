@@ -4,14 +4,26 @@ Improved main entry point for the Spot AI Super Agent.
 This version incorporates several enhancements:
 
 * Dynamic stop‑loss and take‑profit levels based on Average True Range (ATR) rather
-  than fixed percentages.  ATR multipliers can be adjusted via constants
-  defined at the top of the module.
-* All major logging now uses the ``logging`` module instead of bare ``print``
-  statements.
-* Minor refactoring to improve readability.
+  than fixed percentages.  ATR multipliers can be adjusted via environment
+  variables at runtime, allowing flexible risk management without code changes.
+* Background threads launch both the news fetcher and the Streamlit dashboard,
+  binding the dashboard to the port specified by the ``PORT`` environment
+  variable (default 10000).  This makes the service compatible with hosts
+  like Render that require explicit port binding.
+* Logging uses Python's ``logging`` module for structured output and easier
+  monitoring.
+* The agent enforces spot‑only (long) trading and filters out symbols with
+  insufficient volume or price history.
 
-Other core logic remains unchanged from the original implementation.
+To run the agent locally:
+
+    python agent.py
+
+The dashboard will be available at ``http://localhost:<PORT>`` where ``PORT``
+defaults to 10000 unless overridden by the environment.
 """
+
+from __future__ import annotations
 
 import json
 import logging
@@ -42,17 +54,17 @@ from brain import should_trade
 try:
     from ml_model import predict_success_probability
 except Exception:
-    predict_success_probability = None
+    predict_success_probability = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 # Maximum number of concurrent trades
-MAX_ACTIVE_TRADES = 2
+MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", 2))
 # Seconds between scans
-SCAN_INTERVAL = 15
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", 15))
 # Seconds between macro news fetches
-NEWS_INTERVAL = 3600
+NEWS_INTERVAL = int(os.getenv("NEWS_INTERVAL", 3600))
 
 # ATR multipliers for dynamic risk management
 ATR_SL_MULT = float(os.getenv("ATR_SL_MULT", 1.0))
@@ -75,6 +87,8 @@ def auto_run_news() -> None:
 def start_dashboard() -> None:
     """Launch the Streamlit dashboard on the configured port in a thread."""
     port = os.environ.get("PORT", "10000")
+    # Use headless mode and explicit port binding.  Streamlit will bind to
+    # 0.0.0.0 automatically when running with --server.headless true.
     cmd = f"streamlit run dashboard.py --server.port {port} --server.headless true"
     os.system(cmd)
 
@@ -193,8 +207,6 @@ def run_agent_loop() -> None:
                 ml_prob = 0.5
                 if predict_success_probability is not None:
                     try:
-                        session_map = {"Asia": 0, "Europe": 1, "US": 2}
-                        session_id = session_map.get(session, 2)
                         pattern_len = len(pattern) if pattern else 0
                         ml_prob = predict_success_probability(
                             score,
@@ -203,7 +215,7 @@ def run_agent_loop() -> None:
                             btc_d,
                             fg,
                             sentiment_conf,
-                            pattern_len
+                            pattern_len,
                         )
                     except Exception as e:
                         logger.warning(f"ML prediction error: {e}")
@@ -264,7 +276,9 @@ def run_agent_loop() -> None:
                         logger.warning(f"Unable to save active trades: {e2}")
                 log_trade_result(new_trade, outcome="open")
                 send_email(f"New Trade Opened: {symbol}", new_trade)
-                logger.info(f"✅ Opened trade {symbol} @ {entry_price} | ATR={atr_val:.6f} | ML={ml_prob:.2f} | Conf={conf:.2f}")
+                logger.info(
+                    f"✅ Opened trade {symbol} @ {entry_price} | ATR={atr_val:.6f} | ML={ml_prob:.2f} | Conf={conf:.2f}"
+                )
                 opened += 1
             # Save symbol scores for context boosting
             try:
