@@ -1,15 +1,12 @@
 """
-Streamlit dashboard for visualising active Spot AI trades.
+Professional Streamlit dashboard for Spot AI Super Agent.
 
-This dashboard reads the active trades file created by the agent and
-calculates live mark‑to‑market P&L using real‑time prices from Binance.
-It refreshes automatically at an interval chosen by the user and
-displays a table of open positions with their stop‑loss and take‑profit
-levels and a status indicator.
-
-Modifications: The dashboard now loads the ``active_trades.json`` file
-using a constant path relative to this script.  This ensures that
-regardless of the working directory, the file is found correctly.
+This updated dashboard refines the original design with a cleaner layout,
+summary metrics and conditional formatting.  It preserves the refresh
+slider and active trades table while adding high‑level statistics (number
+of trades and average PnL).  Colours and icons provide an at‑a‑glance
+view of performance.  The dashboard automatically refreshes according
+to the interval selected.
 """
 
 import streamlit as st
@@ -20,33 +17,28 @@ from dotenv import load_dotenv
 import os
 from streamlit_autorefresh import st_autorefresh
 
-# === Load API Keys ===
+# Load API keys
 load_dotenv()
 api_key = os.getenv("BINANCE_API_KEY")
 api_secret = os.getenv("BINANCE_API_SECRET")
 client = Client(api_key, api_secret)
 
-# === Streamlit Page Settings ===
-st.set_page_config(page_title="📈 Spot AI Super Agent Dashboard", layout="wide")
+# Page configuration
+st.set_page_config(
+    page_title="Spot AI Super Agent Dashboard",
+    page_icon="📈",
+    layout="wide"
+)
 st.title("🤖 Spot AI Super Agent – Live Trade Dashboard")
 
-# === Paths ===
+# Path to active trades file
 import tempfile
 ACTIVE_TRADES_FILE = os.environ.get(
-    "ACTIVE_TRADES_FILE",
-    os.path.join(tempfile.gettempdir(), "active_trades.json")
+    "ACTIVE_TRADES_FILE", os.path.join(tempfile.gettempdir(), "active_trades.json")
 )
 
 
 def load_active_trades() -> dict:
-    """Load open trades from the JSON file.
-
-    Returns
-    -------
-    dict
-        Mapping of symbol to trade information.  An empty dict is returned
-        if the file is missing or malformed.
-    """
     try:
         with open(ACTIVE_TRADES_FILE, "r") as f:
             return json.load(f)
@@ -55,10 +47,6 @@ def load_active_trades() -> dict:
 
 
 def get_live_price(symbol: str) -> float:
-    """Fetch the latest price for a symbol from Binance.
-
-    If the API call fails, ``None`` is returned.
-    """
     try:
         res = client.get_symbol_ticker(symbol=symbol)
         return float(res['price'])
@@ -67,13 +55,6 @@ def get_live_price(symbol: str) -> float:
 
 
 def format_trade_row(symbol: str, data: dict) -> dict:
-    """Prepare a trade dict for display in a DataFrame.
-
-    This function computes the percentage P&L for the trade and formats
-    stop‑loss and take‑profit values.  It also concatenates status
-    flags to give a quick at‑a‑glance view of progress through the
-    profit ladder.
-    """
     entry = data.get("entry")
     direction = data.get("direction")
     sl = data.get("sl")
@@ -83,18 +64,11 @@ def format_trade_row(symbol: str, data: dict) -> dict:
     leverage = data.get("leverage", 1)
     size = data.get("position_size", 0)
     status = data.get("status", {})
-
     current_price = get_live_price(symbol)
     if current_price is None or entry is None:
         return None
-
-    if direction == "long":
-        pnl_percent = ((current_price - entry) / entry) * 100
-    else:
-        pnl_percent = ((entry - current_price) / entry) * 100
+    pnl_percent = ((current_price - entry) / entry) * 100 if direction == "long" else ((entry - current_price) / entry) * 100
     pnl_percent *= leverage
-
-    # Status string
     status_flags = []
     if status.get("tp1"):
         status_flags.append("✅ TP1")
@@ -105,7 +79,6 @@ def format_trade_row(symbol: str, data: dict) -> dict:
     if status.get("sl"):
         status_flags.append("🛑 SL Hit")
     status_str = " | ".join(status_flags) if status_flags else "⏳ In Progress"
-
     return {
         "Symbol": symbol,
         "Direction": direction,
@@ -117,19 +90,20 @@ def format_trade_row(symbol: str, data: dict) -> dict:
         "TP3": round(tp3, 4) if tp3 else None,
         "Leverage": leverage,
         "Position ($)": size,
-        "PnL %": round(pnl_percent, 2),
+        "PnL%": round(pnl_percent, 2),
         "Status": status_str,
     }
 
-# === Sidebar Refresh Control ===
+
+# Sidebar controls
 refresh_interval = st.sidebar.slider("⏱️ Refresh Interval (seconds)", 10, 60, 30)
 st.sidebar.markdown("---")
 st.sidebar.markdown("Built for 🔥 **Spot AI Super Agent**")
 
-# Auto-refresh every N seconds
+# Auto refresh
 st_autorefresh(interval=refresh_interval * 1000, key="refresh")
 
-# === Display Live Trades ===
+# Main content
 trades = load_active_trades()
 rows = []
 for sym, data in trades.items():
@@ -138,13 +112,19 @@ for sym, data in trades.items():
         rows.append(row)
 
 st.subheader("📊 Live PnL – Active Trades")
-
 if rows:
     df = pd.DataFrame(rows)
-    # Colour code PnL in a separate column for clarity
-    df["🟩 PnL %"] = df["PnL %"].apply(lambda x: f"🟢 {x:.2f}%" if x >= 0 else f"🔴 {x:.2f}%")
-    df = df.drop(columns=["PnL %"])  # remove the original column
-    st.dataframe(df, use_container_width=True)
+    # Summary metrics
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Active Trades", len(df))
+    avg_pnl = df['PnL%'].mean() if not df.empty else 0.0
+    col2.metric("Average PnL (%)", f"{avg_pnl:.2f}%", delta=f"{avg_pnl:.2f}%")
+    wins = (df['PnL%'] > 0).sum()
+    col3.metric("Winning Trades", wins)
+    # Colour PnL column
+    df_display = df.copy()
+    df_display["PnL"] = df_display['PnL%'].apply(lambda x: f"🟢 {x:.2f}%" if x >= 0 else f"🔴 {x:.2f}%")
+    df_display = df_display.drop(columns=["PnL%"])  # remove raw PnL%
+    st.dataframe(df_display, use_container_width=True)
 else:
-    st.warning("No active trades found.")
-    
+    st.info("No active trades found.")
