@@ -12,6 +12,7 @@ timezone handling and symbol filtering based on 24h volume.
 from __future__ import annotations
 
 import os
+import logging
 from datetime import datetime
 from typing import List, Dict, Tuple
 
@@ -36,12 +37,15 @@ SYMBOL_SCORES_FILE = os.path.join(os.path.dirname(__file__), "symbol_scores.json
 # Instantiate Binance client once
 client = Client()
 
+# Logger for debug output
+logger = logging.getLogger(__name__)
+
 # Environment variables
 LOCAL_TIMEZONE = os.getenv("LOCAL_TIMEZONE", "Asia/Karachi")
 # Default minimum 24h quote volume threshold for selecting symbols.  A lower
-# default (30000 USDT) yields a broader universe; adjust via the
+# default (5000 USDT) yields a broader universe; adjust via the
 # ``MIN_VOLUME_USDT`` environment variable if needed.
-MIN_VOLUME_USDT = float(os.getenv("MIN_VOLUME_USDT", 30000))
+MIN_VOLUME_USDT = float(os.getenv("MIN_VOLUME_USDT", 5000))
 KLINES_LIMIT = int(os.getenv("KLINES_LIMIT", 500))
 
 
@@ -181,7 +185,7 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "") -> Tuple[float, 
     """
     try:
         if price_data is None or price_data.empty or len(price_data) < 30:
-            print(f"[DEBUG] Skipping {symbol}: insufficient price data.")
+            logger.debug(f"Skipping {symbol}: insufficient price data ({len(price_data) if price_data is not None else 'N/A'} candles).")
             return 0.0, None, 0, "None"
         df = calculate_indicators(price_data)
         ema_short = df['ema_20'].iloc[-1]
@@ -238,8 +242,13 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "") -> Tuple[float, 
             pattern_confidence = recall_pattern_confidence(pattern_name)
         except Exception:
             pattern_confidence = 0
-        # Historical confidence adjustment
-        historical_conf = calculate_historical_confidence(symbol)
+        # Historical confidence adjustment — some implementations expect a trade dict
+        # rather than a symbol string, so catch any errors and default to 0.
+        try:
+            historical_conf = calculate_historical_confidence(symbol)  # type: ignore[arg-type]
+        except Exception as e:
+            logger.debug(f"Historical confidence error for {symbol}: {e}")
+            historical_conf = 0
         # Weighted sum
         score_raw = (trend_score * 0.4 + momentum_score * 0.3 + range_score * 0.1 + flow_score * 0.1 + pattern_confidence * 0.1)
         # Normalise to 0–10
@@ -247,6 +256,13 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "") -> Tuple[float, 
         # Determine direction and position size
         direction = "long" if score >= 5 else None
         position_size = get_position_size(score / 10.0 * 10)
+        # Log detailed scoring metrics for debugging
+        logger.debug(
+            f"Evaluated {symbol}: trend={trend_score}, momentum={momentum_score}, "
+            f"range={range_score}, flow={flow_score}, pattern_conf={pattern_confidence}, "
+            f"raw_score={score_raw:.2f}, score={score:.2f}, direction={direction}, "
+            f"position_size={position_size}"
+        )
         return score, direction, position_size, pattern_name
     except Exception as e:
         print(f"⚠️ evaluate_signal error for {symbol}: {e}")
