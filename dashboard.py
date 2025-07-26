@@ -147,3 +147,4 @@ if rows:
     st.dataframe(df, use_container_width=True)
 else:
     st.warning("No active trades found.")
+    
