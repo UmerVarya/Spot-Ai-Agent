@@ -12,8 +12,25 @@ to the interval selected.
 import streamlit as st
 import json
 import pandas as pd
-from binance.client import Client
-from dotenv import load_dotenv
+
+# Attempt to import Binance client.  If unavailable, provide a stub
+# that raises on instantiation.  This prevents runtime crashes in
+# environments where the ``python-binance`` library is missing.
+try:
+    from binance.client import Client  # type: ignore
+except Exception:
+    class Client:  # type: ignore
+        def __init__(self, *args, **kwargs):
+            raise ImportError("python-binance library not installed; cannot fetch live prices.")
+
+# dotenv support is optional; if ``dotenv`` is missing, environment
+# variables will not be loaded from a .env file.
+try:
+    from dotenv import load_dotenv  # type: ignore
+except Exception:
+    def load_dotenv(*args, **kwargs):  # type: ignore
+        return None
+
 import os
 from streamlit_autorefresh import st_autorefresh
 
@@ -21,7 +38,10 @@ from streamlit_autorefresh import st_autorefresh
 load_dotenv()
 api_key = os.getenv("BINANCE_API_KEY")
 api_secret = os.getenv("BINANCE_API_SECRET")
-client = Client(api_key, api_secret)
+try:
+    client = Client(api_key, api_secret)
+except Exception:
+    client = None
 
 # Page configuration
 st.set_page_config(
