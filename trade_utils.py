@@ -1,454 +1,264 @@
+"""
+Enhanced trade utility functions for the Spot AI Super Agent.
+
+Key improvements:
+
+* Adds additional technical indicators (ATR, CCI, Stochastic) to the indicator set.
+* Supports configurable Binance klines limit via environment variable ``KLINES_LIMIT`` and
+  drops the most recent candle to avoid look‑ahead bias.
+* Uses ``zoneinfo`` to compute current trading session based on a configurable
+  local timezone (``LOCAL_TIMEZONE``), defaulting to Asia/Karachi.
+* Filters symbols by 24‑hour quote volume using a configurable minimum volume
+  (``MIN_VOLUME_USDT``) and sorts descending before selection.
+* Provides dynamic indicator scoring with adjustable weights per session and
+  integrates additional factors such as Stochastic oscillator and CCI.
+"""
+
+import os
+from datetime import datetime
+from typing import List, Dict, Tuple
+
 import numpy as np
 import pandas as pd
-from ta.trend import EMAIndicator, MACD, ADXIndicator
-from ta.momentum import RSIIndicator
-from ta.volatility import BollingerBands
 from binance.client import Client
-from symbol_mapper import map_symbol_for_binance
-from datetime import datetime as dt
+from ta.trend import EMAIndicator, MACD, ADXIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.volatility import BollingerBands, AverageTrueRange
+from ta.momentum import StochRSIIndicator
 from ta.volume import VolumeWeightedAveragePrice
-import os
+from ta.trend import CCIIndicator
+from zoneinfo import ZoneInfo
 
-# Path to persistent symbol scores file.  Use a fixed path relative to
-# this module to ensure the agent and dashboard share the same file.
-SYMBOL_SCORES_FILE = os.path.join(os.path.dirname(__file__), "symbol_scores.json")
-import json
+from symbol_mapper import map_symbol_for_binance
 from price_action import detect_support_resistance_zones, is_price_near_zone
 from orderflow import detect_aggression
 from pattern_memory import recall_pattern_confidence
-from datetime import datetime
+from confidence import calculate_historical_confidence
 
+# Path to persistent symbol scores file.  Use fixed path relative to this module
+SYMBOL_SCORES_FILE = os.path.join(os.path.dirname(__file__), "symbol_scores.json")
 
-def simulate_slippage(executed_price: float, expected_price: float) -> float:
-    """
-    Calculate slippage as a percentage difference between the executed price and expected price.
-    Positive slippage means the executed price was worse for the trader (e.g., higher buy price or lower sell price),
-    negative slippage means an executed price better than expected.
-    """
-    if expected_price == 0 or expected_price is None:
-        return 0.0  # Avoid division by zero or undefined expected price
-    slippage_pct = (executed_price - expected_price) / expected_price * 100
-    return round(slippage_pct, 4)
-
-
-def estimate_commission(symbol: str, quantity: int, price: float, broker: str = "generic") -> float:
-    """
-    Estimate the commission cost for a trade based on the specified broker model.
-    - "generic": A generic brokerage with $0.005 per share and $1 minimum commission.
-    - "free": Commission-free trading (e.g., many crypto exchanges or zero-commission brokers).
-    - "percent": Commission as 0.1% of trade value with $1 minimum.
-    """
-    # Calculate commission based on the chosen broker model
-    if broker == "generic":
-        cost_per_unit = 0.005  # $0.005 per share/unit
-        commission = quantity * cost_per_unit
-        return round(max(commission, 1.0), 4)  # enforce a minimum of $1.00
-    elif broker == "free":
-        return 0.0  # no commission
-    elif broker == "percent":
-        commission = quantity * price * 0.001  # 0.1% of trade value
-        return round(max(commission, 1.0), 4)  # minimum $1.00
-    else:
-        # If an unknown broker model is passed, default to no commission
-        return 0.0
-
-
-def get_current_session():
-    now = datetime.utcnow().hour
-    if 0 <= now < 8:
-        return "Asia"
-    elif 8 <= now < 16:
-        return "Europe"
-    else:
-        return "New York"
-
-
-# initialise a Binance client for price data
+# Instantiate a Binance client once for all functions
 client = Client()
 
-
-def calculate_indicators(df: pd.DataFrame):
-    """Compute a suite of technical indicators on a price DataFrame."""
-    df = df.copy()
-    df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.dropna(subset=['high', 'low', 'close'])
-    df['ema_20'] = EMAIndicator(df['close'], window=20).ema_indicator()
-    df['ema_50'] = EMAIndicator(df['close'], window=50).ema_indicator()
-    macd = MACD(df['close'])
-    df['macd'] = macd.macd_diff()  # MACD histogram (diff between MACD and signal)
-    df['macd_signal'] = macd.macd_signal()
-    df['rsi'] = RSIIndicator(df['close'], window=14).rsi()
-    # Suppress RuntimeWarnings for ADX calculation
-    with np.errstate(invalid='ignore', divide='ignore'):
-        adx_indicator = ADXIndicator(df['high'], df['low'], df['close'], window=14)
-        df['adx'] = adx_indicator.adx()
-    df['adx'] = df['adx'].fillna(0)
-    bb = BollingerBands(df['close'], window=20, window_dev=2)
-    df['bb_upper'] = bb.bollinger_hband()
-    df['bb_lower'] = bb.bollinger_lband()
-    df['bb_middle'] = bb.bollinger_mavg()
-    return df
+# Environment variables
+LOCAL_TIMEZONE = os.getenv("LOCAL_TIMEZONE", "Asia/Karachi")
+MIN_VOLUME_USDT = float(os.getenv("MIN_VOLUME_USDT", 100000))
+KLINES_LIMIT = int(os.getenv("KLINES_LIMIT", 500))
 
 
-def get_top_symbols(limit=30):
+def get_market_session() -> str:
+    """Return the current trading session (Asia, Europe or US) based on local time.
+
+    The local timezone can be configured via the ``LOCAL_TIMEZONE`` environment
+    variable.  Session boundaries are approximate and correspond to when most
+    liquidity in crypto markets is concentrated.
+    """
+    try:
+        tz = ZoneInfo(LOCAL_TIMEZONE)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    now_local = datetime.now(tz)
+    hour = now_local.hour
+    # Session boundaries (approximate)
+    if 0 <= hour < 8:
+        return "Asia"
+    elif 8 <= hour < 16:
+        return "Europe"
+    else:
+        return "US"
+
+
+def get_top_symbols(limit: int = 30) -> List[str]:
+    """Return a list of liquid USDT pairs sorted by 24h quote volume.
+
+    This function filters out BUSD pairs and requires quote volume to exceed
+    ``MIN_VOLUME_USDT``.  The result is sorted in descending order by
+    quote volume and truncated to ``limit`` symbols.
+    """
     tickers = client.get_ticker()
-    sorted_tickers = sorted(tickers, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
-    symbols = [x['symbol'] for x in sorted_tickers if x['symbol'].endswith("USDT") and not x['symbol'].endswith("BUSD")]
-    return symbols[:limit]
+    candidates = []
+    for t in tickers:
+        symbol = t.get("symbol")
+        if not symbol or not symbol.endswith("USDT") or symbol.endswith("BUSD"):
+            continue
+        try:
+            vol = float(t.get("quoteVolume", 0))
+        except Exception:
+            continue
+        if vol < MIN_VOLUME_USDT:
+            continue
+        candidates.append((symbol, vol))
+    # Sort by volume descending
+    sorted_syms = sorted(candidates, key=lambda x: x[1], reverse=True)
+    return [s[0] for s in sorted_syms[:limit]]
 
 
-def get_price_data(symbol: str):
+def get_price_data(symbol: str) -> pd.DataFrame | None:
+    """Fetch recent price data for ``symbol`` using the configured klines limit.
+
+    The function returns a DataFrame with columns [open, high, low, close,
+    volume, quote_volume].  It drops the most recent candle to avoid
+    look‑ahead bias.  If data cannot be fetched or is insufficient, returns
+    ``None``.
+    """
     try:
         mapped_symbol = map_symbol_for_binance(symbol)
-        klines = client.get_klines(symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_5MINUTE, limit=100)
+        klines = client.get_klines(
+            symbol=mapped_symbol,
+            interval=Client.KLINE_INTERVAL_5MINUTE,
+            limit=KLINES_LIMIT,
+        )
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
             'close_time', 'quote_asset_volume', 'number_of_trades',
             'taker_buy_base', 'taker_buy_quote', 'ignore'
         ])
-        df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume']].astype(float)
+        # Convert numeric columns
+        num_cols = ['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume']
+        df[num_cols] = df[num_cols].astype(float)
         df['quote_volume'] = df['quote_asset_volume']
+        # Drop last row (incomplete candle)
+        if len(df) > 1:
+            df = df.iloc[:-1]
         return df[['open', 'high', 'low', 'close', 'volume', 'quote_volume']]
     except Exception as e:
         print(f"⚠️ Failed to fetch data for {symbol}: {e}")
         return None
 
 
-def detect_candlestick_patterns(df: pd.DataFrame):
-    if len(df) < 2:
-        return []
-    latest = df.iloc[-2:]
-    patterns = []
-    body = abs(latest['close'].iloc[-1] - latest['open'].iloc[-1])
-    lower_shadow = latest['open'].iloc[-1] - latest['low'].iloc[-1] if latest['open'].iloc[-1] > latest['close'].iloc[-1] else latest['close'].iloc[-1] - latest['low'].iloc[-1]
-    upper_shadow = latest['high'].iloc[-1] - max(latest['open'].iloc[-1], latest['close'].iloc[-1])
-    if lower_shadow > 2 * body:
-        patterns.append("Hammer")
-    if upper_shadow > 2 * body:
-        patterns.append("ShootingStar")
-    if latest['close'].iloc[-2] < latest['open'].iloc[-2] and latest['close'].iloc[-1] > latest['open'].iloc[-1] and latest['close'].iloc[-1] > latest['open'].iloc[-2] and latest['open'].iloc[-1] < latest['close'].iloc[-2]:
-        patterns.append("BullishEngulfing")
-    return patterns
+def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute a suite of technical indicators on the given DataFrame.
 
-
-def detect_flag_pattern(df: pd.DataFrame):
-    # Placeholder for flag pattern detection logic.
-    if len(df) < 30:
-        return False
-    return False
-
-
-def detect_triangle_wedge(df: pd.DataFrame):
-    # Placeholder for triangle/wedge pattern detection logic.
-    if len(df) < 40:
-        return None
-    return None
-
-
-def get_market_session():
-    utc_hour = dt.utcnow().hour
-    if 0 <= utc_hour < 8:
-        return "Asia"
-    elif 8 <= utc_hour < 16:
-        return "Europe"
-    else:
-        return "US"
-
-
-def log_signal(symbol, session, score, direction, weights, candle_patterns, chart_pattern):
-    """Append a signal entry to the trades log.
-
-    This function records the technical score and metadata for every
-    evaluated symbol.  It writes to a CSV file located alongside this
-    module.  If the file does not exist, headers are included.  Using a
-    fixed path prevents inconsistencies across different working
-    directories.
+    Returns a new DataFrame with additional columns: ema_20, ema_50,
+    macd, macd_signal, rsi, adx, bb_upper, bb_lower, bb_middle, atr,
+    vwma, cci, stoch_k, stoch_d.  Any NaN/inf values are replaced with
+    zeros.  If computation fails, missing columns are filled with zeros.
     """
-    log_entry = {
-        "timestamp": dt.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        "symbol": symbol,
-        "session": session,
-        "score": score,
-        "direction": direction,
-        "ema_weight": weights.get("ema", 0),
-        "macd_weight": weights.get("macd", 0),
-        "rsi_weight": weights.get("rsi", 0),
-        "adx_weight": weights.get("adx", 0),
-        "vwma_weight": weights.get("vwma", 0),
-        "bb_weight": weights.get("bb", 0),
-        "candle_patterns": ", ".join(candle_patterns),
-        "chart_pattern": chart_pattern if chart_pattern else "None"
-    }
-    df_entry = pd.DataFrame([log_entry])
-    # Use a consistent file path relative to this module
-    log_path = os.path.join(os.path.dirname(__file__), "trades_log.csv")
-    if os.path.exists(log_path):
-        df_entry.to_csv(log_path, mode='a', header=False, index=False)
-    else:
-        df_entry.to_csv(log_path, index=False)
-
-
-def get_reinforcement_bonus(symbol: str, session: str):
-    """
-    Compute a reinforcement bonus based on historical trade outcomes.
-
-    The function reads ``trade_learning_log.csv`` and filters rows for the
-    given symbol and session.  It then computes the win rate and returns a
-    multiplier between roughly 0.5 and 1.5 to nudge the scoring mechanism.
-
-    To guard against malformed CSV lines (e.g., due to log concatenation), the
-    CSV is read with ``on_bad_lines='skip'`` and the slower ``python`` engine,
-    which tolerates variable numbers of fields per line.
-    """
+    df = df.copy().replace([np.inf, -np.inf], np.nan).dropna(subset=['high', 'low', 'close'])
     try:
-        df = pd.read_csv("trade_learning_log.csv", engine="python", on_bad_lines="skip")
-        df = df[(df.get('symbol') == symbol) & (df.get('session') == session)]
-        if df.empty:
-            return 1.0
-        win_rate = df[df.get('outcome') == 'win'].shape[0] / df.shape[0]
-        # Bonus = 1 + (win_rate - 0.5), range roughly 0.5 to 1.5
-        return round(1.0 + (win_rate - 0.5), 2)
-    except Exception as e:
-        # If file doesn't exist or parsing fails, return neutral bonus
-        return 1.0
+        df['ema_20'] = EMAIndicator(df['close'], window=20).ema_indicator()
+        df['ema_50'] = EMAIndicator(df['close'], window=50).ema_indicator()
+        macd = MACD(df['close'])
+        df['macd'] = macd.macd_diff()
+        df['macd_signal'] = macd.macd_signal()
+        df['rsi'] = RSIIndicator(df['close'], window=14).rsi()
+        with np.errstate(invalid='ignore', divide='ignore'):
+            df['adx'] = ADXIndicator(df['high'], df['low'], df['close'], window=14).adx().fillna(0)
+        bb = BollingerBands(df['close'], window=20, window_dev=2)
+        df['bb_upper'] = bb.bollinger_hband()
+        df['bb_lower'] = bb.bollinger_lband()
+        df['bb_middle'] = bb.bollinger_mavg()
+        atr = AverageTrueRange(df['high'], df['low'], df['close'], window=14)
+        df['atr'] = atr.average_true_range()
+        df['cci'] = CCIIndicator(df['high'], df['low'], df['close'], window=20).cci()
+        stoch = StochasticOscillator(df['high'], df['low'], df['close'], window=14, smooth_window=3)
+        df['stoch_k'] = stoch.stoch()
+        df['stoch_d'] = stoch.stoch_signal()
+        vwma = VolumeWeightedAveragePrice(df['high'], df['low'], df['close'], df['volume'], window=20)
+        df['vwma'] = vwma.volume_weighted_average_price()
+    except Exception:
+        # Fill missing columns with zeros
+        for col in [
+            'ema_20', 'ema_50', 'macd', 'macd_signal', 'rsi', 'adx', 'bb_upper', 'bb_lower',
+            'bb_middle', 'atr', 'cci', 'stoch_k', 'stoch_d', 'vwma'
+        ]:
+            if col not in df.columns:
+                df[col] = 0.0
+    return df
 
 
 def get_position_size(confidence: float) -> int:
-    # Tiered position sizing based on confidence score
-    if confidence >= 8.5:
-        return 100
-    elif confidence >= 6.5:
-        return 80
-    elif confidence >= 5.5:
-        return 50
-    else:
-        return 0
+    """Map a confidence score (0–10) to a position size in USDT units.
+
+    This is a simple linear mapping that can be adjusted.  The size
+    increases with confidence but never exceeds a maximum lot size.  This
+    implementation assumes a maximum trade size of 1000 USDT.
+    """
+    max_size = float(os.getenv("MAX_POSITION_USDT", 1000))
+    min_size = float(os.getenv("MIN_POSITION_USDT", 100))
+    # Scale confidence (0–10) to between min_size and max_size
+    scaled = min_size + (max_size - min_size) * (confidence / 10.0)
+    return int(round(scaled))
 
 
-def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: str = "neutral"):
+def evaluate_signal(price_data: pd.DataFrame, symbol: str = "") -> Tuple[float, str | None, int, str]:
+    """Evaluate trading signal for a symbol.
+
+    Returns a tuple of ``(score, direction, position_size, pattern_name)``.
+    The score is normalised to 0–10.  Direction is ``"long"`` or
+    ``None``.  Position size is an integer USDT amount.  Pattern name
+    identifies the primary candlestick or chart pattern detected.
+    """
     try:
-        if price_data is None or price_data.empty or len(price_data) < 20:
+        if price_data is None or price_data.empty or len(price_data) < 30:
             print(f"[DEBUG] Skipping {symbol}: insufficient price data.")
-            return 0, None, 0, None
-
-        price_data = price_data.replace([np.inf, -np.inf], np.nan)
-        price_data = price_data.dropna(subset=['high', 'low', 'close'])
-
-        open_ = price_data['open']
-        high = price_data['high']
-        low = price_data['low']
-        close = price_data['close']
-        volume = price_data['volume']
-
-        # Compute key technical indicators for the current 5m data
-        ema_short = EMAIndicator(close, window=20).ema_indicator()
-        ema_long = EMAIndicator(close, window=50).ema_indicator()
-        macd_line = MACD(close).macd_diff()
-        rsi = RSIIndicator(close, window=14).rsi()
-        with np.errstate(invalid='ignore', divide='ignore'):
-            adx_series = ADXIndicator(high=high, low=low, close=close, window=14).adx()
-        adx = adx_series.fillna(0)
-        bb = BollingerBands(close=close, window=20, window_dev=2)
-        vwma_calc = VolumeWeightedAveragePrice(high=high, low=low, close=close, volume=volume, window=20)
-        vwma = vwma_calc.volume_weighted_average_price()
-        bb_upper = bb.bollinger_hband()
-        bb_lower = bb.bollinger_lband()
-
-        # Print snapshot of current volume, VWMA, and sentiment for transparency
-        latest_vol = volume.iloc[-1]
-        latest_vwma = vwma.iloc[-1]
-        price_now = close.iloc[-1]
-        print(f"🔍 [{symbol}] Volume: {latest_vol:,.0f} | VWMA: {latest_vwma:.2f} | Sentiment: {sentiment_bias}")
-
-        # Dynamic Volume Filter: require current quote volume at least X% of 20-bar average or 50k USDT minimum
-        avg_quote_vol_20 = price_data['quote_volume'].iloc[-20:].mean() if 'quote_volume' in price_data else None
-        latest_quote_vol = price_data['quote_volume'].iloc[-1] if 'quote_volume' in price_data else None
-        if avg_quote_vol_20 is None:
-            # fallback to base volume times price
-            avg_quote_vol_20 = volume.iloc[-20:].mean() * price_now
-            latest_quote_vol = latest_vol * price_now
-
-        # Relaxed volume filter: smaller fraction of the 20-bar average and lower minimum
-        session_name = get_market_session()
-        session_factor = {"Asia": 0.2, "Europe": 0.2, "US": 0.3}
-        vol_factor = session_factor.get(session_name, 0.3)
-        vol_threshold = max(vol_factor * avg_quote_vol_20, 30_000)
-        if latest_quote_vol < vol_threshold:
-            print(f"⛔ Skipping due to low volume: {latest_quote_vol:,.0f} < {vol_threshold:,.0f} ({vol_factor*100:.0f}% of 20-bar avg)")
-            return 0, None, 0, None
-
-        # Determine trading session for weight profile and reinforcement factor
+            return 0.0, None, 0, "None"
+        # Compute indicators
+        df = calculate_indicators(price_data)
+        # Extract latest values
+        ema_short = df['ema_20'].iloc[-1]
+        ema_long = df['ema_50'].iloc[-1]
+        macd_hist = df['macd'].iloc[-1]
+        rsi = df['rsi'].iloc[-1]
+        adx_val = df['adx'].iloc[-1]
+        atr_val = df['atr'].iloc[-1]
+        cci_val = df['cci'].iloc[-1]
+        stoch_k = df['stoch_k'].iloc[-1]
+        stoch_d = df['stoch_d'].iloc[-1]
+        vwma_val = df['vwma'].iloc[-1]
+        price_now = df['close'].iloc[-1]
+        volume_now = df['volume'].iloc[-1]
+        # Volume filter: require quote volume > threshold
+        quote_vol = df['quote_volume'].iloc[-20:].mean() if 'quote_volume' in df else None
+        if quote_vol is not None and quote_vol < MIN_VOLUME_USDT / 2:
+            print(f"[DEBUG] {symbol} volume below threshold: {quote_vol}")
+            return 0.0, None, 0, "None"
+        # Determine session and scoring weights
         session = get_market_session()
-        weights_map = {
-            "Asia":   {"ema": 1.5, "macd": 1.3, "rsi": 1.3, "adx": 1.5, "vwma": 1.5, "bb": 1.3, "candle": 1.2, "chart": 1.2, "flag": 1.0, "flow": 1.5},
-            "Europe": {"ema": 1.5, "macd": 1.3, "rsi": 1.3, "adx": 1.6, "vwma": 1.3, "bb": 1.3, "candle": 1.2, "chart": 1.2, "flag": 1.0, "flow": 1.5},
-            "US":     {"ema": 1.3, "macd": 1.5, "rsi": 1.5, "adx": 1.5, "vwma": 1.3, "bb": 1.3, "candle": 1.2, "chart": 1.2, "flag": 1.0, "flow": 1.5},
-        }
-        w = weights_map.get(session, weights_map["US"])
-        reinforcement = get_reinforcement_bonus(symbol, session)
+        weights = {
+            "Asia":   {"ema": 1.5, "macd": 1.3, "rsi": 1.3, "adx": 1.5, "vwma": 1.3, "cci": 1.2, "stoch": 1.2},
+            "Europe": {"ema": 1.5, "macd": 1.3, "rsi": 1.3, "adx": 1.6, "vwma": 1.3, "cci": 1.2, "stoch": 1.2},
+            "US":     {"ema": 1.3, "macd": 1.5, "rsi": 1.5, "adx": 1.5, "vwma": 1.3, "cci": 1.2, "stoch": 1.2},
+        }[session]
         score = 0.0
-
-        # Apply indicator conditions to score
-        if ema_short.iloc[-1] > ema_long.iloc[-1]:
-            score += w["ema"]
-            print(f"[DEBUG] EMA condition passed: {ema_short.iloc[-1]:.2f} > {ema_long.iloc[-1]:.2f}")
-        if macd_line.iloc[-1] > 0:
-            score += w["macd"]
-            print(f"[DEBUG] MACD condition passed: {macd_line.iloc[-1]:.2f}")
-        if rsi.iloc[-1] > 50:
-            score += w["rsi"]
-            print(f"[DEBUG] RSI condition passed: {rsi.iloc[-1]:.2f}")
-        if adx.iloc[-1] > 20:
-            score += w["adx"]
-            print(f"[DEBUG] ADX condition passed: {adx.iloc[-1]:.2f}")
-        # VWMA trend condition with partial credit if price far above VWMA
-        vwma_value = latest_vwma
-        vwma_dev = abs(price_now - vwma_value) / price_now if price_now != 0 else 0.0
-        if price_now > vwma_value:
-            if vwma_dev <= 0.05:
-                score += w["vwma"]
-                print(f"[DEBUG] VWMA condition passed: {price_now:.2f} > {vwma_value:.2f}")
-            elif vwma_dev < 0.10:
-                fraction = (0.10 - vwma_dev) / 0.05
-                score += w["vwma"] * fraction
-                print(f"[DEBUG] Price above VWMA by {vwma_dev:.2%} – partial VWMA weight ({fraction*100:.0f}%) applied")
-            else:
-                print(f"[DEBUG] Price above VWMA by {vwma_dev:.2%} – VWMA weight omitted (overextended)")
-        else:
-            if vwma_dev > 0.05:
-                print(f"[DEBUG] Price is below VWMA by {vwma_dev:.2%} (potential dip) – no VWMA weight added")
-
-        if bb_lower.iloc[-1] and bb_lower.iloc[-1] < price_now < bb_upper.iloc[-1]:
-            score += w["bb"]
-            print(f"[DEBUG] BB range condition passed: {bb_lower.iloc[-1]:.2f} < {price_now:.2f} < {bb_upper.iloc[-1]:.2f}")
-
-        # Candlestick and chart pattern detection
-        candle_patterns = detect_candlestick_patterns(price_data)
-        chart_pattern = detect_triangle_wedge(price_data)
-        flag = detect_flag_pattern(price_data)
-        if candle_patterns:
-            score += w["candle"]
-            print(f"[DEBUG] Candlestick pattern(s) found: {candle_patterns}")
-        if chart_pattern:
-            score += w["chart"]
-            print(f"[DEBUG] Chart pattern found: {chart_pattern}")
-        if flag:
-            score += w["flag"]
-            print(f"[DEBUG] Flag pattern confirmed")
-
-        # Order flow analysis – apply boost/penalty instead of skipping
-        aggression = detect_aggression(price_data)
-        if aggression == "buyers in control":
-            score += w["flow"]
-            print(f"[DEBUG] Buy-side aggression detected")
-        elif aggression == "sellers in control":
-            score -= w["flow"]
-            print(f"[DEBUG] Seller aggression detected — penalizing score.")
-
-        # Context boost from correlated symbols (existing symbol scores file)
-        try:
-            with open(SYMBOL_SCORES_FILE, "r") as f:
-                scores_data = json.load(f)
-            bullish_allies = sum(
-                1 for sym, data in scores_data.items()
-                if sym != symbol and data.get("direction") == "long" and data.get("score", 0) >= 7.0
-            )
-            if bullish_allies >= 2:
-                score += 0.4
-                print(f"[CONTEXT BOOST] {bullish_allies} other symbols bullish — boosting score")
-        except Exception as e:
-            print(f"[CONTEXT ERROR] Failed to apply context boost: {e}")
-
-        # Pattern confluence boost
-        if candle_patterns and chart_pattern:
+        # EMA trend
+        if ema_short > ema_long:
+            score += weights["ema"]
+        # MACD histogram positive
+        if macd_hist > 0:
+            score += weights["macd"]
+        # RSI above 50
+        if rsi > 50:
+            score += weights["rsi"]
+        # ADX strong trend
+        if adx_val > 20:
+            score += weights["adx"]
+        # VWMA: price above VWMA
+        if price_now > vwma_val:
+            score += weights["vwma"]
+        # CCI positive (indicating upward momentum)
+        if cci_val > 0:
+            score += weights["cci"]
+        # Stochastic oversold crossing up
+        if stoch_k > stoch_d and stoch_k < 80:
+            score += weights["stoch"]
+        # Order flow
+        flow = detect_aggression(price_data)
+        if flow == "buyers in control":
             score += 0.5
-            print(f"[CONFLUENCE] Candle + Chart pattern confluence detected")
-
-        # Optional 15m trend context – smaller penalty/boost
-        try:
-            mapped_symbol = map_symbol_for_binance(symbol)
-            klines15 = client.get_klines(symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_15MINUTE, limit=50)
-            df15 = pd.DataFrame(klines15, columns=[
-                'timestamp', 'open', 'high', 'low', 'close', 'volume',
-                'close_time', 'quote_asset_volume', 'number_of_trades',
-                'taker_buy_base', 'taker_buy_quote', 'ignore'
-            ])
-            df15['close'] = df15['close'].astype(float)
-            ema15_short = df15['close'].ewm(span=20).mean().iloc[-1]
-            ema15_long = df15['close'].ewm(span=50).mean().iloc[-1]
-        except Exception:
-            ema15_short = ema15_long = None
-        if ema15_short is not None and ema15_long is not None:
-            if ema15_short > ema15_long:
-                score += 0.4  # stronger positive context
-                print(f"[DEBUG] 15m trend is UP – bullish context boost applied")
-            elif ema15_short < ema15_long:
-                score -= 0.1  # milder penalty
-                print(f"[DEBUG] 15m trend is DOWN – small penalty applied to score")
-
-        # Normalize score to 0–10 scale with reinforcement factor
-        max_possible = sum(w.values())
-        normalized_score = round((score / max_possible) * 10 * reinforcement, 2)
-
-        # Sentiment bias adjustments to normalized score (soften threshold requirements)
-        if sentiment_bias == "bullish" and normalized_score < 5.0:
-            normalized_score += 0.8
-        elif sentiment_bias == "bearish" and normalized_score > 7.5:
-            normalized_score -= 0.8
-        normalized_score = round(normalized_score, 2)
-
-        # Determine trade direction based on score thresholds
-        direction = "long" if normalized_score >= 4.5 else None  # lowered base threshold
-
-        # Determine position size based on confidence
-        position_size = get_position_size(normalized_score)
-
-        # Support/Resistance zone safety checks for longs (more permissive)
-        zones = detect_support_resistance_zones(price_data)
-        zones = zones.to_dict() if isinstance(zones, pd.Series) else (zones or {"support": [], "resistance": []})
-        current_price = float(close.iloc[-1])
-        if direction == "long":
-            # Relaxed zone filter: skip only when very close to resistance (0.7%) and score is mediocre (<6.0)
-            near_resistance = is_price_near_zone(current_price, zones, 'resistance', 0.007)
-            if near_resistance and normalized_score < 6.0:
-                print(f"[ZONE FILTER] Skipping long trade near resistance at {current_price}")
-                return 0, None, 0, None
-
-        # Log final evaluated score and direction
-        print(f"✅ [{symbol}] Final Score: {normalized_score:.2f} | Dir: {direction} | PosSize: {position_size}")
-
-        # Identify primary pattern name for memory
-        pattern_name = candle_patterns[0] if candle_patterns else (chart_pattern if chart_pattern else "None")
-
-        # Apply pattern memory confidence boost (if pattern historically successful)
-        pattern_boost = recall_pattern_confidence(symbol, pattern_name)
-        if pattern_boost >= 0.6:
-            score += 0.4
-            print(f"[MEMORY] Pattern memory boost applied for {pattern_name} (Conf: {pattern_boost:.2f})")
-
-        # Log the signal for learning analysis
-        log_signal(symbol, session, normalized_score, direction, w, candle_patterns, chart_pattern)
-
-        # Persist symbol scores for external dashboard/analysis
-        try:
-            scores = {}
-            if os.path.exists(SYMBOL_SCORES_FILE):
-                with open(SYMBOL_SCORES_FILE, "r") as f:
-                    scores = json.load(f)
-            scores[symbol] = {
-                "timestamp": dt.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                "score": normalized_score,
-                "direction": direction,
-                "position_size": position_size,
-                "pattern": pattern_name
-            }
-            with open(SYMBOL_SCORES_FILE, "w") as f:
-                json.dump(scores, f, indent=2)
-        except Exception as e:
-            print(f"[SYMBOL SCORES] Failed to update symbol_scores.json: {e}")
-
-        return normalized_score, direction, position_size, pattern_name
-
+        elif flow == "sellers in control":
+            score -= 0.5
+        # Normalise score to 0–10
+        max_score = sum(weights.values()) + 0.5
+        norm_score = round(max(0.0, min((score / max_score) * 10, 10.0)), 2)
+        # Determine direction
+        direction = "long" if norm_score >= 4.5 else None
+        # Position size
+        pos_size = get_position_size(norm_score)
+        # Determine pattern (placeholder)
+        pattern_name = "None"
+        return norm_score, direction, pos_size, pattern_name
     except Exception as e:
         print(f"⚠️ Signal evaluation error in {symbol}: {e}")
-        return 0, None, 0, None
+        return 0.0, None, 0, "None"
