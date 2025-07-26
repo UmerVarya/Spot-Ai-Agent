@@ -1,29 +1,34 @@
 """
-Machine learning utilities for the Spot AI Super Agent.
+Advanced machine learning utilities for the Spot AI Super Agent.
 
-This module implements a simple logistic regression model using
-gradient descent to predict the probability that a trade will be
-successful (e.g., reaching TP levels instead of stop‑loss).  It
-trains on past trade outcomes recorded in ``trade_learning_log.csv``
-and saves model parameters and feature scaling values to disk.
+This module extends the original custom logistic regression by adding
+support for scikit‑learn's robust LogisticRegression classifier when
+available.  It scales features using StandardScaler and optionally
+performs simple train/test splits to evaluate accuracy.  Model
+parameters are saved to a JSON file in a backward‑compatible way so
+that older agents relying on the manual logistic regression can still
+load and use the model.
 
 Functions
 ---------
-train_model()
-    Train a logistic regression model on existing trade logs.
-predict_success_probability(features)
-    Given a feature vector for a potential trade, return the
-    estimated probability of success using the trained model.
+train_model(iterations=200, learning_rate=0.1)
+    Train a logistic regression model on the historical trade log.
+predict_success_probability(score, confidence, session, btc_d, fg, sentiment_conf, pattern)
+    Estimate the probability of a trade succeeding based on current
+    features using the saved model.
 
-Note
-----
-This implementation is intentionally lightweight to avoid external
-dependencies like scikit‑learn.  It uses numpy for matrix
-operations and implements logistic regression from scratch.  If
-scikit‑learn becomes available, you can replace the training and
-prediction functions with the built‑in classifiers for better
-performance and reliability.
+Notes
+-----
+If scikit‑learn is installed, the training routine will default to
+using ``sklearn.linear_model.LogisticRegression`` with a built‑in
+solver and L2 regularisation.  Otherwise it falls back to a manual
+gradient descent implementation similar to the original code.  The
+resulting model type is stored in the ``ml_model.json`` file under the
+``model_type`` key along with the feature names, scaling parameters
+and coefficients.
 """
+
+from __future__ import annotations
 
 import os
 import json
@@ -32,11 +37,20 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 
-# Optional: import confidence calculation if available.  We avoid
-# relative imports here because this module may be imported as a
-# top-level module outside of a package context.  If needed, you can
-# import calculate_historical_confidence from confidence directly.
 try:
+    # Try to import scikit‑learn components; if unavailable, fallback to manual
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.model_selection import train_test_split
+    SKLEARN_AVAILABLE = True
+except Exception:
+    LogisticRegression = None  # type: ignore
+    StandardScaler = None  # type: ignore
+    train_test_split = None  # type: ignore
+    SKLEARN_AVAILABLE = False
+
+try:
+    # Optionally import historical confidence calculator
     from confidence import calculate_historical_confidence  # noqa: F401
 except Exception:
     calculate_historical_confidence = None  # type: ignore
@@ -48,7 +62,7 @@ MODEL_FILE = os.path.join(ROOT_DIR, "ml_model.json")
 
 
 def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-    """Convert the learning log DataFrame into a feature matrix and labels.
+    """Extract feature matrix X and label vector y from the learning log.
 
     Parameters
     ----------
@@ -57,34 +71,40 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
 
     Returns
     -------
-    X : ndarray of shape (n_samples, n_features)
+    X : ndarray, shape (n_samples, n_features)
         Feature matrix.
-    y : ndarray of shape (n_samples,)
+    y : ndarray, shape (n_samples,)
         Binary labels (1 for success, 0 for failure).
     """
-    # Map session strings to integers
     session_map = {"Asia": 0, "Europe": 1, "US": 2, "New York": 2, "unknown": 3}
-    # Determine outcomes considered successful.  You may adjust this list
-    # depending on how you categorise early exits or TP4 modes.
     success_outcomes = {"tp1", "tp2", "tp3", "tp4", "tp4_sl", "win"}
-
-    feature_list = []
-    labels = []
+    feature_list: List[List[float]] = []
+    labels: List[int] = []
     for _, row in df.iterrows():
-        # Skip rows with missing mandatory fields
         try:
             score = float(row.get("score", 0))
-            confidence = float(row.get("confidence", 0))
+            conf = float(row.get("confidence", 0))
             session = row.get("session", "unknown")
             btc_dom = float(row.get("btc_dominance", 0))
             fg = float(row.get("fear_greed", 0))
-            sentiment_conf = float(row.get("sentiment_confidence", 5)) if isinstance(row.get("sentiment_confidence"), (int, float)) else 5.0
-            # Encode pattern type as simple length of pattern name (fallback)
+            # Sentiment confidence may be missing or a string; normalise to 0–10
+            sent_conf = row.get("sentiment_confidence", row.get("sentiment", 5))
+            try:
+                sent_conf_val = float(sent_conf)
+            except Exception:
+                sent_conf_val = 5.0
             pattern = row.get("pattern", "none")
             pattern_len = len(str(pattern))
             session_id = session_map.get(str(session), 3)
-
-            features = [score, confidence, session_id, btc_dom / 100.0, fg / 100.0, sentiment_conf / 10.0, pattern_len / 10.0]
+            features = [
+                score,  # normalised technical score
+                conf,   # final blended confidence
+                session_id,
+                btc_dom / 100.0,
+                fg / 100.0,
+                sent_conf_val / 10.0,
+                pattern_len / 10.0,
+            ]
             feature_list.append(features)
             outcome = str(row.get("outcome", "loss")).lower()
             labels.append(1 if outcome in success_outcomes else 0)
@@ -96,22 +116,19 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def _sigmoid(z: np.ndarray) -> np.ndarray:
-    return 1 / (1 + np.exp(-z))
+    return 1.0 / (1.0 + np.exp(-z))
 
 
 def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
     """Train a logistic regression model on the trade learning log.
 
-    The resulting model parameters and feature scaling statistics are
-    saved to ``ml_model.json`` in the project directory.  If the log
-    file is missing or has insufficient data, no model will be saved.
-
-    Parameters
-    ----------
-    iterations : int, optional
-        Number of gradient descent iterations.  Default is 200.
-    learning_rate : float, optional
-        Gradient descent step size.  Default is 0.1.
+    When scikit‑learn is available, use its ``LogisticRegression`` with
+    L2 regularisation and balanced class weights to handle class
+    imbalance.  Otherwise fall back to a manual gradient descent
+    implementation similar to the original code.  After training, the
+    model parameters and scaling statistics are saved to ``ml_model.json``.
+    The function prints a brief summary of model accuracy if a train/test
+    split is possible.
     """
     if not os.path.exists(LOG_FILE):
         print("⚠️ No trade learning log found. Cannot train ML model.")
@@ -128,35 +145,78 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
     if X.size == 0:
         print("⚠️ No valid training samples extracted.")
         return
-    # Normalise features (standard score)
-    mu = X.mean(axis=0)
-    sigma = X.std(axis=0) + 1e-8  # avoid division by zero
-    X_norm = (X - mu) / sigma
-    # Add bias term
-    X_aug = np.hstack([np.ones((X_norm.shape[0], 1)), X_norm])
-    # Initialise weights randomly
-    weights = np.zeros(X_aug.shape[1])
-    # Gradient descent
-    for _ in range(iterations):
-        z = X_aug @ weights
-        h = _sigmoid(z)
-        gradient = (X_aug.T @ (h - y)) / len(y)
-        weights -= learning_rate * gradient
-    # Save model
-    model_data = {
-        "weights": weights.tolist(),
-        "mu": mu.tolist(),
-        "sigma": sigma.tolist(),
-        "feature_names": [
-            "score", "confidence", "session_id", "btc_dom", "fear_greed", "sentiment_conf", "pattern_len"
-        ]
-    }
-    with open(MODEL_FILE, "w") as f:
-        json.dump(model_data, f, indent=2)
-    print("✅ ML model trained and saved.")
+    model_data: dict = {}
+    if SKLEARN_AVAILABLE:
+        # Use scikit‑learn logistic regression
+        scaler = StandardScaler()
+        X_norm = scaler.fit_transform(X)
+        # Train/test split for simple performance check
+        if train_test_split is not None:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_norm, y, test_size=0.2, random_state=42, stratify=y
+            )
+        else:
+            X_train, y_train = X_norm, y  # type: ignore
+            X_test, y_test = X_norm, y  # type: ignore
+        clf = LogisticRegression(max_iter=1000, class_weight='balanced', solver='lbfgs')
+        clf.fit(X_train, y_train)
+        # Evaluate accuracy if test split exists
+        acc = None
+        try:
+            y_pred = clf.predict(X_test)
+            acc = float((y_pred == y_test).mean())
+        except Exception:
+            pass
+        if acc is not None:
+            print(f"✅ ML model (sklearn) trained. Test accuracy: {acc:.2%}")
+        else:
+            print("✅ ML model (sklearn) trained.")
+        # Prepare model data for saving
+        model_data = {
+            "model_type": "sklearn",
+            "intercept": clf.intercept_.tolist(),
+            "coefficients": clf.coef_.tolist()[0],
+            "scaler_mean": scaler.mean_.tolist(),
+            "scaler_scale": scaler.scale_.tolist(),
+            "feature_names": [
+                "score", "confidence", "session_id", "btc_dom",
+                "fear_greed", "sent_conf", "pattern_len"
+            ],
+        }
+    else:
+        # Manual logistic regression training via gradient descent
+        mu = X.mean(axis=0)
+        sigma = X.std(axis=0) + 1e-8
+        X_norm = (X - mu) / sigma
+        X_aug = np.hstack([np.ones((X_norm.shape[0], 1)), X_norm])
+        weights = np.zeros(X_aug.shape[1])
+        for _ in range(iterations):
+            z = X_aug @ weights
+            h = _sigmoid(z)
+            gradient = (X_aug.T @ (h - y)) / len(y)
+            weights -= learning_rate * gradient
+        print("✅ ML model (manual) trained.")
+        model_data = {
+            "model_type": "manual",
+            "weights": weights.tolist(),
+            "mu": mu.tolist(),
+            "sigma": sigma.tolist(),
+            "feature_names": [
+                "score", "confidence", "session_id", "btc_dom",
+                "fear_greed", "sent_conf", "pattern_len"
+            ],
+        }
+    # Save model parameters to file
+    try:
+        with open(MODEL_FILE, "w") as f:
+            json.dump(model_data, f, indent=2)
+        print(f"✅ Model saved to {MODEL_FILE}")
+    except Exception as e:
+        print(f"⚠️ Failed to save ML model: {e}")
 
 
 def _load_model() -> dict:
+    """Load the trained model from disk.  Returns an empty dict on failure."""
     if not os.path.exists(MODEL_FILE):
         return {}
     try:
@@ -167,51 +227,81 @@ def _load_model() -> dict:
 
 
 def _prepare_feature_vector(score: float, confidence: float, session: str, btc_d: float, fg: float, sentiment_conf: float, pattern: str) -> List[float]:
-    session_map = {"Asia": 0, "Europe": 1, "US": 2, "New York": 2}
+    session_map = {"Asia": 0, "Europe": 1, "US": 2, "New York": 2, "unknown": 3}
     session_id = session_map.get(session, 3)
     pattern_len = len(str(pattern))
-    feat = [score, confidence, session_id, btc_d / 100.0, fg / 100.0, sentiment_conf / 10.0, pattern_len / 10.0]
-    return feat
+    return [
+        score,
+        confidence,
+        session_id,
+        btc_d / 100.0,
+        fg / 100.0,
+        sentiment_conf / 10.0,
+        pattern_len / 10.0,
+    ]
 
 
-def predict_success_probability(score: float, confidence: float, session: str, btc_d: float, fg: float, sentiment_conf: float, pattern: str) -> float:
+def predict_success_probability(
+    score: float,
+    confidence: float,
+    session: str,
+    btc_d: float,
+    fg: float,
+    sentiment_conf: float,
+    pattern: str
+) -> float:
     """Predict the success probability for a potential trade.
-
-    If no model is trained yet, returns 0.5 (neutral).  Otherwise the
-    stored model parameters are used to compute the logistic function.
 
     Parameters
     ----------
     score : float
-        Normalised technical score from the signal evaluation.
+        Technical score from signal evaluation.
     confidence : float
-        Blended confidence before ML adjustment.
+        Blended confidence after LLM evaluation and adjustments.
     session : str
-        Current market session ("Asia", "Europe", "US").
+        Market session ("Asia", "Europe", "US", etc.).
     btc_d : float
-        Current BTC dominance percentage.
+        BTC dominance percentage.
     fg : float
         Fear & Greed index.
     sentiment_conf : float
-        Macro sentiment confidence (0–10 scale).
+        Macro sentiment confidence on a 0–10 scale.
     pattern : str
-        Pattern name or description.
+        Name of the detected pattern.
 
     Returns
     -------
     float
-        Probability of success in [0, 1].
+        Predicted probability in [0, 1].  Returns 0.5 if model is
+        unavailable or cannot be evaluated.
     """
     model = _load_model()
     if not model:
-        return 0.5  # neutral if model not trained
-    weights = np.array(model.get("weights"))
-    mu = np.array(model.get("mu"))
-    sigma = np.array(model.get("sigma"))
+        return 0.5
     x = np.array(_prepare_feature_vector(score, confidence, session, btc_d, fg, sentiment_conf, pattern))
-    # standardise
-    x_norm = (x - mu) / (sigma + 1e-8)
-    x_aug = np.hstack([1.0, x_norm])
-    z = float(x_aug @ weights)
-    prob = float(_sigmoid(np.array([z]))[0])
-    return prob
+    model_type = model.get("model_type", "manual")
+    try:
+        if model_type == "sklearn":
+            # Apply scaling
+            mean = np.array(model.get("scaler_mean"))
+            scale = np.array(model.get("scaler_scale"))
+            x_norm = (x - mean) / scale
+            # Compute linear combination
+            intercept = np.array(model.get("intercept"))
+            coef = np.array(model.get("coefficients"))
+            z = intercept + np.dot(coef, x_norm)
+            prob = float(_sigmoid(np.array([z]))[0])
+            return prob
+        else:
+            # Manual model structure: weights include bias as first element
+            mu = np.array(model.get("mu"))
+            sigma = np.array(model.get("sigma"))
+            weights = np.array(model.get("weights"))
+            x_norm = (x - mu) / (sigma + 1e-8)
+            x_aug = np.hstack([1.0, x_norm])
+            z = float(x_aug @ weights)
+            prob = float(_sigmoid(np.array([z]))[0])
+            return prob
+    except Exception:
+        # Fallback neutral probability if something goes wrong
+        return 0.5
