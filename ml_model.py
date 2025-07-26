@@ -38,7 +38,6 @@ import numpy as np
 import pandas as pd
 
 try:
-    # Try to import scikit‑learn components; if unavailable, fallback to manual
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
     from sklearn.model_selection import train_test_split
@@ -50,32 +49,18 @@ except Exception:
     SKLEARN_AVAILABLE = False
 
 try:
-    # Optionally import historical confidence calculator
     from confidence import calculate_historical_confidence  # noqa: F401
 except Exception:
     calculate_historical_confidence = None  # type: ignore
 
-# Path constants
+# Paths
 ROOT_DIR = os.path.dirname(__file__)
 LOG_FILE = os.path.join(ROOT_DIR, "trade_learning_log.csv")
 MODEL_FILE = os.path.join(ROOT_DIR, "ml_model.json")
 
 
 def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-    """Extract feature matrix X and label vector y from the learning log.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        DataFrame of logged trades read from ``trade_learning_log.csv``.
-
-    Returns
-    -------
-    X : ndarray, shape (n_samples, n_features)
-        Feature matrix.
-    y : ndarray, shape (n_samples,)
-        Binary labels (1 for success, 0 for failure).
-    """
+    """Extract feature matrix X and label vector y from the learning log."""
     session_map = {"Asia": 0, "Europe": 1, "US": 2, "New York": 2, "unknown": 3}
     success_outcomes = {"tp1", "tp2", "tp3", "tp4", "tp4_sl", "win"}
     feature_list: List[List[float]] = []
@@ -87,7 +72,6 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
             session = row.get("session", "unknown")
             btc_dom = float(row.get("btc_dominance", 0))
             fg = float(row.get("fear_greed", 0))
-            # Sentiment confidence may be missing or a string; normalise to 0–10
             sent_conf = row.get("sentiment_confidence", row.get("sentiment", 5))
             try:
                 sent_conf_val = float(sent_conf)
@@ -97,8 +81,8 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
             pattern_len = len(str(pattern))
             session_id = session_map.get(str(session), 3)
             features = [
-                score,  # normalised technical score
-                conf,   # final blended confidence
+                score,
+                conf,
                 session_id,
                 btc_dom / 100.0,
                 fg / 100.0,
@@ -120,16 +104,7 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
 
 
 def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
-    """Train a logistic regression model on the trade learning log.
-
-    When scikit‑learn is available, use its ``LogisticRegression`` with
-    L2 regularisation and balanced class weights to handle class
-    imbalance.  Otherwise fall back to a manual gradient descent
-    implementation similar to the original code.  After training, the
-    model parameters and scaling statistics are saved to ``ml_model.json``.
-    The function prints a brief summary of model accuracy if a train/test
-    split is possible.
-    """
+    """Train a logistic regression model on the trade learning log."""
     if not os.path.exists(LOG_FILE):
         print("⚠️ No trade learning log found. Cannot train ML model.")
         return
@@ -147,10 +122,8 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
         return
     model_data: dict = {}
     if SKLEARN_AVAILABLE:
-        # Use scikit‑learn logistic regression
         scaler = StandardScaler()
         X_norm = scaler.fit_transform(X)
-        # Train/test split for simple performance check
         if train_test_split is not None:
             X_train, X_test, y_train, y_test = train_test_split(
                 X_norm, y, test_size=0.2, random_state=42, stratify=y
@@ -160,7 +133,6 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
             X_test, y_test = X_norm, y  # type: ignore
         clf = LogisticRegression(max_iter=1000, class_weight='balanced', solver='lbfgs')
         clf.fit(X_train, y_train)
-        # Evaluate accuracy if test split exists
         acc = None
         try:
             y_pred = clf.predict(X_test)
@@ -171,7 +143,6 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
             print(f"✅ ML model (sklearn) trained. Test accuracy: {acc:.2%}")
         else:
             print("✅ ML model (sklearn) trained.")
-        # Prepare model data for saving
         model_data = {
             "model_type": "sklearn",
             "intercept": clf.intercept_.tolist(),
@@ -184,7 +155,6 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
             ],
         }
     else:
-        # Manual logistic regression training via gradient descent
         mu = X.mean(axis=0)
         sigma = X.std(axis=0) + 1e-8
         X_norm = (X - mu) / sigma
@@ -206,7 +176,6 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
                 "fear_greed", "sent_conf", "pattern_len"
             ],
         }
-    # Save model parameters to file
     try:
         with open(MODEL_FILE, "w") as f:
             json.dump(model_data, f, indent=2)
@@ -216,7 +185,6 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
 
 
 def _load_model() -> dict:
-    """Load the trained model from disk.  Returns an empty dict on failure."""
     if not os.path.exists(MODEL_FILE):
         return {}
     try:
@@ -250,31 +218,7 @@ def predict_success_probability(
     sentiment_conf: float,
     pattern: str
 ) -> float:
-    """Predict the success probability for a potential trade.
-
-    Parameters
-    ----------
-    score : float
-        Technical score from signal evaluation.
-    confidence : float
-        Blended confidence after LLM evaluation and adjustments.
-    session : str
-        Market session ("Asia", "Europe", "US", etc.).
-    btc_d : float
-        BTC dominance percentage.
-    fg : float
-        Fear & Greed index.
-    sentiment_conf : float
-        Macro sentiment confidence on a 0–10 scale.
-    pattern : str
-        Name of the detected pattern.
-
-    Returns
-    -------
-    float
-        Predicted probability in [0, 1].  Returns 0.5 if model is
-        unavailable or cannot be evaluated.
-    """
+    """Predict the success probability for a potential trade."""
     model = _load_model()
     if not model:
         return 0.5
@@ -282,18 +226,15 @@ def predict_success_probability(
     model_type = model.get("model_type", "manual")
     try:
         if model_type == "sklearn":
-            # Apply scaling
             mean = np.array(model.get("scaler_mean"))
             scale = np.array(model.get("scaler_scale"))
             x_norm = (x - mean) / scale
-            # Compute linear combination
             intercept = np.array(model.get("intercept"))
             coef = np.array(model.get("coefficients"))
             z = intercept + np.dot(coef, x_norm)
             prob = float(_sigmoid(np.array([z]))[0])
             return prob
         else:
-            # Manual model structure: weights include bias as first element
             mu = np.array(model.get("mu"))
             sigma = np.array(model.get("sigma"))
             weights = np.array(model.get("weights"))
@@ -303,5 +244,4 @@ def predict_success_probability(
             prob = float(_sigmoid(np.array([z]))[0])
             return prob
     except Exception:
-        # Fallback neutral probability if something goes wrong
         return 0.5
