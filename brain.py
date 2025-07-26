@@ -211,3 +211,4 @@ def should_trade(symbol, score, direction, indicators, session, pattern_name, or
             "confidence": 0.0,
             "reason": f"Error in should_trade(): {e}"
         }
+        
