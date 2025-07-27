@@ -193,8 +193,15 @@ if not hist_df.empty:
     else:
         hist_df["PnL%"] = 0.0
     total_trades = len(hist_df)
-    wins_hist = (hist_df["PnL%"] > 0).sum()
-    losses_hist = (hist_df["PnL%"] < 0).sum()
+    # Derive win/loss counts.  Prefer the 'outcome' column if present;
+    # fallback to PnL sign when 'outcome' is missing.
+    if "outcome" in hist_df.columns:
+        outcome_lower = hist_df["outcome"].astype(str).str.lower()
+        wins_hist = outcome_lower.isin(["win", "tp", "profit", "tp1", "tp2", "tp3"]).sum()
+        losses_hist = outcome_lower.isin(["loss", "sl", "stoploss", "stop loss"]).sum()
+    else:
+        wins_hist = (hist_df["PnL%"] > 0).sum()
+        losses_hist = (hist_df["PnL%"] < 0).sum()
     total_pnl = hist_df["PnL%"].sum()
     # Section header
     st.subheader("📈 Historical Performance – Completed Trades")
