@@ -80,11 +80,25 @@ def load_active_trades() -> dict:
 
 
 def load_trade_history() -> pd.DataFrame:
-    """Load completed trade history from CSV.  If missing, return empty DataFrame."""
-    try:
-        return pd.read_csv(TRADE_LOG_FILE)
-    except Exception:
-        return pd.DataFrame()
+    """
+    Load completed trade history from CSV.  This function first attempts to
+    read the path specified by ``TRADE_LOG_FILE``.  If that file is empty
+    or missing, it falls back to ``trade_log.csv`` and then
+    ``trade_learning_log.csv`` in the same directory as this script.  If
+    none are found, an empty DataFrame is returned.
+    """
+    # Try the configured file
+    for candidate in [TRADE_LOG_FILE,
+                      os.path.join(os.path.dirname(__file__), "trade_log.csv"),
+                      os.path.join(os.path.dirname(__file__), "trade_learning_log.csv")]:
+        try:
+            if candidate and os.path.exists(candidate):
+                df = pd.read_csv(candidate)
+                if not df.empty:
+                    return df
+        except Exception:
+            continue
+    return pd.DataFrame()
 
 
 def get_live_price(symbol: str) -> float:
@@ -184,12 +198,18 @@ hist_df = load_trade_history()
 if not hist_df.empty:
     # Compute PnL percent per trade
     # Determine if direction field exists; fallback to long if missing
-    if "direction" in hist_df.columns and "entry" in hist_df.columns and "exit" in hist_df.columns:
-        hist_df["PnL%"] = np.where(
-            hist_df["direction"].str.lower().str.startswith("s"),
-            (hist_df["entry"] - hist_df["exit"]) / hist_df["entry"] * 100,
-            (hist_df["exit"] - hist_df["entry"]) / hist_df["entry"] * 100,
+    if {"direction", "entry", "exit"}.issubset(hist_df.columns):
+        # Coerce entry/exit to numeric; non‑numeric values become NaN
+        entries = pd.to_numeric(hist_df["entry"], errors="coerce")
+        exits = pd.to_numeric(hist_df["exit"], errors="coerce")
+        directions = hist_df["direction"].astype(str)
+        pnl_calc = np.where(
+            directions.str.lower().str.startswith("s"),
+            (entries - exits) / entries * 100,
+            (exits - entries) / entries * 100,
         )
+        # Replace NaN results with zero
+        hist_df["PnL%"] = np.nan_to_num(pnl_calc, nan=0.0)
     else:
         hist_df["PnL%"] = 0.0
     total_trades = len(hist_df)
