@@ -63,7 +63,6 @@ TRADE_LOG_FILE = os.environ.get(
     os.path.join(os.path.dirname(__file__), "trade_log.csv"),
 )
 
-
 def load_active_trades() -> dict:
     """Return a dictionary of active trades from the configured JSON file."""
     try:
@@ -71,7 +70,6 @@ def load_active_trades() -> dict:
             return json.load(f)
     except Exception:
         return {}
-
 
 def load_trade_history() -> pd.DataFrame:
     """
@@ -92,7 +90,6 @@ def load_trade_history() -> pd.DataFrame:
             continue
     return pd.DataFrame()
 
-
 def get_live_price(symbol: str) -> float:
     """Fetch the current price for a symbol from Binance."""
     try:
@@ -100,7 +97,6 @@ def get_live_price(symbol: str) -> float:
         return float(res["price"])
     except Exception:
         return None
-
 
 def format_active_row(symbol: str, data: dict) -> dict:
     """Format a single active trade dictionary into a row for display."""
@@ -110,7 +106,6 @@ def format_active_row(symbol: str, data: dict) -> dict:
     tp1 = data.get("tp1")
     tp2 = data.get("tp2")
     tp3 = data.get("tp3")
-    leverage = data.get("leverage", 1)
     size = data.get("size", data.get("position_size", 0))
     status = data.get("status", {})
     current_price = get_live_price(symbol)
@@ -123,7 +118,6 @@ def format_active_row(symbol: str, data: dict) -> dict:
     else:
         pnl_abs = (entry - current_price) * size
         pnl_percent = ((entry - current_price) / entry) * 100
-    pnl_percent *= leverage
     # Time in trade (minutes)
     entry_time_str = data.get("entry_time") or data.get("timestamp")
     if entry_time_str:
@@ -155,7 +149,6 @@ def format_active_row(symbol: str, data: dict) -> dict:
         "TP1": round(tp1, 4) if tp1 else None,
         "TP2": round(tp2, 4) if tp2 else None,
         "TP3": round(tp3, 4) if tp3 else None,
-        "Leverage": leverage,
         "Size": size,
         "PnL ($)": round(pnl_abs, 4),
         "PnL (%)": round(pnl_percent, 2),
@@ -164,7 +157,6 @@ def format_active_row(symbol: str, data: dict) -> dict:
         "Session": data.get("session", ""),
         "Status": status_str,
     }
-
 
 # Sidebar controls
 refresh_interval = st.sidebar.slider("⏱️ Refresh Interval (seconds)", 10, 60, 30)
@@ -206,7 +198,6 @@ if active_rows:
     st.dataframe(df_display, use_container_width=True)
 else:
     st.info("No active trades found.")
-
 
 # Load trade history and compute summary statistics
 hist_df = load_trade_history()
