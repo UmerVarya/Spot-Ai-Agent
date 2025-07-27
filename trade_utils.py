@@ -615,6 +615,16 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         session_factor = {"Asia": 0.3, "Europe": 0.3, "US": 0.4}
         vol_factor = session_factor.get(session_name, 0.4)
         vol_threshold = max(vol_factor * avg_quote_vol_20, 50_000)
+
+      # NEW: read TRAINING_MODE flag from environment.  When true, skip volume filter.
+      training_mode = os.getenv("TRAINING_MODE", "false").lower() == "true"
+      # Only enforce the volume threshold when *not* training
+      if not training_mode and latest_quote_vol < vol_threshold:
+        print(f"⛔ Skipping due to low volume: "
+              f"{latest_quote_vol:,.0f} < {vol_threshold:,.0f} "
+              f"({vol_factor*100:.0f}% of 20-bar avg)")
+        return 0, None, 0, None
+
         if latest_quote_vol < vol_threshold:
             print(f"⛔ Skipping due to low volume: {latest_quote_vol:,.0f} < {vol_threshold:,.0f} ({vol_factor*100:.0f}% of 20-bar avg)")
             return 0, None, 0, None
