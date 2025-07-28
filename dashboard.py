@@ -79,13 +79,21 @@ def load_trade_history() -> pd.DataFrame:
     ``trade_learning_log.csv`` in the same directory as this script.  If
     none are found, an empty DataFrame is returned.
     """
-    candidates = [TRADE_LOG_FILE, os.path.join(os.path.dirname(__file__), "trade_log.csv"), os.path.join(os.path.dirname(__file__), "trade_learning_log.csv")]
+    candidates = [
+        TRADE_LOG_FILE,
+        os.path.join(os.path.dirname(__file__), "trade_log.csv"),
+        os.path.join(os.path.dirname(__file__), "trade_learning_log.csv"),
+    ]
     for candidate in candidates:
+        if not candidate or not os.path.exists(candidate):
+            continue
         try:
-            if candidate and os.path.exists(candidate):
-                df = pd.read_csv(candidate)
-                if not df.empty:
-                    return df
+            df = pd.read_csv(candidate)
+            if df.empty:
+                # handle log files saved without a header row
+                df = pd.read_csv(candidate, header=None)
+            if not df.empty:
+                return df
         except Exception:
             continue
     return pd.DataFrame()
