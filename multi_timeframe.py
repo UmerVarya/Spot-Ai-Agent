@@ -66,7 +66,13 @@ def multi_timeframe_confluence(df: pd.DataFrame, timeframes: List[str], indicato
     """
     results: Dict[str, float] = {}
     for tf in timeframes:
-        resampled = resample_ohlcv(df[['close']].copy(), tf)
+        # Resample the full OHLCV dataframe so all required
+        # columns are present for the aggregation. Previously this
+        # function attempted to resample only the ``close`` column,
+        # which raised ``KeyError`` when ``resample_ohlcv`` expected
+        # the other OHLCV columns.  Passing the entire dataframe
+        # ensures the resampler has the correct inputs.
+        resampled = resample_ohlcv(df.copy(), tf)
         if len(resampled) < 2:
             continue
         results[tf] = float(indicator_func(resampled['close']))
