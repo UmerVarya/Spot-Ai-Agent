@@ -368,14 +368,31 @@ def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
     try:
         mapped_symbol = map_symbol_for_binance(symbol)
         klines = client.get_klines(symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_5MINUTE, limit=500)
-        df = pd.DataFrame(klines, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'number_of_trades',
-            'taker_buy_base', 'taker_buy_quote', 'ignore'
-        ])
-        df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume']] = df[['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume']].astype(float)
-        df['quote_volume'] = df['quote_asset_volume']
-        return df[['open', 'high', 'low', 'close', 'volume', 'quote_volume']]
+        df = pd.DataFrame(
+            klines,
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "close_time",
+                "quote_asset_volume",
+                "number_of_trades",
+                "taker_buy_base",
+                "taker_buy_quote",
+                "ignore",
+            ],
+        )
+        df[["open", "high", "low", "close", "volume", "quote_asset_volume"]] = df[
+            ["open", "high", "low", "close", "volume", "quote_asset_volume"]
+        ].astype(float)
+        # Convert timestamp column to datetime and set as index for time series operations
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
+        df = df.set_index("timestamp")
+        df["quote_volume"] = df["quote_asset_volume"]
+        return df[["open", "high", "low", "close", "volume", "quote_volume"]]
     except Exception as e:
         print(f"⚠️ Failed to fetch data for {symbol}: {e}")
         return None

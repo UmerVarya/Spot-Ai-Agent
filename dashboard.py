@@ -219,12 +219,28 @@ if not hist_df.empty:
     if "size" not in hist_df.columns and "position_size" in hist_df.columns:
         hist_df["size"] = hist_df["position_size"].astype(float)
     # Compute PnL absolute and percent
-    directions = hist_df.get("direction", "long").astype(str)
-    entries = pd.to_numeric(hist_df.get("entry", 0), errors="coerce")
-    exits = pd.to_numeric(hist_df.get("exit", hist_df.get("exit_price", np.nan)), errors="coerce")
-    sizes = pd.to_numeric(hist_df.get("size", 1), errors="coerce").fillna(1)
-    fees = pd.to_numeric(hist_df.get("fees", 0), errors="coerce").fillna(0)
-    slippage = pd.to_numeric(hist_df.get("slippage", 0), errors="coerce").fillna(0)
+    if "direction" in hist_df.columns:
+        directions = hist_df["direction"].astype(str)
+    else:
+        directions = pd.Series(["long"] * len(hist_df))
+
+    if "entry" in hist_df.columns:
+        entries = pd.to_numeric(hist_df["entry"], errors="coerce")
+    else:
+        entries = pd.Series([0] * len(hist_df), dtype=float)
+
+    if "exit" in hist_df.columns:
+        exits = pd.to_numeric(hist_df["exit"], errors="coerce")
+    else:
+        exits = pd.to_numeric(hist_df.get("exit_price", pd.Series([np.nan] * len(hist_df))), errors="coerce")
+
+    if "size" in hist_df.columns:
+        sizes = pd.to_numeric(hist_df["size"], errors="coerce").fillna(1)
+    else:
+        sizes = pd.Series([1] * len(hist_df), dtype=float)
+
+    fees = pd.to_numeric(hist_df.get("fees", pd.Series([0] * len(hist_df))), errors="coerce").fillna(0)
+    slippage = pd.to_numeric(hist_df.get("slippage", pd.Series([0] * len(hist_df))), errors="coerce").fillna(0)
     # Determine direction multiplier
     direction_sign = np.where(directions.str.lower().str.startswith("s"), -1, 1)
     pnl_abs = (exits - entries) * sizes * direction_sign
