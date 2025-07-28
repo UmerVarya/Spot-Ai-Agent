@@ -17,6 +17,16 @@ import json
 from datetime import datetime
 from typing import Optional
 
+from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
+from multi_timeframe import multi_timeframe_confluence  # type: ignore
+from risk_metrics import (
+    sharpe_ratio,
+    calmar_ratio,
+    max_drawdown,
+    value_at_risk,
+    expected_shortfall,
+)  # type: ignore
+
 # ---------------------------------------------------------------------------
 # Optional TA-Lib imports
 #
@@ -271,6 +281,19 @@ except Exception:
     def detect_aggression(df):  # type: ignore
         return "neutral"
 
+# Microstructure metrics
+try:
+    from microstructure import (
+        compute_spread,
+        compute_order_book_imbalance,
+    )  # type: ignore
+except Exception:
+    def compute_spread(order_book):  # type: ignore
+        return float('nan')
+
+    def compute_order_book_imbalance(order_book, depth: int = 10):  # type: ignore
+        return float('nan')
+
 # Pattern memory fallback
 try:
     from pattern_memory import recall_pattern_confidence  # type: ignore
@@ -280,11 +303,13 @@ except Exception:
 
 # Pattern detection fallbacks
 try:
-    from pattern_recognizer import (
-        detect_candlestick_patterns,
+    # Prefer lightweight local pattern detectors
+    from pattern_detection import (
         detect_triangle_wedge,
         detect_flag_pattern,
+        detect_head_and_shoulders,
     )  # type: ignore
+    from candlestick_patterns import detect_candlestick_patterns  # type: ignore
 except Exception:
     try:
         from pattern_recognizer.patterns import (
@@ -292,6 +317,8 @@ except Exception:
             detect_triangle_wedge,
             detect_flag_pattern,
         )  # type: ignore
+        def detect_head_and_shoulders(df):
+            return False
     except Exception:
         def detect_candlestick_patterns(df):
             return []
@@ -300,6 +327,9 @@ except Exception:
             return None
 
         def detect_flag_pattern(df):
+            return False
+
+        def detect_head_and_shoulders(df):
             return False
 
 # Path to symbol scores file
@@ -351,6 +381,21 @@ def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
         return None
 
 
+def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
+    """Fetch order book depth from Binance."""
+    if client is None:
+        return None
+    try:
+        mapped_symbol = map_symbol_for_binance(symbol)
+        book = client.get_order_book(symbol=mapped_symbol, limit=limit)
+        return {
+            "bids": [(float(p), float(q)) for p, q in book.get("bids", [])],
+            "asks": [(float(p), float(q)) for p, q in book.get("asks", [])],
+        }
+    except Exception:
+        return None
+
+
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Compute a suite of technical indicators on a price DataFrame."""
     df = df.copy()
@@ -395,6 +440,43 @@ def get_top_symbols(limit: int = 30) -> list:
     sorted_tickers = sorted(tickers, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
     symbols = [x['symbol'] for x in sorted_tickers if x['symbol'].endswith("USDT") and not x['symbol'].endswith("BUSD")]
     return symbols[:limit]
+
+
+def compute_performance_metrics(log_file: str = "trade_log.csv", lookback: int = 100) -> dict:
+    """Return risk-adjusted performance metrics from the trade log."""
+    if not os.path.exists(log_file):
+        return {}
+    try:
+        cols = [
+            "timestamp",
+            "symbol",
+            "direction",
+            "entry",
+            "exit",
+            "outcome",
+            "btc_d",
+            "fg",
+            "sent_conf",
+            "sent_bias",
+            "score",
+        ]
+        df = pd.read_csv(log_file, names=cols)
+        df = df.tail(lookback)
+        df["entry"] = pd.to_numeric(df["entry"], errors="coerce")
+        df["exit"] = pd.to_numeric(df["exit"], errors="coerce")
+        df = df.dropna(subset=["entry", "exit"])
+        df["ret"] = (df["exit"] - df["entry"]) / df["entry"]
+        rets = df["ret"].tolist()
+        equity_curve = (1 + df["ret"]).cumprod()
+        return {
+            "sharpe": sharpe_ratio(rets),
+            "calmar": calmar_ratio(rets),
+            "max_drawdown": max_drawdown(equity_curve),
+            "var": value_at_risk(rets),
+            "es": expected_shortfall(rets),
+        }
+    except Exception:
+        return {}
 
 
 def log_signal(symbol: str, session: str, score: float, direction: Optional[str], weights: dict,
@@ -486,6 +568,24 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         stoch_k = stoch_obj.stoch()
         stoch_d = stoch_obj.stoch_signal()
         cci = CCIIndicator(high, low, close, window=20).cci()
+        atr_p = atr_percentile(high, low, close)
+        hurst = hurst_exponent(close)
+        def _slope(series: pd.Series) -> float:
+            x = np.arange(len(series))
+            m, _ = np.polyfit(x, series, 1)
+            return float(m)
+        confluence = multi_timeframe_confluence(
+            price_data[['open', 'high', 'low', 'close', 'volume']],
+            ['5T', '15T', '1H'],
+            lambda s: _slope(s)
+        )
+        order_book = get_order_book(symbol)
+        if order_book:
+            spread = compute_spread(order_book)
+            imbalance = compute_order_book_imbalance(order_book)
+        else:
+            spread = float('nan')
+            imbalance = float('nan')
         avg_quote_vol_20 = price_data['quote_volume'].iloc[-20:].mean() if 'quote_volume' in price_data else None
         latest_quote_vol = price_data['quote_volume'].iloc[-1] if 'quote_volume' in price_data else None
         price_now = close.iloc[-1]
@@ -517,6 +617,10 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             "candle": 1.2,
             "chart": 1.2,
             "flag": 1.0,
+            "hs": 1.2,
+            "atr": 0.8,
+            "hurst": 0.8,
+            "confluence": 1.0,
             "flow": 1.5,
             "dema": 1.1,
             "stoch": 1.0,
@@ -553,15 +657,34 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             score += w["stoch"]
         if cci.iloc[-1] > 0:
             score += w["cci"]
+        if atr_p == atr_p:
+            if atr_p > 0.75:
+                score += w["atr"]
+            elif atr_p < 0.25:
+                score -= w["atr"]
+        if hurst == hurst:
+            if hurst > 0.55:
+                score += w["hurst"]
+            elif hurst < 0.45:
+                score -= w["hurst"]
         candle_patterns = detect_candlestick_patterns(price_data)
         chart_pattern = detect_triangle_wedge(price_data)
         flag = detect_flag_pattern(price_data)
+        head_shoulders = detect_head_and_shoulders(price_data)
         if candle_patterns:
             score += w["candle"]
         if chart_pattern:
             score += w["chart"]
         if flag:
             score += w["flag"]
+        if head_shoulders:
+            score -= w["hs"]
+        if all(v > 0 for v in confluence.values() if v == v):
+            score += w["confluence"]
+        if spread == spread and price_now > 0 and spread / price_now > 0.001:
+            return 0, None, 0, None
+        if imbalance == imbalance and abs(imbalance) > 0.7:
+            return 0, None, 0, None
         aggression = detect_aggression(price_data)
         if aggression == "buyers in control":
             score += w["flow"]
