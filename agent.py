@@ -30,7 +30,14 @@ import json
 import threading
 from fetch_news import fetch_news, run_news_fetcher
 from trade_utils import simulate_slippage, estimate_commission
-from trade_utils import get_top_symbols, get_price_data, evaluate_signal, get_market_session, calculate_indicators
+from trade_utils import (
+    get_top_symbols,
+    get_price_data,
+    evaluate_signal,
+    get_market_session,
+    calculate_indicators,
+    compute_performance_metrics,
+)
 from trade_manager import manage_trades, load_active_trades, save_active_trades, create_new_trade
 from notifier import send_email, log_rejection
 from trade_storage import log_trade_result  # import from trade_storage instead of trade_logger
@@ -81,6 +88,11 @@ def run_agent_loop():
             # Check drawdown guard
             if is_trading_blocked():
                 print("⛔ Drawdown limit reached. Skipping trading for today.\n")
+                time.sleep(SCAN_INTERVAL)
+                continue
+            perf = compute_performance_metrics()
+            if perf.get("max_drawdown", 0) < -0.25:
+                print("⚠️ Max drawdown exceeded 25%. Halting trading.")
                 time.sleep(SCAN_INTERVAL)
                 continue
             # Macro signals
