@@ -416,6 +416,11 @@ def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Compute a suite of technical indicators on a price DataFrame."""
     df = df.copy()
+    required = {"open", "high", "low", "close", "volume"}
+    if not required.issubset(df.columns):
+        missing = required - set(df.columns)
+        print(f"[INDICATOR] Missing columns: {', '.join(sorted(missing))}")
+        return df
     df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna(subset=['high', 'low', 'close'])
     try:
@@ -559,6 +564,12 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
     try:
         if price_data is None or price_data.empty or len(price_data) < 40:
             print(f"[DEBUG] Skipping {symbol}: insufficient price data.")
+            return 0, None, 0, None
+
+        required = {"open", "high", "low", "close", "volume"}
+        if not required.issubset(price_data.columns):
+            missing = required - set(price_data.columns)
+            print(f"[DEBUG] Skipping {symbol}: missing columns {', '.join(sorted(missing))}.")
             return 0, None, 0, None
 
         price_data = price_data.replace([np.inf, -np.inf], np.nan)
