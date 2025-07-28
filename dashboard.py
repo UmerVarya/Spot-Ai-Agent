@@ -289,8 +289,23 @@ if not hist_df.empty:
         st.bar_chart(session_perf.set_index("session"), use_container_width=True)
     # Display historical trades table
     display_cols = [
-        col for col in ["entry_time", "exit_time", "symbol", "direction", "strategy", "session", "entry", "exit", "size", "fees", "slippage", "outcome"] if col in hist_df.columns
-    ] + ["PnL (net $)", "PnL (%)", "Duration (min)"]
+        col
+        for col in [
+            "entry_time",
+            "exit_time",
+            "symbol",
+            "direction",
+            "strategy",
+            "session",
+            "entry",
+            "exit",
+            "size",
+            "fees",
+            "slippage",
+            "outcome",
+        ]
+        if col in hist_df.columns
+    ] + [c for c in ["PnL (net $)", "PnL (%)", "Duration (min)"] if c in hist_df.columns]
     hist_display = hist_df[display_cols].copy()
     # Format numeric columns
     for col in ["PnL (net $)", "PnL (%)", "Duration (min)", "fees", "slippage"]:
