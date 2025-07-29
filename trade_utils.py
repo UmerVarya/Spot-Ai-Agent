@@ -697,10 +697,18 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             elif hurst < 0.45:
                 score -= w["hurst"]
         candle_patterns = detect_candlestick_patterns(price_data)
+        # ``detect_candlestick_patterns`` can return either a dict of pattern
+        # flags or a list of pattern names.  Normalise this so the rest of the
+        # logic only deals with a list of the patterns that actually triggered.
+        if isinstance(candle_patterns, dict):
+            triggered_patterns = [p for p, v in candle_patterns.items() if v]
+        else:
+            triggered_patterns = candle_patterns or []
+
         chart_pattern = detect_triangle_wedge(price_data)
         flag = detect_flag_pattern(price_data)
         head_shoulders = detect_head_and_shoulders(price_data)
-        if candle_patterns:
+        if triggered_patterns:
             score += w["candle"]
         if chart_pattern:
             score += w["chart"]
@@ -738,7 +746,7 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
                 return 0, None, 0, None
             if not near_support and normalized_score < 6.5:
                 return 0, None, 0, None
-        pattern_name = candle_patterns[0] if candle_patterns else (chart_pattern if chart_pattern else "None")
+        pattern_name = triggered_patterns[0] if triggered_patterns else (chart_pattern if chart_pattern else "None")
         try:
             scores = {}
             if os.path.exists(SYMBOL_SCORES_FILE):
