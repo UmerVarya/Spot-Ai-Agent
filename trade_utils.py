@@ -16,6 +16,7 @@ import os
 import json
 from datetime import datetime
 from typing import Optional
+import traceback
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
 from multi_timeframe import multi_timeframe_confluence  # type: ignore
@@ -757,4 +758,5 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         return normalized_score, direction, position_size, pattern_name
     except Exception as e:
         print(f"⚠️ Signal evaluation error in {symbol}: {e}")
+        traceback.print_exc()
         return 0, None, 0, None
