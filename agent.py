@@ -157,6 +157,10 @@ def run_agent_loop():
                         print(f"⚠️ Skipping {symbol} due to insufficient data.\n")
                         continue
                     score, direction, position_size, pattern_name = evaluate_signal(price_data, symbol)
+                    print(
+                        f"[🔍] {symbol}: Score={score:.2f}, Direction={direction}, "
+                        f"Pattern={pattern_name}, PosSize={position_size}"
+                    )
                     symbol_scores[symbol] = {"score": score, "direction": direction}
                     # Force long direction if high score but no direction
                     if direction is None and score >= 4.5:
@@ -164,6 +168,9 @@ def run_agent_loop():
                         direction = "long"
                     # Skip non-long or invalid position sizes
                     if direction != "long" or position_size <= 0:
+                        print(
+                            f"[🚫] Skipping {symbol}: direction={direction}, size={position_size}"
+                        )
                         continue
                     # Order flow caution
                     flow_status = detect_aggression(price_data)
@@ -179,6 +186,10 @@ def run_agent_loop():
                         "pattern": pattern_name,
                         "price_data": price_data,
                     })
+                    print(
+                        f"[✅] Potential Trade: {symbol} | Score={score:.2f} | "
+                        f"Direction=long | Size={position_size}"
+                    )
                 except Exception as e:
                     print(f"❌ Error evaluating {symbol}: {e}")
                     continue
@@ -221,10 +232,13 @@ def run_agent_loop():
                 decision = decision_obj.get("decision", False)
                 final_conf = decision_obj.get("confidence", score)
                 narrative = decision_obj.get("narrative", "")
+                reason = decision_obj.get("reason", "")
+                print(
+                    f"[🧠] Brain Decision for {symbol} -> {decision} | "
+                    f"Confidence: {final_conf:.2f} | Reason: {reason}"
+                )
                 if not decision:
-                    reason = decision_obj.get("reason", "Unknown reason")
-                    print(f"🧠 Brain Decision for {symbol}: False | Confidence: {final_conf:.2f}\nReason: {reason}\n")
-                    log_rejection(symbol, reason)
+                    log_rejection(symbol, reason or "Unknown reason")
                     continue
                 # ML model veto
                 ml_prob = predict_success_probability(
@@ -290,7 +304,10 @@ def run_agent_loop():
                         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     }
                     print(f"📝 Narrative:\n{narrative}\n")
-                    print(f"✅ Trade: {symbol} | Score: {score:.2f} | Position Size: ${position_size}")
+                    print(
+                        f"Trade Opened ✅ {symbol} @ {entry_price} | Size={position_size} "
+                        f"| TP1 {tp1} / TP2 {tp2} / TP3 {tp3}"
+                    )
                     # Add to active trades and persist
                     active_trades[symbol] = new_trade
                     create_new_trade(new_trade)
