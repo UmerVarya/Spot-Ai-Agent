@@ -138,6 +138,11 @@ def run_agent_loop():
             save_active_trades(active_trades)
             # Get top symbols to scan
             top_symbols = get_top_symbols(limit=30)
+            if not top_symbols:
+                print(
+                    "\u26A0\uFE0F No symbols fetched from Binance. Check your "
+                    "python-binance installation and network connectivity."
+                )
             session = get_market_session()
             potential_trades = []
             symbol_scores = {}

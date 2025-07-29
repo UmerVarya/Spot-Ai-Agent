@@ -339,7 +339,12 @@ SYMBOL_SCORES_FILE = os.path.join(os.path.dirname(__file__), "symbol_scores.json
 # Initialise Binance client if available
 try:
     client = Client()
-except Exception:
+except Exception as e:
+    print(
+        f"\u26A0\uFE0F Failed to initialize Binance client: {e}.\n"
+        "   Install the 'python-binance' package and ensure network/credentials"
+        " are configured."
+    )
     client = None
 
 
