@@ -1,22 +1,3 @@
-"""
-    Extended Spot AI Super Agent loop with enhanced trade logging.
-
-    This version of ``agent.py`` builds upon the refined agent loop by
-    recording additional metadata when a trade is opened.  In
-    particular it stamps each new trade with an ``entry_time``, tags it
-    with the detected strategy (chart pattern) and current session, and
-    stores the position size and leverage explicitly.  These fields are
-    written into the persistent storage via ``create_new_trade`` and
-    ``log_trade_result`` so that the dashboard can compute accurate
-    performance statistics.
-
-    Only the sections relating to trade construction and logging have
-    been modified; all other logic (news fetching, macro gating,
-    technical scoring, LLM vetting, ML probability blending, and
-    dynamic take‑profit/stop‑loss calculation) remains identical to
-    the refined agent.
-    """
-
 import logging
 logging.basicConfig(level=logging.INFO)
 logging.info("agent.py starting...")
@@ -58,19 +39,16 @@ SCAN_INTERVAL = 15
 # Interval between news fetches (in seconds)
 NEWS_INTERVAL = 3600
 
-
 def auto_run_news():
     while True:
         print("🗞️ Running scheduled news fetcher...")
         run_news_fetcher()
         time.sleep(NEWS_INTERVAL)
 
-
 def run_streamlit():
     port = os.environ.get("PORT", "10000")
     # Launch the dashboard as a daemon thread
     os.system(f"streamlit run dashboard.py --server.port {port} --server.headless true")
-
 
 def run_agent_loop():
     print("\n🤖 Spot AI Super Agent running in paper trading mode...\n")
@@ -140,8 +118,7 @@ def run_agent_loop():
             top_symbols = get_top_symbols(limit=30)
             if not top_symbols:
                 print(
-                    "\u26A0\uFE0F No symbols fetched from Binance. Check your "
-                    "python-binance installation and network connectivity."
+                    "⚠️ No symbols fetched from Binance. Check your python-binance installation and network connectivity."
                 )
             session = get_market_session()
             potential_trades = []
@@ -158,8 +135,7 @@ def run_agent_loop():
                         continue
                     score, direction, position_size, pattern_name = evaluate_signal(price_data, symbol)
                     print(
-                        f"[🔍] {symbol}: Score={score:.2f}, Direction={direction}, "
-                        f"Pattern={pattern_name}, PosSize={position_size}"
+                        f"[🔍] {symbol}: Score={score:.2f}, Direction={direction}, Pattern={pattern_name}, PosSize={position_size}"
                     )
                     symbol_scores[symbol] = {"score": score, "direction": direction}
                     # Force long direction if high score but no direction
@@ -168,9 +144,16 @@ def run_agent_loop():
                         direction = "long"
                     # Skip non-long or invalid position sizes
                     if direction != "long" or position_size <= 0:
-                        print(
-                            f"[🚫] Skipping {symbol}: direction={direction}, size={position_size}"
-                        )
+                        skip_reasons = []
+                        if direction != "long":
+                            if direction is None:
+                                skip_reasons.append("no long signal (score below cutoff)")
+                            else:
+                                skip_reasons.append("direction not long")
+                        if position_size <= 0:
+                            skip_reasons.append("zero position (low confidence)")
+                        reason_text = " and ".join(skip_reasons) if skip_reasons else "not eligible"
+                        print(f"[🚫] Skipping {symbol}: direction={direction}, size={position_size} – {reason_text}, Score={score:.2f}")
                         continue
                     # Order flow caution
                     flow_status = detect_aggression(price_data)
@@ -187,8 +170,7 @@ def run_agent_loop():
                         "price_data": price_data,
                     })
                     print(
-                        f"[✅] Potential Trade: {symbol} | Score={score:.2f} | "
-                        f"Direction=long | Size={position_size}"
+                        f"[✅] Potential Trade: {symbol} | Score={score:.2f} | Direction=long | Size={position_size}"
                     )
                 except Exception as e:
                     print(f"❌ Error evaluating {symbol}: {e}")
@@ -234,8 +216,7 @@ def run_agent_loop():
                 narrative = decision_obj.get("narrative", "")
                 reason = decision_obj.get("reason", "")
                 print(
-                    f"[🧠] Brain Decision for {symbol} -> {decision} | "
-                    f"Confidence: {final_conf:.2f} | Reason: {reason}"
+                    f"[🧠] Brain Decision for {symbol} -> {decision} | Confidence: {final_conf:.2f} | Reason: {reason}"
                 )
                 if not decision:
                     log_rejection(symbol, reason or "Unknown reason")
@@ -305,8 +286,7 @@ def run_agent_loop():
                     }
                     print(f"📝 Narrative:\n{narrative}\n")
                     print(
-                        f"Trade Opened ✅ {symbol} @ {entry_price} | Size={position_size} "
-                        f"| TP1 {tp1} / TP2 {tp2} / TP3 {tp3}"
+                        f"Trade Opened ✅ {symbol} @ {entry_price} | Size={position_size} | TP1 {tp1} / TP2 {tp2} / TP3 {tp3}"
                     )
                     # Add to active trades and persist
                     active_trades[symbol] = new_trade
@@ -335,7 +315,6 @@ def run_agent_loop():
         except Exception as e:
             print(f"❌ Main Loop Error: {e}")
             time.sleep(10)
-
 
 if __name__ == "__main__":
     logging.info("🚀 Starting Spot AI Super Agent loop...")
