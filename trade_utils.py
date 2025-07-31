@@ -1,15 +1,3 @@
-"""
-Enhanced trade utilities module for Spot AI Super Agent.
-
-This version of ``trade_utils`` is derived from the original implementation in
-the Spot AI repository.  Only one change has been made to enable paper
-trading in low‑volume environments: the volume filter inside
-``evaluate_signal`` can be bypassed by setting the environment variable
-``TRAINING_MODE=true``.  When this flag is set, the function no longer
-skips symbols whose quote‑volume is below 40 % of the 20‑bar average.
-All other logic remains unchanged.
-"""
-
 import numpy as np
 import pandas as pd
 import os
@@ -28,12 +16,7 @@ from risk_metrics import (
     expected_shortfall,
 )  # type: ignore
 
-# ---------------------------------------------------------------------------
-# Optional TA-Lib imports
-#
-# The Spot AI bot originally relies on the ``ta`` library for computing
-# technical indicators (EMA, MACD, RSI, ADX, Bollinger Bands, etc.).  If
-# ``ta`` is unavailable, fallback implementations will be used.
+# Optional TA-Lib imports (with pandas fallbacks if unavailable)
 try:
     from ta.trend import (
         EMAIndicator as _TA_EMAIndicator,
@@ -66,39 +49,32 @@ try:
     KeltnerChannel = _TA_KeltnerChannel
     VolumeWeightedAveragePrice = _TA_VolumeWeightedAveragePrice
 except Exception:
-    # Fallback indicator implementations using pandas
+    # Fallback implementations
     def _ema(series: pd.Series, span: int) -> pd.Series:
         return series.ewm(span=span, adjust=False).mean()
-
     class EMAIndicator:
         def __init__(self, series: pd.Series, window: int = 14):
             self.series = series
             self.window = window
-
         def ema_indicator(self) -> pd.Series:
             return _ema(self.series, self.window)
-
     class MACD:
         def __init__(self, series: pd.Series, window_slow: int = 26, window_fast: int = 12, window_sign: int = 9):
             self.series = series
             self.window_slow = window_slow
             self.window_fast = window_fast
             self.window_sign = window_sign
-
         def macd_diff(self) -> pd.Series:
             ema_fast = _ema(self.series, self.window_fast)
             ema_slow = _ema(self.series, self.window_slow)
             return ema_fast - ema_slow
-
         def macd_signal(self) -> pd.Series:
             diff = self.macd_diff()
             return diff.ewm(span=self.window_sign, adjust=False).mean()
-
     class RSIIndicator:
         def __init__(self, series: pd.Series, window: int = 14):
             self.series = series
             self.window = window
-
         def rsi(self) -> pd.Series:
             delta = self.series.diff()
             gain = delta.clip(lower=0)
@@ -107,14 +83,12 @@ except Exception:
             avg_loss = loss.rolling(self.window).mean()
             rs = avg_gain / (avg_loss + 1e-9)
             return 100 - (100 / (1 + rs))
-
     class ADXIndicator:
         def __init__(self, high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14):
             self.high = high
             self.low = low
             self.close = close
             self.window = window
-
         def adx(self) -> pd.Series:
             up_move = self.high.diff()
             down_move = self.low.diff()
@@ -129,59 +103,48 @@ except Exception:
             minus_di = 100 * (pd.Series(minus_dm).rolling(self.window).mean() / (atr + 1e-9))
             dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
             return dx.rolling(self.window).mean()
-
     class BollingerBands:
         def __init__(self, series: pd.Series, window: int = 20, window_dev: int = 2):
             self.series = series
             self.window = window
             self.window_dev = window_dev
-
         def bollinger_hband(self) -> pd.Series:
             sma = self.series.rolling(self.window).mean()
             std = self.series.rolling(self.window).std()
             return sma + self.window_dev * std
-
         def bollinger_lband(self) -> pd.Series:
             sma = self.series.rolling(self.window).mean()
             std = self.series.rolling(self.window).std()
             return sma - self.window_dev * std
-
         def bollinger_mavg(self) -> pd.Series:
             return self.series.rolling(self.window).mean()
-
     class VolumeWeightedAveragePrice:
         def __init__(self, high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, window: int = 20):
             self.price = (high + low + close) / 3
             self.volume = volume
             self.window = window
-
         def volume_weighted_average_price(self) -> pd.Series:
             pv = self.price * self.volume
             cum_pv = pv.rolling(self.window).sum()
             cum_vol = self.volume.rolling(self.window).sum()
             return cum_pv / (cum_vol + 1e-9)
-
     class DEMAIndicator:
         def __init__(self, series: pd.Series, window: int = 20):
             self.series = series
             self.window = window
-
         def dema_indicator(self) -> pd.Series:
             ema1 = _ema(self.series, self.window)
             ema2 = _ema(ema1, self.window)
             return 2 * ema1 - ema2
-
     class TEMAIndicator:
         def __init__(self, series: pd.Series, window: int = 20):
             self.series = series
             self.window = window
-
         def tema_indicator(self) -> pd.Series:
             ema1 = _ema(self.series, self.window)
             ema2 = _ema(ema1, self.window)
             ema3 = _ema(ema2, self.window)
             return 3 * ema1 - 3 * ema2 + ema3
-
     class StochasticOscillator:
         def __init__(self, high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14, smooth_window: int = 3):
             self.high = high
@@ -189,122 +152,106 @@ except Exception:
             self.close = close
             self.window = window
             self.smooth_window = smooth_window
-
         def stoch(self) -> pd.Series:
             lowest_low = self.low.rolling(self.window).min()
             highest_high = self.high.rolling(self.window).max()
-            stoch = (self.close - lowest_low) / ((highest_high - lowest_low) + 1e-9) * 100
-            return stoch
-
+            return (self.close - lowest_low) / ((highest_high - lowest_low) + 1e-9) * 100
         def stoch_signal(self) -> pd.Series:
             return self.stoch().rolling(self.smooth_window).mean()
-
     class CCIIndicator:
         def __init__(self, high: pd.Series, low: pd.Series, close: pd.Series, window: int = 20):
             self.high = high
             self.low = low
             self.close = close
             self.window = window
-
         def cci(self) -> pd.Series:
             tp = (self.high + self.low + self.close) / 3
             sma = tp.rolling(self.window).mean()
             mean_dev = (tp - sma).abs().rolling(self.window).mean()
             cci = (tp - sma) / (0.015 * (mean_dev + 1e-9))
             return cci
-
     class AverageTrueRange:
         def __init__(self, high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14):
             self.high = high
             self.low = low
             self.close = close
             self.window = window
-
         def average_true_range(self) -> pd.Series:
             tr1 = self.high - self.low
             tr2 = (self.high - self.close.shift()).abs()
             tr3 = (self.low - self.close.shift()).abs()
             tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
             return tr.rolling(self.window).mean()
-
     class KeltnerChannel:
         def __init__(self, high: pd.Series, low: pd.Series, close: pd.Series, window: int = 20):
             self.high = high
             self.low = low
             self.close = close
             self.window = window
-
         def keltner_channel_hband(self) -> pd.Series:
             ema = _ema(self.close, self.window)
             atr = AverageTrueRange(self.high, self.low, self.close, self.window).average_true_range()
             return ema + (atr * 2)
-
         def keltner_channel_lband(self) -> pd.Series:
             ema = _ema(self.close, self.window)
             atr = AverageTrueRange(self.high, self.low, self.close, self.window).average_true_range()
             return ema - (atr * 2)
 
-# Binance client import with fallback
+# Binance API client (with fallback if not installed)
 try:
     from binance.client import Client  # type: ignore
 except Exception:
-    class Client:  # type: ignore
+    class Client:  # dummy fallback
         def __init__(self, *args, **kwargs):
             raise ImportError("Binance client is not installed. Please install 'python-binance' to fetch price data.")
 
-# Symbol mapper fallback
+# Symbol mapper fallback (use identity if mapper not available)
 try:
     from symbol_mapper import map_symbol_for_binance  # type: ignore
 except Exception:
-    def map_symbol_for_binance(symbol: str) -> str:  # type: ignore
+    def map_symbol_for_binance(symbol: str) -> str:
         return symbol
 
-# Use zoneinfo for timezone conversion if available
+# Timezone support
 try:
     from zoneinfo import ZoneInfo  # type: ignore
 except Exception:
-    ZoneInfo = None  # fallback
+    ZoneInfo = None
 
-# Support/resistance detection fallback
+# Support/Resistance detection (fallback returns no zones)
 try:
     from price_action import detect_support_resistance_zones, is_price_near_zone  # type: ignore
 except Exception:
-    def detect_support_resistance_zones(df):  # type: ignore
+    def detect_support_resistance_zones(df):
         return {"support": [], "resistance": []}
-
-    def is_price_near_zone(price: float, zones: dict, zone_type: str, tolerance: float) -> bool:  # type: ignore
+    def is_price_near_zone(price: float, zones: dict, zone_type: str, tolerance: float) -> bool:
         return False
 
 # Order flow detection fallback
 try:
     from orderflow import detect_aggression  # type: ignore
 except Exception:
-    def detect_aggression(df):  # type: ignore
+    def detect_aggression(df):
         return "neutral"
 
-# Microstructure metrics
+# Microstructure metrics fallback
 try:
-    from microstructure import (
-        compute_spread,
-        compute_order_book_imbalance,
-    )  # type: ignore
+    from microstructure import compute_spread, compute_order_book_imbalance  # type: ignore
 except Exception:
-    def compute_spread(order_book):  # type: ignore
+    def compute_spread(order_book):
         return float('nan')
-
-    def compute_order_book_imbalance(order_book, depth: int = 10):  # type: ignore
+    def compute_order_book_imbalance(order_book, depth: int = 10):
         return float('nan')
 
 # Pattern memory fallback
 try:
     from pattern_memory import recall_pattern_confidence  # type: ignore
 except Exception:
-    def recall_pattern_confidence(symbol: str, pattern_name: str) -> float:  # type: ignore
+    def recall_pattern_confidence(symbol: str, pattern_name: str) -> float:
         return 0.0
 
 # Pattern detection fallbacks
 try:
-    # Prefer lightweight local pattern detectors
     from pattern_detection import (
         detect_triangle_wedge,
         detect_flag_pattern,
@@ -323,30 +270,25 @@ except Exception:
     except Exception:
         def detect_candlestick_patterns(df):
             return []
-
         def detect_triangle_wedge(df):
             return None
-
         def detect_flag_pattern(df):
             return False
-
         def detect_head_and_shoulders(df):
             return False
 
-# Path to symbol scores file
+# Path to stored symbol scores
 SYMBOL_SCORES_FILE = os.path.join(os.path.dirname(__file__), "symbol_scores.json")
 
-# Initialise Binance client if available
+# Initialize Binance client
 try:
     client = Client()
 except Exception as e:
     print(
-        f"\u26A0\uFE0F Failed to initialize Binance client: {e}.\n"
-        "   Install the 'python-binance' package and ensure network/credentials"
-        " are configured."
+        f"⚠️ Failed to initialize Binance client: {e}.\n"
+        "   Install the 'python-binance' package and ensure network/credentials are configured."
     )
     client = None
-
 
 def get_market_session() -> str:
     """Return the current market session based on local time in Asia/Karachi."""
@@ -365,7 +307,6 @@ def get_market_session() -> str:
     else:
         return "US"
 
-
 def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
     """Fetch recent OHLCV data for a symbol from Binance."""
     if client is None:
@@ -374,27 +315,14 @@ def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
     try:
         mapped_symbol = map_symbol_for_binance(symbol)
         klines = client.get_klines(symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_5MINUTE, limit=500)
-        df = pd.DataFrame(
-            klines,
-            columns=[
-                "timestamp",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "close_time",
-                "quote_asset_volume",
-                "number_of_trades",
-                "taker_buy_base",
-                "taker_buy_quote",
-                "ignore",
-            ],
-        )
+        df = pd.DataFrame(klines, columns=[
+            "timestamp", "open", "high", "low", "close", "volume", "close_time",
+            "quote_asset_volume", "number_of_trades", "taker_buy_base", "taker_buy_quote", "ignore",
+        ])
         df[["open", "high", "low", "close", "volume", "quote_asset_volume"]] = df[
             ["open", "high", "low", "close", "volume", "quote_asset_volume"]
         ].astype(float)
-        # Convert timestamp column to datetime and set as index for time series operations
+        # Convert timestamp to datetime and set as index
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
         df = df.set_index("timestamp")
         df["quote_volume"] = df["quote_asset_volume"]
@@ -402,7 +330,6 @@ def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
     except Exception as e:
         print(f"⚠️ Failed to fetch data for {symbol}: {e}")
         return None
-
 
 def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
     """Fetch order book depth from Binance."""
@@ -417,7 +344,6 @@ def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
         }
     except Exception:
         return None
-
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Compute a suite of technical indicators on a price DataFrame."""
@@ -458,9 +384,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         print(f"[INDICATOR] Warning: failed to compute some indicators: {e}")
     return df
 
-
 def get_top_symbols(limit: int = 30) -> list:
-    """Return the top quote‑volume symbols trading against USDT."""
+    """Return the top quote-volume symbols trading against USDT."""
     if client is None:
         print("⚠️ Binance client unavailable; get_top_symbols returning empty list.")
         return []
@@ -469,24 +394,14 @@ def get_top_symbols(limit: int = 30) -> list:
     symbols = [x['symbol'] for x in sorted_tickers if x['symbol'].endswith("USDT") and not x['symbol'].endswith("BUSD")]
     return symbols[:limit]
 
-
 def compute_performance_metrics(log_file: str = "trade_log.csv", lookback: int = 100) -> dict:
     """Return risk-adjusted performance metrics from the trade log."""
     if not os.path.exists(log_file):
         return {}
     try:
         cols = [
-            "timestamp",
-            "symbol",
-            "direction",
-            "entry",
-            "exit",
-            "outcome",
-            "btc_d",
-            "fg",
-            "sent_conf",
-            "sent_bias",
-            "score",
+            "timestamp", "symbol", "direction", "entry", "exit", "outcome",
+            "btc_d", "fg", "sent_conf", "sent_bias", "score",
         ]
         df = pd.read_csv(log_file, names=cols)
         df = df.tail(lookback)
@@ -505,7 +420,6 @@ def compute_performance_metrics(log_file: str = "trade_log.csv", lookback: int =
         }
     except Exception:
         return {}
-
 
 def log_signal(symbol: str, session: str, score: float, direction: Optional[str], weights: dict,
                candle_patterns: list, chart_pattern: Optional[str]) -> None:
@@ -535,7 +449,6 @@ def log_signal(symbol: str, session: str, score: float, direction: Optional[str]
     else:
         df_entry.to_csv(log_path, index=False)
 
-
 def get_position_size(confidence: float) -> int:
     """Return an integer position size based on the model confidence."""
     if confidence >= 8.5:
@@ -544,9 +457,10 @@ def get_position_size(confidence: float) -> int:
         return 80
     elif confidence >= 5.5:
         return 50
+    elif confidence >= 4.5:
+        return 20
     else:
         return 0
-
 
 def simulate_slippage(price: float, direction: str = "long", slippage_pct: float = 0.0005) -> float:
     """Apply a simple slippage adjustment to a price."""
@@ -559,11 +473,9 @@ def simulate_slippage(price: float, direction: str = "long", slippage_pct: float
     else:
         return price * (1 + slip)
 
-
 def estimate_commission(symbol: str, quantity: float = 1.0, maker: bool = False) -> float:
     """Estimate the commission fee rate for a given trade."""
     return 0.0004 if maker else 0.001
-
 
 def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: str = "neutral"):
     """Evaluate a trading signal given a price DataFrame."""
@@ -702,14 +614,11 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             elif hurst < 0.45:
                 score -= w["hurst"]
         candle_patterns = detect_candlestick_patterns(price_data)
-        # ``detect_candlestick_patterns`` can return either a dict of pattern
-        # flags or a list of pattern names.  Normalise this so the rest of the
-        # logic only deals with a list of the patterns that actually triggered.
+        # Normalize candlestick pattern output to a list
         if isinstance(candle_patterns, dict):
             triggered_patterns = [p for p, v in candle_patterns.items() if v]
         else:
             triggered_patterns = candle_patterns or []
-
         chart_pattern = detect_triangle_wedge(price_data)
         flag = detect_flag_pattern(price_data)
         head_shoulders = detect_head_and_shoulders(price_data)
@@ -724,8 +633,10 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         if all(v > 0 for v in confluence.values() if v == v):
             score += w["confluence"]
         if spread == spread and price_now > 0 and spread / price_now > 0.001:
+            print(f"⚠️ Skipping {symbol}: spread {spread:.6f} is >0.1% of price.")
             return 0, None, 0, None
         if imbalance == imbalance and abs(imbalance) > 0.7:
+            print(f"⚠️ Skipping {symbol}: order book imbalance {imbalance:.2f} exceeds threshold.")
             return 0, None, 0, None
         aggression = detect_aggression(price_data)
         if aggression == "buyers in control":
@@ -747,9 +658,11 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         if direction == "long":
             near_resistance = is_price_near_zone(current_price, zones, 'resistance', 0.005)
             near_support = is_price_near_zone(current_price, zones, 'support', 0.015 if sentiment_bias == "bullish" else 0.01)
-            if near_resistance and normalized_score < 7.0:
+            if near_resistance and normalized_score < 6.5:
+                print(f"⚠️ Skipping {symbol}: near resistance zone with score {normalized_score:.2f} < 6.5")
                 return 0, None, 0, None
-            if not near_support and normalized_score < 6.5:
+            if not near_support and normalized_score < 5.5:
+                print(f"⚠️ Skipping {symbol}: away from support with score {normalized_score:.2f} < 5.5")
                 return 0, None, 0, None
         pattern_name = triggered_patterns[0] if triggered_patterns else (chart_pattern if chart_pattern else "None")
         try:
