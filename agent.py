@@ -39,16 +39,19 @@ SCAN_INTERVAL = 15
 # Interval between news fetches (in seconds)
 NEWS_INTERVAL = 3600
 
+
 def auto_run_news():
     while True:
         print("🗞️ Running scheduled news fetcher...")
         run_news_fetcher()
         time.sleep(NEWS_INTERVAL)
 
+
 def run_streamlit():
     port = os.environ.get("PORT", "10000")
     # Launch the dashboard as a daemon thread
     os.system(f"streamlit run dashboard.py --server.port {port} --server.headless true")
+
 
 def run_agent_loop():
     print("\n🤖 Spot AI Super Agent running in paper trading mode...\n")
@@ -291,11 +294,10 @@ def run_agent_loop():
                     # Add to active trades and persist
                     active_trades[symbol] = new_trade
                     create_new_trade(new_trade)
-                    # Log the new trade result (open).  Provide exit_price equal to entry for completeness
-                    try:
-                        log_trade_result(new_trade, outcome="open", exit_price=entry_price)
-                    except Exception as e:
-                        print(f"⚠️ Failed to log new trade {symbol}: {e}")
+                    # Do NOT log the open trade as a completed trade.  It will be
+                    # logged upon exit by trade_manager.py.  Previously we wrote
+                    # log_trade_result(new_trade, outcome="open", exit_price=entry_price),
+                    # but this polluted the completed trades log with open rows.
                     save_active_trades(active_trades)
                     send_email(f"New Trade Opened: {symbol}", str(new_trade))
                     opened_count += 1
@@ -315,6 +317,7 @@ def run_agent_loop():
         except Exception as e:
             print(f"❌ Main Loop Error: {e}")
             time.sleep(10)
+
 
 if __name__ == "__main__":
     logging.info("🚀 Starting Spot AI Super Agent loop...")
