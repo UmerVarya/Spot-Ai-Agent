@@ -285,17 +285,28 @@ def run_agent_loop() -> None:
                 except Exception:
                     indicators = {"rsi": 50.0, "macd": 0.0, "adx": 20.0}
                 # Ask the brain whether to take the trade
-                decision_obj = should_trade(
-                    symbol=symbol,
-                    score=score,
-                    direction="long",
-                    indicators=indicators,
-                    session=session,
-                    pattern_name=pattern_name,
-                    orderflow="buyers" if detect_aggression(price_data) == "buyers in control" else "sellers" if detect_aggression(price_data) == "sellers in control" else "neutral",
-                    sentiment=sentiment,
-                    macro_news={"safe": True, "reason": ""},
-                )
+                # Call the brain with error handling.  If the brain throws an
+                # exception, record it as the reason for skipping so users
+                # understand why a potential trade was vetoed.
+                try:
+                    decision_obj = should_trade(
+                        symbol=symbol,
+                        score=score,
+                        direction="long",
+                        indicators=indicators,
+                        session=session,
+                        pattern_name=pattern_name,
+                        orderflow="buyers" if detect_aggression(price_data) == "buyers in control" else "sellers" if detect_aggression(price_data) == "sellers in control" else "neutral",
+                        sentiment=sentiment,
+                        macro_news={"safe": True, "reason": ""},
+                    )
+                except Exception as e:
+                    print(f"❌ Error in should_trade for {symbol}: {e}")
+                    decision_obj = {
+                        "decision": False,
+                        "confidence": 0.0,
+                        "reason": f"Error in should_trade(): {e}",
+                    }
                 decision = bool(decision_obj.get("decision", False))
                 final_conf = float(decision_obj.get("confidence", score))
                 narrative = decision_obj.get("narrative", "")
