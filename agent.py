@@ -97,12 +97,13 @@ def run_agent_loop() -> None:
             btc_d = get_btc_dominance()
             fg = get_fear_greed_index()
             sentiment = get_macro_sentiment()
+            # Extract sentiment bias and confidence safely
             try:
                 sentiment_confidence = float(sentiment.get("confidence", 5.0))
             except Exception:
                 sentiment_confidence = 5.0
             sentiment_bias = str(sentiment.get("bias", "neutral"))
-            # Convert types safely
+            # Convert BTC dominance and Fear & Greed to numeric values
             try:
                 btc_d = float(btc_d)
             except Exception:
@@ -114,19 +115,74 @@ def run_agent_loop() -> None:
             print(
                 f"🌐 BTC Dominance: {btc_d:.2f}% | Fear & Greed: {fg} | Sentiment: {sentiment_bias} (Confidence: {sentiment_confidence})"
             )
-            # Macro gating
-            if (sentiment_bias == "bearish" and sentiment_confidence >= 7) or fg < 20 or btc_d > 60:
+            # Improved macro gating: analyse macro conditions and decide whether to skip
+            def _macro_filter(btc_dom: float, fear_greed: int, bias: str, conf: float):
+                """
+                Determine whether to skip scanning based on macro conditions.
+
+                This macro filter is designed to be more nuanced than a
+                simple hard cutoff.  As a quantitative scalper, we want to
+                avoid trading in extremely unfavorable environments but
+                continue scanning when there are still pockets of opportunity.
+
+                Returns a tuple `(skip_all, skip_alt, reasons)`:
+                * `skip_all` – if True, skip all symbols entirely (market closed).
+                * `skip_alt` – if True, skip alt‑coins but still allow BTCUSDT (and possibly stable pairs).
+                * `reasons` – list of human‑readable reasons explaining the gating decision.
+                """
+                skip_all = False
+                skip_alt = False
                 reasons: list[str] = []
-                if sentiment_bias == "bearish" and sentiment_confidence >= 7:
-                    reasons.append("strong bearish sentiment")
-                if fg < 20:
-                    reasons.append("extreme Fear & Greed index")
-                if btc_d > 60:
-                    reasons.append("very high BTC dominance")
-                reason_text = " + ".join(reasons) if reasons else "unfavorable conditions"
+
+                # 1. Extreme fear or very bearish conditions: shut down all trading
+                #    We consider extreme fear when the Fear & Greed index is below 10.
+                #    Additionally, if sentiment is strongly bearish with very high
+                #    confidence and fear is deeply negative (<15), we also halt trading.
+                if fear_greed < 10:
+                    skip_all = True
+                    reasons.append("extreme fear (FG < 10)")
+                elif bias == "bearish" and conf >= 8.0 and fear_greed < 15:
+                    skip_all = True
+                    reasons.append("very bearish sentiment with deep fear")
+
+                # 2. Construct an alt‑coins risk score.  We want to avoid alt‑coins
+                #    when multiple risk factors align.  Each risk factor contributes
+                #    one point, and we skip alt‑coins only if at least two points
+                #    are present.  This allows occasional trading in risky
+                #    environments when not all conditions are stacked against us.
+                alt_risk_score = 0
+                if btc_dom > 60.0:
+                    alt_risk_score += 1
+                if fear_greed < 20:
+                    alt_risk_score += 1
+                if bias == "bearish" and conf >= 6.0:
+                    alt_risk_score += 1
+
+                # Determine whether to skip alt‑coins based on the accumulated risk score
+                if not skip_all and alt_risk_score >= 2:
+                    skip_alt = True
+                    # Add specific reasons for each contributing factor
+                    if btc_dom > 60.0:
+                        reasons.append("very high BTC dominance")
+                    if fear_greed < 20:
+                        reasons.append("low Fear & Greed")
+                    if bias == "bearish" and conf >= 6.0:
+                        reasons.append("bearish sentiment")
+
+                return skip_all, skip_alt, reasons
+
+            skip_all, skip_alt, macro_reasons = _macro_filter(btc_d, fg, sentiment_bias, sentiment_confidence)
+            if skip_all:
+                reason_text = " + ".join(macro_reasons) if macro_reasons else "unfavorable conditions"
                 print(f"🚫 Market unfavorable ({reason_text}). Skipping scan.\n")
                 time.sleep(SCAN_INTERVAL)
                 continue
+            # If we are only skipping altcoins, filter top_symbols down to BTCUSDT
+            if skip_alt:
+                # We will filter top_symbols later after fetching them
+                macro_reason_text = " + ".join(macro_reasons) if macro_reasons else "macro caution"
+            else:
+                macro_reason_text = ""
             # Load active trades and ensure only long trades remain (spot mode)
             active_trades = load_active_trades()
             for sym, trade in list(active_trades.items()):
@@ -140,6 +196,14 @@ def run_agent_loop() -> None:
                 print(
                     "⚠️ No symbols fetched from Binance. Check your python-binance installation and network connectivity."
                 )
+            # Apply macro filtering to symbols: if macro filter indicated to skip altcoins,
+            # restrict the universe to BTCUSDT only.  We do this after fetching the symbols
+            # to avoid unnecessary API calls during the gating step.
+            if skip_alt:
+                # keep BTCUSDT and potentially stablecoins if you wish; here we only keep BTCUSDT
+                top_symbols = [sym for sym in top_symbols if sym.upper() == "BTCUSDT"]
+                if macro_reason_text:
+                    print(f"⚠️ Macro gating ({macro_reason_text}). Scanning only BTCUSDT.")
             session = get_market_session()
             potential_trades: list[dict] = []
             symbol_scores: dict[str, dict[str, float | None]] = {}
