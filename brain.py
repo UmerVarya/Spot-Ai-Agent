@@ -160,6 +160,47 @@ def should_trade(
             score_threshold = base_threshold
         score_threshold = round(score_threshold, 2)
 
+        # -----------------------------------------------------------------
+        # Quant‑style dynamic threshold adjustments
+        # Certain bullish candlestick patterns historically produce strong
+        # follow‑through.  Lower the score threshold for these patterns
+        # to ensure good setups are not discarded purely due to a high
+        # default threshold.  This is especially important when the
+        # confidence_guard module returns a strict cutoff (e.g., 5.5).
+        # We cap the minimum threshold at 4.0 to avoid approving
+        # marginal setups.
+        try:
+            pattern_lower = pattern_name.lower() if isinstance(pattern_name, str) else ""
+        except Exception:
+            pattern_lower = ""
+        strong_patterns = {
+            "three_white_soldiers",
+            "marubozu_bullish",
+            "bullish_engulfing",
+            "piercing_line",
+            "hammer",
+            "inverted_hammer",
+            "tweezer_bottom",
+        }
+        if pattern_lower in strong_patterns:
+            # Reduce threshold by 0.5 for strong bullish patterns
+            score_threshold -= 0.5
+
+        # Additional adjustment: if sentiment is neutral or bullish and the
+        # raw technical score already exceeds (base_threshold - 0.5), nudge the
+        # threshold down slightly.  This encourages trades in moderately
+        # positive environments.
+        if sentiment_bias in {"bullish", "neutral"}:
+            try:
+                base_thr = get_adaptive_conf_threshold() or 4.5
+            except Exception:
+                base_thr = 4.5
+            if score >= (base_thr - 0.5):
+                score_threshold -= 0.2
+
+        # Ensure threshold does not fall below 4.0
+        score_threshold = round(max(score_threshold, 4.0), 2)
+
         # Set default direction based on score and sentiment
         if direction is None and score >= score_threshold and sentiment_bias != "bearish":
             direction = "long"
@@ -241,7 +282,11 @@ def should_trade(
                 "confidence": final_confidence,
                 "reason": f"Score {score:.2f} below threshold {score_threshold:.2f}",
             }
-        if final_confidence < 4.5:
+        # Require a minimum confidence but allow more flexibility for scalping.
+        # Original implementation rejected trades below 4.5; we relax this to 4.0
+        # to avoid discarding potentially profitable setups when indicators and
+        # macro conditions are supportive.
+        if final_confidence < 4.0:
             return {
                 "decision": False,
                 "confidence": final_confidence,
