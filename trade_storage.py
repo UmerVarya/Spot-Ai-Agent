@@ -1,14 +1,12 @@
 """
-Enhanced trade storage for Spot AI Super Agent.
+Enhanced trade storage for Spot AI Super Agent (updated).
 
 This module extends the original ``trade_storage.py`` by capturing
-additional metadata when trades open and close.  In particular it adds
-``entry_time``, ``exit_time``, ``size``, ``fees``,
-``slippage``, ``strategy``, ``session`` and ``duration`` fields to the
-CSV log, allowing richer analytics in the dashboard.  The API is
-backwards-compatible: existing callers can still invoke
-``store_trade()`` and ``log_trade_result()`` with the old parameters,
-and missing fields will be filled with sensible defaults.
+additional metadata when trades open and close.  In addition, it
+standardises the locations of the active and historical trade logs so
+that both the trading engine and the Streamlit dashboard read and
+write the same files.  Paths are now resolved relative to the
+module’s own directory, unless overridden via environment variables.
 """
 
 import json
@@ -17,9 +15,23 @@ import csv
 from datetime import datetime
 from typing import Optional
 
-# File locations; these can be overridden via environment variables if desired
-ACTIVE_FILE = os.environ.get("ACTIVE_TRADES_FILE", "active_trades.json")
-LOG_FILE = os.environ.get("TRADE_LOG_FILE", "trade_log.csv")
+# Determine the directory where this file resides.  All log files
+# default to this directory so they remain consistent across
+# processes, regardless of the current working directory.
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# File locations; these can be overridden via environment variables if desired.
+# ``ACTIVE_TRADES_FILE`` stores open trades in JSON format.  ``TRADE_LOG_FILE``
+# stores completed trades in CSV format.
+ACTIVE_FILE = os.environ.get(
+    "ACTIVE_TRADES_FILE",
+    os.path.join(_MODULE_DIR, "active_trades.json"),
+)
+LOG_FILE = os.environ.get(
+    "TRADE_LOG_FILE",
+    os.path.join(_MODULE_DIR, "trade_log.csv"),
+)
+
 
 def load_active_trades() -> list:
     """Return the list of currently active trades from disk."""
@@ -31,18 +43,24 @@ def load_active_trades() -> list:
             pass
     return []
 
+
 def save_active_trades(trades: list) -> None:
     """Persist the list of active trades to disk."""
+    # Ensure parent directory exists
+    os.makedirs(os.path.dirname(ACTIVE_FILE), exist_ok=True)
     with open(ACTIVE_FILE, "w") as f:
         json.dump(trades, f, indent=4)
+
 
 def is_trade_active(symbol: str) -> bool:
     """Return True if a trade with ``symbol`` exists in the active file."""
     trades = load_active_trades()
     return any(t.get("symbol") == symbol for t in trades)
 
+
 def store_trade(trade: dict) -> None:
-    """Append a new trade to the active trades list.
+    """
+    Append a new trade to the active trades list.
 
     The trade dict can include optional metadata such as ``entry_time``,
     ``size``, ``strategy`` and ``session``.  If not provided,
@@ -57,11 +75,13 @@ def store_trade(trade: dict) -> None:
     trades.append(trade)
     save_active_trades(trades)
 
+
 def remove_trade(symbol: str) -> None:
     """Remove a trade with a given symbol from the active list."""
     trades = load_active_trades()
     updated = [t for t in trades if t.get("symbol") != symbol]
     save_active_trades(updated)
+
 
 def log_trade_result(
     trade: dict,
@@ -96,10 +116,25 @@ def log_trade_result(
     """
     # Build headers if the file is empty / non-existent
     headers = [
-        "timestamp", "symbol", "direction", "entry_time", "exit_time",
-        "entry", "exit", "size", "fees", "slippage",
-        "outcome", "strategy", "session", "confidence", "btc_dominance",
-        "fear_greed", "score", "pattern", "narrative"
+        "timestamp",
+        "symbol",
+        "direction",
+        "entry_time",
+        "exit_time",
+        "entry",
+        "exit",
+        "size",
+        "fees",
+        "slippage",
+        "outcome",
+        "strategy",
+        "session",
+        "confidence",
+        "btc_dominance",
+        "fear_greed",
+        "score",
+        "pattern",
+        "narrative",
     ]
     # Compose row
     row = {
@@ -124,6 +159,8 @@ def log_trade_result(
         "narrative": trade.get("narrative", "No explanation"),
     }
     file_exists = os.path.exists(LOG_FILE)
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     # Write the row to CSV
     with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=headers)
