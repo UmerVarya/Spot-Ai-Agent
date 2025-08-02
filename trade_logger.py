@@ -4,7 +4,7 @@ Logger for final trade outcomes (updated).
 This module defines ``log_trade_result`` which appends a record to
 ``trade_learning_log.csv`` whenever a trade closes.  The log captures key
 information such as the symbol, session, trade score, direction, outcome,
-macro context and final confidence.  The CSV is appended with headers if
+macro context (including sentiment bias) and final confidence.  The CSV is appended with headers if
 absent.  Caller should ensure that each trade dict contains the expected
 keys (see below).  If optional fields are missing, sensible defaults are
 used.
@@ -54,7 +54,7 @@ def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
         "outcome",
         "btc_dominance",
         "fear_greed",
-        "sentiment",
+        "sentiment_bias",
         "pattern",
         "support_zone",
         "resistance_zone",
@@ -73,7 +73,7 @@ def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
         "outcome": outcome,
         "btc_dominance": trade.get("btc_dominance", 0),
         "fear_greed": trade.get("fear_greed", 0),
-        "sentiment": trade.get("sentiment_bias", "unknown"),
+        "sentiment_bias": trade.get("sentiment_bias", "unknown"),
         # Use the chart/candlestick pattern detected when the trade was opened
         "pattern": trade.get("pattern", trade.get("pattern_name", "none")),
         "support_zone": trade.get("support_zone", False),
