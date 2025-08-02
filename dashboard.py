@@ -1,20 +1,22 @@
 """
-    Comprehensive Streamlit dashboard for the Spot AI Super Agent.
+Comprehensive Streamlit dashboard for the Spot AI Super Agent (updated).
 
-    This dashboard provides both real‑time monitoring of active trades and
-    in‑depth analytics of historical performance.  It reads from the
-    ``active_trades.json`` and ``trade_log.csv`` produced by the bot to
-    compute metrics such as unrealised PnL, time in trade, net versus
-    gross PnL, win/loss statistics, equity curves, session and strategy
-    breakdowns.  Users can download their full trade history for offline
-    analysis via a CSV export button.
+This dashboard provides both real‑time monitoring of active trades and
+in‑depth analytics of historical performance.  It reads from the
+``active_trades.json`` and ``trade_log.csv`` produced by the bot to
+compute metrics such as unrealised PnL, time in trade, net versus
+gross PnL, win/loss statistics, equity curves, session and strategy
+breakdowns.  Users can download their full trade history for offline
+analysis via a CSV export button.
 
-    Note that many of these analytics rely on additional fields being
-    recorded by the trading engine (e.g. ``entry_time``, ``exit_time``,
-    ``size``, ``fees``, ``slippage``, ``strategy``, ``session``).  Ensure
-    that your ``trade_storage`` and trade management code populates these
-    fields accordingly.
-    """
+Compared with the original version, this update standardises file
+locations: the default paths for the active trades JSON and trade log
+CSV now live in the same directory as this script (unless
+overridden via environment variables).  The ``load_trade_history``
+function also falls back to ``trades_log.csv`` for backward
+compatibility and filters out rows where the outcome is recorded as
+``open``.
+"""
 
 import streamlit as st
 import json
@@ -40,6 +42,7 @@ except Exception:
 
 from streamlit_autorefresh import st_autorefresh
 
+# Load environment variables early so API keys are available
 load_dotenv()
 api_key = os.getenv("BINANCE_API_KEY")
 api_secret = os.getenv("BINANCE_API_SECRET")
@@ -52,16 +55,19 @@ except Exception:
 st.set_page_config(page_title="Spot AI Super Agent Dashboard", page_icon="", layout="wide")
 st.title(" Spot AI Super Agent – Live Trade Dashboard")
 
-# Determine file paths for active and historical trades
-import tempfile
+# Determine file paths for active and historical trades.  Use the module
+# directory as the default location to ensure consistency across
+# processes.  Environment variables can override these defaults.
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 ACTIVE_TRADES_FILE = os.environ.get(
     "ACTIVE_TRADES_FILE",
-    os.path.join(tempfile.gettempdir(), "active_trades.json"),
+    os.path.join(_MODULE_DIR, "active_trades.json"),
 )
 TRADE_LOG_FILE = os.environ.get(
     "TRADE_LOG_FILE",
-    os.path.join(os.path.dirname(__file__), "trade_log.csv"),
+    os.path.join(_MODULE_DIR, "trade_log.csv"),
 )
+
 
 def load_active_trades() -> dict:
     """Return a dictionary of active trades from the configured JSON file."""
@@ -71,18 +77,25 @@ def load_active_trades() -> dict:
     except Exception:
         return {}
 
+
 def load_trade_history() -> pd.DataFrame:
     """
-    Load completed trade history from CSV.  This function first attempts to
-    read the path specified by ``TRADE_LOG_FILE``.  If that file is empty
-    or missing, it falls back to ``trade_log.csv`` and then
-    ``trade_learning_log.csv`` in the same directory as this script.  If
-    none are found, an empty DataFrame is returned.
+    Load completed trade history from CSV.
+
+    This function first attempts to read the path specified by
+    ``TRADE_LOG_FILE``.  If that file is empty or missing, it falls
+    back to ``trade_log.csv`` in the same directory, then to
+    ``trades_log.csv`` (legacy signal log) and finally to
+    ``trade_learning_log.csv`` in the same directory as this script.
+    If none are found, an empty DataFrame is returned.
+    Rows with ``outcome == 'open'`` are filtered out, since these are
+    open trades mistakenly logged in earlier versions.
     """
     candidates = [
         TRADE_LOG_FILE,
-        os.path.join(os.path.dirname(__file__), "trade_log.csv"),
-        os.path.join(os.path.dirname(__file__), "trade_learning_log.csv"),
+        os.path.join(_MODULE_DIR, "trade_log.csv"),
+        os.path.join(_MODULE_DIR, "trades_log.csv"),
+        os.path.join(_MODULE_DIR, "trade_learning_log.csv"),
     ]
     for candidate in candidates:
         if not candidate or not os.path.exists(candidate):
@@ -93,10 +106,14 @@ def load_trade_history() -> pd.DataFrame:
                 # handle log files saved without a header row
                 df = pd.read_csv(candidate, header=None)
             if not df.empty:
+                # Filter out rows with outcome == 'open' (incomplete trades)
+                if "outcome" in df.columns:
+                    df = df[df["outcome"].astype(str).str.lower() != "open"]
                 return df
         except Exception:
             continue
     return pd.DataFrame()
+
 
 def get_live_price(symbol: str) -> float:
     """Fetch the current price for a symbol from Binance."""
@@ -105,6 +122,7 @@ def get_live_price(symbol: str) -> float:
         return float(res["price"])
     except Exception:
         return None
+
 
 def format_active_row(symbol: str, data: dict) -> dict:
     """Format a single active trade dictionary into a row for display."""
@@ -166,6 +184,7 @@ def format_active_row(symbol: str, data: dict) -> dict:
         "Status": status_str,
     }
 
+
 # Sidebar controls
 refresh_interval = st.sidebar.slider("⏱️ Refresh Interval (seconds)", 10, 60, 30)
 st.sidebar.markdown("---")
@@ -195,12 +214,8 @@ if active_rows:
     col3.metric("Total Unrealised PnL", f"${total_unrealised:.2f}")
     wins_active = (df_active["PnL (%)"] > 0).sum()
     col4.metric("Winning Trades", wins_active)
-    # Colour formatting for PnL columns
+    # Display active trades table with formatted PnL columns
     df_display = df_active.copy()
-    # Format PnL percent with colour indicator
-    def colour_pnl(val):
-        colour = "green" if val >= 0 else "red"
-        return f"<span style='color:{colour}'>{val:.2f}%</span>"
     df_display["PnL (%)"] = df_display["PnL (%)"].apply(lambda x: f" {x:.2f}%")
     df_display["PnL ($)"] = df_display["PnL ($)"].apply(lambda x: f" ${x:.2f}")
     st.dataframe(df_display, use_container_width=True)
@@ -223,22 +238,18 @@ if not hist_df.empty:
         directions = hist_df["direction"].astype(str)
     else:
         directions = pd.Series(["long"] * len(hist_df))
-
     if "entry" in hist_df.columns:
         entries = pd.to_numeric(hist_df["entry"], errors="coerce")
     else:
         entries = pd.Series([0] * len(hist_df), dtype=float)
-
     if "exit" in hist_df.columns:
         exits = pd.to_numeric(hist_df["exit"], errors="coerce")
     else:
         exits = pd.to_numeric(hist_df.get("exit_price", pd.Series([np.nan] * len(hist_df))), errors="coerce")
-
     if "size" in hist_df.columns:
         sizes = pd.to_numeric(hist_df["size"], errors="coerce").fillna(1)
     else:
         sizes = pd.Series([1] * len(hist_df), dtype=float)
-
     fees = pd.to_numeric(hist_df.get("fees", pd.Series([0] * len(hist_df))), errors="coerce").fillna(0)
     slippage = pd.to_numeric(hist_df.get("slippage", pd.Series([0] * len(hist_df))), errors="coerce").fillna(0)
     # Determine direction multiplier
@@ -274,7 +285,6 @@ if not hist_df.empty:
     mcol5.metric("Total Gross PnL", f"${total_gross:.2f}")
     mcol6.metric("Total Net PnL", f"${total_net:.2f}")
     # Equity curve chart
-    # Sort by exit_time and compute cumulative net PnL
     if "exit_time" in hist_df.columns:
         curve_df = hist_df.sort_values("exit_time").copy()
         curve_df["Cumulative PnL"] = curve_df["PnL (net $)"].cumsum()
@@ -311,7 +321,6 @@ if not hist_df.empty:
     for col in ["PnL (net $)", "PnL (%)", "Duration (min)", "fees", "slippage"]:
         if col in hist_display.columns:
             hist_display[col] = hist_display[col].apply(lambda x: round(x, 2) if pd.notnull(x) else x)
-    # Colour PnL column via HTML
     st.dataframe(hist_display, use_container_width=True)
     # CSV download button
     csv_data = hist_df.to_csv(index=False).encode('utf-8')
