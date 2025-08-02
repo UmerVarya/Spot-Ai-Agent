@@ -1,3 +1,18 @@
+"""
+Main trading agent loop for the Spot AI Super Agent.
+
+This script orchestrates periodic market scans, evaluates signals, asks the
+brain whether to take trades, applies an ML-based veto and finally opens
+trades in paper trading mode.  It also handles diversification to avoid
+overexposure to correlated symbols, enforces a maximum number of open trades
+and logs decisions and outcomes.
+
+The call to ``select_diversified_signals`` was updated to pass the
+``max_trades`` parameter explicitly.  Without this fix, the previously
+computed ``allowed_new`` value was being treated as a correlation threshold,
+resulting in at most two signals being selected regardless of available slots.
+"""
+
 import logging
 logging.basicConfig(level=logging.INFO)
 logging.info("agent.py starting...")
@@ -9,8 +24,8 @@ from dotenv import load_dotenv
 load_dotenv()
 import json
 import threading
-from fetch_news import fetch_news, run_news_fetcher
-from trade_utils import simulate_slippage, estimate_commission
+from fetch_news import fetch_news, run_news_fetcher  # noqa: F401
+from trade_utils import simulate_slippage, estimate_commission  # noqa: F401
 from trade_utils import (
     get_top_symbols,
     get_price_data,
@@ -40,20 +55,22 @@ SCAN_INTERVAL = 15
 NEWS_INTERVAL = 3600
 
 
-def auto_run_news():
+def auto_run_news() -> None:
+    """Background thread that periodically fetches news."""
     while True:
         print("🗞️ Running scheduled news fetcher...")
         run_news_fetcher()
         time.sleep(NEWS_INTERVAL)
 
 
-def run_streamlit():
+def run_streamlit() -> None:
+    """Launch the Streamlit dashboard as a background process."""
     port = os.environ.get("PORT", "10000")
-    # Launch the dashboard as a daemon thread
     os.system(f"streamlit run dashboard.py --server.port {port} --server.headless true")
 
 
-def run_agent_loop():
+def run_agent_loop() -> None:
+    """Main loop that scans the market, evaluates signals and opens trades."""
     print("\n🤖 Spot AI Super Agent running in paper trading mode...\n")
     # start news and dashboard threads
     threading.Thread(target=auto_run_news, daemon=True).start()
@@ -99,7 +116,7 @@ def run_agent_loop():
             )
             # Macro gating
             if (sentiment_bias == "bearish" and sentiment_confidence >= 7) or fg < 20 or btc_d > 60:
-                reasons = []
+                reasons: list[str] = []
                 if sentiment_bias == "bearish" and sentiment_confidence >= 7:
                     reasons.append("strong bearish sentiment")
                 if fg < 20:
@@ -124,8 +141,8 @@ def run_agent_loop():
                     "⚠️ No symbols fetched from Binance. Check your python-binance installation and network connectivity."
                 )
             session = get_market_session()
-            potential_trades = []
-            symbol_scores = {}
+            potential_trades: list[dict] = []
+            symbol_scores: dict[str, dict[str, float | None]] = {}
             # Evaluate each symbol
             for symbol in top_symbols:
                 if symbol in active_trades:
@@ -147,7 +164,7 @@ def run_agent_loop():
                         direction = "long"
                     # Skip non-long or invalid position sizes
                     if direction != "long" or position_size <= 0:
-                        skip_reasons = []
+                        skip_reasons: list[str] = []
                         if direction != "long":
                             if direction is None:
                                 skip_reasons.append("no long signal (score below cutoff)")
@@ -182,7 +199,8 @@ def run_agent_loop():
             potential_trades.sort(key=lambda x: x['score'], reverse=True)
             allowed_new = MAX_ACTIVE_TRADES - len(active_trades)
             opened_count = 0
-            selected = select_diversified_signals(potential_trades, allowed_new)
+            # Pass allowed_new as max_trades to avoid misassigning correlation threshold
+            selected = select_diversified_signals(potential_trades, max_trades=allowed_new)
             # Iterate over selected trade candidates and open trades
             for trade_candidate in selected:
                 if opened_count >= allowed_new:
@@ -214,8 +232,8 @@ def run_agent_loop():
                     sentiment=sentiment,
                     macro_news={"safe": True, "reason": ""},
                 )
-                decision = decision_obj.get("decision", False)
-                final_conf = decision_obj.get("confidence", score)
+                decision = bool(decision_obj.get("decision", False))
+                final_conf = float(decision_obj.get("confidence", score))
                 narrative = decision_obj.get("narrative", "")
                 reason = decision_obj.get("reason", "")
                 print(
@@ -235,7 +253,7 @@ def run_agent_loop():
                     pattern=pattern_name,
                 )
                 if ml_prob < 0.5:
-                    print(f"🤖 ML model predicted low success probability ({ml_prob:.2f}) for {symbol}. Skipping trade.")
+                    print(f"🚫 ML model predicted low success probability ({ml_prob:.2f}) for {symbol}. Skipping trade.")
                     log_rejection(symbol, f"ML prob {ml_prob:.2f} too low")
                     continue
                 # Blend ML probability into final confidence
@@ -294,10 +312,7 @@ def run_agent_loop():
                     # Add to active trades and persist
                     active_trades[symbol] = new_trade
                     create_new_trade(new_trade)
-                    # Do NOT log the open trade as a completed trade.  It will be
-                    # logged upon exit by trade_manager.py.  Previously we wrote
-                    # log_trade_result(new_trade, outcome="open", exit_price=entry_price),
-                    # but this polluted the completed trades log with open rows.
+                    # Do NOT log the open trade as a completed trade.  It will be logged upon exit by trade_manager.py.
                     save_active_trades(active_trades)
                     send_email(f"New Trade Opened: {symbol}", str(new_trade))
                     opened_count += 1
@@ -320,5 +335,5 @@ def run_agent_loop():
 
 
 if __name__ == "__main__":
-    logging.info("🚀 Starting Spot AI Super Agent loop...")
+    logging.info("🎬 Starting Spot AI Super Agent loop...")
     run_agent_loop()
