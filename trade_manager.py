@@ -1,17 +1,19 @@
 """
-    Extended trade management utilities for the Spot AI Super Agent.
+Extended trade management utilities for the Spot AI Super Agent (updated).
 
-    This module refactors the original ``trade_manager.py`` to record
-    additional metadata when closing trades.  Each time a trade is closed
-    – whether due to an early exit, stop‑loss hit, or take‑profit – the
-    manager computes exit timestamps, commissions and slippage and passes
-    those values into the enhanced ``log_trade_result`` function from
-    ``trade_storage``.  The extra information allows downstream analytics to
-    calculate net PnL, durations and risk metrics.
+This module refactors the original ``trade_manager.py`` to record
+additional metadata when closing trades.  Each time a trade is closed
+– whether due to an early exit, stop‑loss hit, or take‑profit – the
+manager computes exit timestamps, commissions and slippage and passes
+those values into the enhanced ``log_trade_result`` function from
+``trade_storage``.  The extra information allows downstream analytics to
+calculate net PnL, durations and risk metrics.
 
-    All other logic for trailing stops, dynamic take‑profit/stop‑loss and
-    early‑exit evaluation remains unchanged.
-    """
+In this update we standardise the location of the active trades file,
+resolving it relative to this module and allowing it to be overridden
+via an environment variable.  This ensures the trading engine and
+dashboard access the same JSON file.
+"""
 
 import json
 import os
@@ -30,11 +32,12 @@ from trade_storage import log_trade_result  # use enhanced storage for logging
 EARLY_EXIT_THRESHOLD = 0.015  # 1.5% move against entry
 MACRO_CONFIDENCE_EXIT_THRESHOLD = 4
 
-# Path to the JSON file storing active trades.  Use temporary directory by default
-import tempfile
+# Determine the directory where this file resides.  Use this as the
+# default location for active trades unless overridden by environment.
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 ACTIVE_TRADES_FILE = os.environ.get(
     "ACTIVE_TRADES_FILE",
-    os.path.join(tempfile.gettempdir(), "active_trades.json"),
+    os.path.join(_MODULE_DIR, "active_trades.json"),
 )
 
 
@@ -50,6 +53,7 @@ def load_active_trades() -> Dict[str, dict]:
 def save_active_trades(trades: Dict[str, dict]) -> None:
     """Persist the current active trades to disk."""
     try:
+        os.makedirs(os.path.dirname(ACTIVE_TRADES_FILE), exist_ok=True)
         with open(ACTIVE_TRADES_FILE, "w") as f:
             json.dump(trades, f, indent=4)
     except Exception as e:
@@ -94,7 +98,7 @@ def should_exit_early(trade: dict, current_price: float, price_data) -> Tuple[bo
 def manage_trades() -> None:
     """Iterate over active trades and update or close them."""
     active_trades = load_active_trades()
-    updated_trades = {}
+    updated_trades: Dict[str, dict] = {}
     for symbol, trade in active_trades.items():
         price_data = get_price_data(symbol)
         if price_data is None or price_data.empty:
@@ -122,7 +126,14 @@ def manage_trades() -> None:
             trade['outcome'] = "early_exit"
             trade['exit_reason'] = reason
             # Log trade result with fees and slippage
-            log_trade_result(trade, outcome="early_exit", exit_price=current_price, exit_time=trade['exit_time'], fees=fees, slippage=slippage)
+            log_trade_result(
+                trade,
+                outcome="early_exit",
+                exit_price=current_price,
+                exit_time=trade['exit_time'],
+                fees=fees,
+                slippage=slippage,
+            )
             send_email(f" Early Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
             continue
         # Compute updated indicators for trailing stops and TP
@@ -160,11 +171,18 @@ def manage_trades() -> None:
                 commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
                 fees = sl * qty * commission_rate
                 slip_price = simulate_slippage(sl, direction=direction)
-                slippage = abs(slip_price - sl)
+                slippage_amt = abs(slip_price - sl)
                 trade['exit_price'] = sl
                 trade['exit_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 trade['outcome'] = "tp4_sl" if trade.get("profit_riding") else "sl"
-                log_trade_result(trade, outcome=trade['outcome'], exit_price=sl, exit_time=trade['exit_time'], fees=fees, slippage=slippage)
+                log_trade_result(
+                    trade,
+                    outcome=trade['outcome'],
+                    exit_price=sl,
+                    exit_time=trade['exit_time'],
+                    fees=fees,
+                    slippage=slippage_amt,
+                )
                 send_email(f" Stop Loss Hit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                 continue
             # Tighten stop-loss after TP1 if momentum fades (no TP4 mode)
@@ -187,11 +205,18 @@ def manage_trades() -> None:
                     commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
                     fees = current_price * qty * commission_rate
                     slip_price = simulate_slippage(current_price, direction=direction)
-                    slippage = abs(slip_price - current_price)
+                    slippage_amt = abs(slip_price - current_price)
                     trade['exit_price'] = current_price
                     trade['exit_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                     trade['outcome'] = "tp4"
-                    log_trade_result(trade, outcome="tp4", exit_price=current_price, exit_time=trade['exit_time'], fees=fees, slippage=slippage)
+                    log_trade_result(
+                        trade,
+                        outcome="tp4",
+                        exit_price=current_price,
+                        exit_time=trade['exit_time'],
+                        fees=fees,
+                        slippage=slippage_amt,
+                    )
                     send_email(f"✅ TP4 Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                     continue
         # Add the trade back to the updated list if still active
