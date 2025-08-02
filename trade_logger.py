@@ -1,5 +1,5 @@
 """
-Logger for final trade outcomes.
+Logger for final trade outcomes (updated).
 
 This module defines ``log_trade_result`` which appends a record to
 ``trade_learning_log.csv`` whenever a trade closes.  The log captures key
@@ -8,6 +8,11 @@ macro context and final confidence.  The CSV is appended with headers if
 absent.  Caller should ensure that each trade dict contains the expected
 keys (see below).  If optional fields are missing, sensible defaults are
 used.
+
+Unlike the original version, this update allows overriding the path of
+the learning log via the ``TRADE_LEARNING_LOG_FILE`` environment
+variable and resolves the default path relative to this module.  This
+ensures consistent file locations across different processes.
 """
 
 import csv
@@ -33,12 +38,28 @@ def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
         Additional keyword arguments are accepted for compatibility (e.g.,
         ``exit_price``) but are ignored by the logger.
     """
-    # Use a fixed path relative to this module for the learning log
-    log_file = os.path.join(os.path.dirname(__file__), "trade_learning_log.csv")
+    # Determine log file path: environment variable takes precedence,
+    # otherwise use the module directory.  Using ``os.path.abspath``
+    # ensures relative paths are resolved correctly.
+    log_file = os.environ.get(
+        "TRADE_LEARNING_LOG_FILE",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_learning_log.csv"),
+    )
     fields = [
-        "timestamp", "symbol", "session", "score", "direction",
-        "outcome", "btc_dominance", "fear_greed", "sentiment",
-        "pattern", "support_zone", "resistance_zone", "volume", "confidence"
+        "timestamp",
+        "symbol",
+        "session",
+        "score",
+        "direction",
+        "outcome",
+        "btc_dominance",
+        "fear_greed",
+        "sentiment",
+        "pattern",
+        "support_zone",
+        "resistance_zone",
+        "volume",
+        "confidence",
     ]
 
     # Compose the row with sensible defaults for missing fields
@@ -59,12 +80,13 @@ def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
         "resistance_zone": trade.get("resistance_zone", False),
         "volume": trade.get("volume", 0),
         # Confidence is the final blended confidence at entry time
-        "confidence": trade.get("confidence", trade.get("sentiment_confidence", 0))
+        "confidence": trade.get("confidence", trade.get("sentiment_confidence", 0)),
     }
 
     file_exists = os.path.isfile(log_file)
-
-    with open(log_file, mode='a', newline='') as f:
+    # Ensure parent directory exists
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    with open(log_file, mode="a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         if not file_exists:
             writer.writeheader()
