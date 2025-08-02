@@ -15,6 +15,11 @@ from risk_metrics import (
     value_at_risk,
     expected_shortfall,
 )  # type: ignore
+# Directory containing this module
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Path to the signal log file (formerly trades_log.csv)
+SIGNAL_LOG_FILE = os.getenv("SIGNAL_LOG_FILE",
+                            os.path.join(_MODULE_DIR, "signal_log.csv"))
 
 # Optional TA-Lib imports (with pandas fallbacks if unavailable)
 try:
@@ -443,7 +448,10 @@ def log_signal(symbol: str, session: str, score: float, direction: Optional[str]
         "chart_pattern": chart_pattern if chart_pattern else "None",
     }
     df_entry = pd.DataFrame([log_entry])
-    log_path = os.path.join(os.path.dirname(__file__), "trades_log.csv")
+    log_path = SIGNAL_LOG_FILE
+    # ensure directory exists
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
     if os.path.exists(log_path):
         df_entry.to_csv(log_path, mode='a', header=False, index=False)
     else:
