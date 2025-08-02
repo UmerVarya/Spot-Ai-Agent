@@ -1,20 +1,22 @@
 """
 Decision logic for Spot AI Super Agent with structured LLM integration.
 
-This revised ``brain.py`` retains the core confidence aggregation and
-filtering pipeline while adding support for parsing JSON responses from
-the LLM advisor.  The LLM is expected to return a JSON object with
-``decision`` (Yes/No), ``confidence`` (0–10) and ``reason``.  If JSON
-parsing fails, the module falls back to the legacy behaviour of
-extracting a numeric rating via regex and inferring a yes/no from the
-response prefix.
+This module implements the core confidence aggregation and filtering pipeline
+for deciding whether to open a trade.  It supports parsing JSON responses
+from a large language model (LLM) advisor and gracefully falls back to
+reasonable defaults when the advisor is unavailable or returns an error.
 
-Other enhancements include minor adjustments to weighting and verbose
-reason logging.
+When the LLM returns an error (for example due to missing API keys),
+the function automatically approves the trade based on quantitative
+metrics alone.  This ensures that paper trading mode continues to
+function even without LLM access.
 """
+
+from __future__ import annotations
 
 import re
 import json
+from typing import Any, Dict, Tuple
 
 # ---------------------------------------------------------------------------
 # Optional imports for external modules.
@@ -29,7 +31,7 @@ import json
 try:
     from sentiment import get_macro_sentiment  # type: ignore
 except Exception:
-    def get_macro_sentiment():  # type: ignore
+    def get_macro_sentiment() -> Dict[str, Any]:  # type: ignore
         """Fallback macro sentiment: neutral with medium confidence."""
         return {"bias": "neutral", "score": 5.0, "confidence": 5.0}
 
@@ -43,7 +45,7 @@ except Exception:
 try:
     from confidence_guard import get_adaptive_conf_threshold  # type: ignore
 except Exception:
-    def get_adaptive_conf_threshold():  # type: ignore
+    def get_adaptive_conf_threshold() -> float:  # type: ignore
         return 4.5
 
 try:
@@ -55,13 +57,13 @@ except Exception:
 try:
     from confidence import calculate_historical_confidence  # type: ignore
 except Exception:
-    def calculate_historical_confidence(symbol: str, score: float, direction: str, session: str, pattern: str):  # type: ignore
+    def calculate_historical_confidence(symbol: str, score: float, direction: str, session: str, pattern: str) -> Dict[str, Any]:  # type: ignore
         return {"confidence": 50.0}
 
 try:
     from narrative_builder import generate_trade_narrative  # type: ignore
 except Exception:
-    def generate_trade_narrative(**kwargs):  # type: ignore
+    def generate_trade_narrative(**kwargs: Any) -> Any:  # type: ignore
         return None
 
 try:
@@ -71,25 +73,25 @@ except Exception:
         return ""
 
 # Cache for BTC context awareness
-symbol_context_cache = {}
+symbol_context_cache: Dict[str, Dict[str, Any]] = {}
 
 
-def _parse_llm_response(resp: str):
+def _parse_llm_response(resp: str) -> Tuple[bool | None, float | None, str]:
     """Attempt to parse a JSON response from the LLM.
 
-    Returns a tuple (decision_bool, advisor_rating, reason).  If parsing
-    fails, returns (None, None, raw_response).
+    Returns a tuple ``(decision_bool, advisor_rating, reason)``.  If parsing
+    fails, returns ``(None, None, raw_response)``.
     """
     try:
         data = json.loads(resp)
         decision = data.get("decision", "No")
         rating = data.get("confidence", None)
         reason = data.get("reason", "")
-        decision_bool = str(decision).strip().lower().startswith('y')
-        rating_val = None
+        decision_bool = str(decision).strip().lower().startswith("y")
+        rating_val: float | None = None
         if isinstance(rating, (int, float, str)):
             try:
-                rating_val = float(rating)
+                rating_val = float(rating)  # type: ignore[arg-type]
             except Exception:
                 rating_val = None
         return decision_bool, rating_val, reason
@@ -97,15 +99,59 @@ def _parse_llm_response(resp: str):
         return None, None, resp
 
 
-def should_trade(symbol, score, direction, indicators, session, pattern_name, orderflow, sentiment, macro_news):
-    """Determine whether to take a trade based on quantitative metrics and LLM guidance."""
+def should_trade(
+    symbol: str,
+    score: float,
+    direction: str | None,
+    indicators: Dict[str, float],
+    session: str,
+    pattern_name: str,
+    orderflow: str,
+    sentiment: Dict[str, Any],
+    macro_news: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Determine whether to take a trade based on quantitative metrics and LLM guidance.
+
+    Parameters
+    ----------
+    symbol : str
+        Trading symbol (e.g., ``"BTCUSDT"``).
+    score : float
+        Technical score for the trade setup.
+    direction : str or None
+        Desired trade direction (only "long" trades are allowed).
+    indicators : dict
+        Dictionary with technical indicator values such as RSI, MACD and ADX.
+    session : str
+        Market session identifier.
+    pattern_name : str
+        Name of the candlestick pattern detected.
+    orderflow : str
+        Order flow state (e.g., "buyers", "sellers" or "neutral").
+    sentiment : dict
+        Macro sentiment dictionary with ``bias`` and ``score`` keys.
+    macro_news : dict
+        Macro news analysis result with ``safe`` and ``reason`` keys.
+
+    Returns
+    -------
+    dict
+        A dictionary with keys ``decision`` (bool), ``confidence`` (float),
+        ``reason`` (str) and optionally ``narrative`` (str).
+    """
     try:
-        sentiment_bias = sentiment.get("bias", "neutral")
-        sentiment_confidence = sentiment.get("score", 5.0)
-        # Macro news safety
+        sentiment_bias: str = sentiment.get("bias", "neutral")  # type: ignore[arg-type]
+        sentiment_confidence: float = sentiment.get("score", 5.0)  # type: ignore[arg-type]
+        # Macro news safety check
         if not macro_news.get("safe", True):
-            return {"decision": False, "confidence": 0.0, "reason": "Macro news unsafe: " + macro_news.get("reason", "unknown")}
-        base_threshold = get_adaptive_conf_threshold() or 4.5
+            return {
+                "decision": False,
+                "confidence": 0.0,
+                "reason": "Macro news unsafe: " + macro_news.get("reason", "unknown"),
+            }
+
+        # Determine adaptive score threshold based on sentiment
+        base_threshold: float = get_adaptive_conf_threshold() or 4.5
         if sentiment_bias == "bullish":
             score_threshold = base_threshold - 0.3
         elif sentiment_bias == "bearish":
@@ -113,10 +159,14 @@ def should_trade(symbol, score, direction, indicators, session, pattern_name, or
         else:
             score_threshold = base_threshold
         score_threshold = round(score_threshold, 2)
+
+        # Set default direction based on score and sentiment
         if direction is None and score >= score_threshold and sentiment_bias != "bearish":
             direction = "long"
             print(f"🧠 Fallback direction applied: long (Sentiment: {sentiment_bias})")
-        confidence = float(score)
+
+        confidence: float = float(score)
+
         # Sentiment adjustments
         if sentiment_bias == "bullish":
             confidence += 1.0
@@ -126,11 +176,12 @@ def should_trade(symbol, score, direction, indicators, session, pattern_name, or
             confidence += (float(sentiment_confidence) - 5.0) * 0.3
         except Exception:
             pass
-        # Indicator adjustments
+
+        # Indicator adjustments (RSI, MACD, ADX)
         if direction == "long":
-            rsi = indicators.get("rsi", 50)
-            macd = indicators.get("macd", 0)
-            adx = indicators.get("adx", 20)
+            rsi = indicators.get("rsi", 50.0)
+            macd = indicators.get("macd", 0.0)
+            adx = indicators.get("adx", 20.0)
             if rsi > 70:
                 confidence -= 1.0
             elif rsi < 30:
@@ -139,42 +190,67 @@ def should_trade(symbol, score, direction, indicators, session, pattern_name, or
                 confidence += 0.5
             if adx > 25:
                 confidence += 0.5
-        # Pattern memory
-        memory_boost = recall_pattern_confidence(symbol, pattern_name)
+
+        # Pattern memory boost
+        memory_boost: float = recall_pattern_confidence(symbol, pattern_name)
         confidence += memory_boost
+
         # Historical performance boost
         hist_result = calculate_historical_confidence(symbol, score, direction, session, pattern_name)
         try:
-            confidence += (hist_result.get("confidence", 50) - 50) / 10.0
+            confidence += (hist_result.get("confidence", 50) - 50) / 10.0  # type: ignore[arg-type]
         except Exception:
             pass
+
         # Order flow adjustments
         if isinstance(orderflow, str):
-            if "buy" in orderflow.lower():
+            flow = orderflow.lower()
+            if "buy" in flow:
                 confidence += 0.5
-            elif "sell" in orderflow.lower():
+            elif "sell" in flow:
                 confidence -= 0.5
-        # Symbol context awareness
+
+        # Symbol context awareness (boost if BTC is strongly long and bullish)
         symbol_context_cache[symbol] = {
             "bias": sentiment_bias,
             "direction": direction,
-            "confidence": score
+            "confidence": score,
         }
         if symbol != "BTCUSDT" and direction == "long":
             btc_ctx = symbol_context_cache.get("BTCUSDT", {})
-            if btc_ctx.get("bias") == "bullish" and btc_ctx.get("direction") == "long" and btc_ctx.get("confidence", 0) >= 6:
+            if (
+                btc_ctx.get("bias") == "bullish"
+                and btc_ctx.get("direction") == "long"
+                and btc_ctx.get("confidence", 0) >= 6
+            ):
                 confidence += 0.8
+
+        # Clamp confidence into [0, 10]
         final_confidence = round(max(0.0, min(confidence, 10.0)), 2)
-        # Base gating
+
+        # Basic gating conditions
         if direction != "long":
-            return {"decision": False, "confidence": final_confidence, "reason": "Trade direction is not long (spot-only mode)"}
+            return {
+                "decision": False,
+                "confidence": final_confidence,
+                "reason": "Trade direction is not long (spot-only mode)",
+            }
         if score < score_threshold:
-            return {"decision": False, "confidence": final_confidence, "reason": f"Score {score:.2f} below threshold {score_threshold:.2f}"}
+            return {
+                "decision": False,
+                "confidence": final_confidence,
+                "reason": f"Score {score:.2f} below threshold {score_threshold:.2f}",
+            }
         if final_confidence < 4.5:
-            return {"decision": False, "confidence": final_confidence, "reason": "Low confidence"}
-        # Build prompt for LLM
-        recent_summary = get_recent_trade_summary(symbol=symbol, pattern=pattern_name, max_entries=3)
-        advisor_prompt = (
+            return {
+                "decision": False,
+                "confidence": final_confidence,
+                "reason": "Low confidence",
+            }
+
+        # Build prompt for LLM advisor
+        recent_summary: str = get_recent_trade_summary(symbol=symbol, pattern=pattern_name, max_entries=3)
+        advisor_prompt: str = (
             f"Symbol: {symbol}\n"
             f"Direction: {direction}\n"
             f"Technical Score: {score:.2f}\n"
@@ -188,28 +264,65 @@ def should_trade(symbol, score, direction, indicators, session, pattern_name, or
             "2. Discuss any conflicting technical indicators or signals.\n"
             "3. Provide your overall trading thesis for this setup."
         )
-        llm_response = get_llm_judgment(advisor_prompt)
-        parsed_decision, advisor_rating, advisor_reason = _parse_llm_response(llm_response)
+
+        # Query the LLM advisor
+        llm_response: Any = get_llm_judgment(advisor_prompt)
+
+        # -------------------------------------------------------------------
+        # Handle LLM failures: if the response contains the word "error", auto-approve
+        # The LLM can fail if API keys are missing or other issues occur.  In such
+        # cases, we skip the LLM gating and approve the trade based on quantitative
+        # metrics alone.
+        try:
+            resp_lc = llm_response.lower() if isinstance(llm_response, str) else ""
+        except Exception:
+            resp_lc = ""
+        if "error" in resp_lc:
+            narrative = generate_trade_narrative(
+                symbol=symbol,
+                direction=direction,
+                score=score,
+                confidence=final_confidence,
+                indicators=indicators,
+                sentiment_bias=sentiment_bias,
+                sentiment_confidence=sentiment_confidence,
+                orderflow=orderflow,
+                pattern=pattern_name,
+                macro_reason=macro_news.get("reason", ""),
+            ) or f"No major pattern, but macro/sentiment context favors {direction} setup."
+            return {
+                "decision": True,
+                "confidence": final_confidence,
+                "reason": "LLM unavailable or returned error; auto-approval",
+                "narrative": narrative,
+            }
+
+        # Parse the LLM response (JSON or fallback)
+        parsed_decision, advisor_rating, advisor_reason = _parse_llm_response(str(llm_response))
         if parsed_decision is None:
             # Fallback: use regex to extract a number and yes/no at start
-            match = re.search(r'(\d+(?:\.\d+)?)', llm_response)
+            match = re.search(r"(\d+(?:\.\d+)?)", str(llm_response))
             if match:
                 try:
                     advisor_rating = float(match.group(1))
                 except Exception:
                     advisor_rating = None
-            parsed_decision = llm_response.strip().lower().startswith("yes")
-            advisor_reason = llm_response.strip()
-        # Blend advisor rating
+            parsed_decision = str(llm_response).strip().lower().startswith("yes")
+            advisor_reason = str(llm_response).strip()
+
+        # Blend advisor rating into final confidence
         if advisor_rating is not None:
-            advisor_rating = max(0.0, min(advisor_rating, 10.0))
+            advisor_rating = max(0.0, min(float(advisor_rating), 10.0))
             final_confidence = round((final_confidence + advisor_rating) / 2.0, 2)
+
+        # If the LLM advises against the trade, veto it
         if not parsed_decision:
             return {
                 "decision": False,
                 "confidence": final_confidence,
-                "reason": f"LLM advisor vetoed trade: {advisor_reason}"
+                "reason": f"LLM advisor vetoed trade: {advisor_reason}",
             }
+
         # Generate narrative
         narrative = generate_trade_narrative(
             symbol=symbol,
@@ -221,13 +334,19 @@ def should_trade(symbol, score, direction, indicators, session, pattern_name, or
             sentiment_confidence=sentiment_confidence,
             orderflow=orderflow,
             pattern=pattern_name,
-            macro_reason=macro_news.get("reason", "")
+            macro_reason=macro_news.get("reason", ""),
         ) or f"No major pattern, but macro/sentiment context favors {direction} setup."
+
         return {
             "decision": True,
             "confidence": final_confidence,
             "reason": "All filters passed",
-            "narrative": narrative
+            "narrative": narrative,
         }
+
     except Exception as e:
-        return {"decision": False, "confidence": 0.0, "reason": f"Error in should_trade(): {e}"}
+        return {
+            "decision": False,
+            "confidence": 0.0,
+            "reason": f"Error in should_trade(): {e}",
+        }
