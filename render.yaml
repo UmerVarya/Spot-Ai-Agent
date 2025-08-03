@@ -5,3 +5,9 @@ services:
     pythonVersion: 3.10.13
     buildCommand: pip install -r requirements.txt
     startCommand: python3 agent.py
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase: trade-db
+databases:
+  - name: trade-db
+    plan: free
