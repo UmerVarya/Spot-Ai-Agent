@@ -6,6 +6,8 @@ from datetime import datetime
 from typing import Optional
 import traceback
 
+from trade_storage import TRADE_LOG_FILE  # shared trade log path
+
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
 from multi_timeframe import multi_timeframe_confluence  # type: ignore
 from risk_metrics import (
@@ -399,7 +401,7 @@ def get_top_symbols(limit: int = 30) -> list:
     symbols = [x['symbol'] for x in sorted_tickers if x['symbol'].endswith("USDT") and not x['symbol'].endswith("BUSD")]
     return symbols[:limit]
 
-def compute_performance_metrics(log_file: str = "trade_log.csv", lookback: int = 100) -> dict:
+def compute_performance_metrics(log_file: str = TRADE_LOG_FILE, lookback: int = 100) -> dict:
     """Return risk-adjusted performance metrics from the trade log."""
     if not os.path.exists(log_file):
         return {}

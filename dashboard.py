@@ -9,13 +9,13 @@ gross PnL, win/loss statistics, equity curves, session and strategy
 breakdowns.  Users can download their full trade history for offline
 analysis via a CSV export button.
 
-Compared with the original version, this update standardises file
-locations: the default paths for the active trades JSON and trade log
-CSV now live in the same directory as this script (unless
-overridden via environment variables).  The ``load_trade_history``
-function also falls back to ``trades_log.csv`` for backward
-compatibility and filters out rows where the outcome is recorded as
-``open``.
+Compared with the original version, this update imports the shared
+file paths for the active trades JSON and trade log CSV from
+``trade_storage``.  Centralising the locations ensures the dashboard
+and trading engine operate on the same data regardless of where each
+module is executed.  The ``load_trade_history`` function also falls
+back to ``trades_log.csv`` for backward compatibility and filters out
+rows where the outcome is recorded as ``open``.
 """
 
 import streamlit as st
@@ -55,18 +55,12 @@ except Exception:
 st.set_page_config(page_title="Spot AI Super Agent Dashboard", page_icon="", layout="wide")
 st.title(" Spot AI Super Agent – Live Trade Dashboard")
 
-# Determine file paths for active and historical trades.  Use the module
-# directory as the default location to ensure consistency across
-# processes.  Environment variables can override these defaults.
-_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-ACTIVE_TRADES_FILE = os.environ.get(
-    "ACTIVE_TRADES_FILE",
-    os.path.join(_MODULE_DIR, "active_trades.json"),
-)
-TRADE_LOG_FILE = os.environ.get(
-    "TRADE_LOG_FILE",
-    os.path.join(_MODULE_DIR, "trade_log.csv"),
-)
+from trade_storage import ACTIVE_TRADES_FILE, TRADE_LOG_FILE  # shared paths
+
+# Base directory for any fallback files.  By deriving this from
+# ``TRADE_LOG_FILE`` we ensure all auxiliary paths reside alongside the
+# primary trade log.
+BASE_DIR = os.path.dirname(TRADE_LOG_FILE)
 
 
 def load_active_trades() -> dict:
@@ -93,9 +87,9 @@ def load_trade_history() -> pd.DataFrame:
     """
     candidates = [
         TRADE_LOG_FILE,
-        os.path.join(_MODULE_DIR, "trade_log.csv"),
-        os.path.join(_MODULE_DIR, "trades_log.csv"),
-        os.path.join(_MODULE_DIR, "trade_learning_log.csv"),
+        os.path.join(BASE_DIR, "trade_log.csv"),
+        os.path.join(BASE_DIR, "trades_log.csv"),
+        os.path.join(BASE_DIR, "trade_learning_log.csv"),
     ]
     for candidate in candidates:
         if not candidate or not os.path.exists(candidate):

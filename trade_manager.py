@@ -9,10 +9,11 @@ those values into the enhanced ``log_trade_result`` function from
 ``trade_storage``.  The extra information allows downstream analytics to
 calculate net PnL, durations and risk metrics.
 
-In this update we standardise the location of the active trades file,
-resolving it relative to this module and allowing it to be overridden
-via an environment variable.  This ensures the trading engine and
-dashboard access the same JSON file.
+In this update the module imports the path of the shared active trades
+file from ``trade_storage`` instead of constructing its own.  By
+centralising these paths, the trading engine and dashboard are
+guaranteed to read and write the same JSON file regardless of the
+working directory.
 """
 
 import json
@@ -24,7 +25,7 @@ from typing import Dict, Tuple, Optional
 from trade_utils import get_price_data, calculate_indicators, estimate_commission, simulate_slippage
 from macro_sentiment import analyze_macro_sentiment
 from notifier import send_email
-from trade_storage import log_trade_result  # use enhanced storage for logging
+from trade_storage import log_trade_result, ACTIVE_TRADES_FILE  # unified storage paths
 
 # === Constants ===
 
@@ -32,13 +33,7 @@ from trade_storage import log_trade_result  # use enhanced storage for logging
 EARLY_EXIT_THRESHOLD = 0.015  # 1.5% move against entry
 MACRO_CONFIDENCE_EXIT_THRESHOLD = 4
 
-# Determine the directory where this file resides.  Use this as the
-# default location for active trades unless overridden by environment.
-_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-ACTIVE_TRADES_FILE = os.environ.get(
-    "ACTIVE_TRADES_FILE",
-    os.path.join(_MODULE_DIR, "active_trades.json"),
-)
+
 
 
 def load_active_trades() -> Dict[str, dict]:
