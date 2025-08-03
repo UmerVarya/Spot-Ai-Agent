@@ -2,11 +2,12 @@
 Enhanced trade storage for Spot AI Super Agent (updated).
 
 This module extends the original ``trade_storage.py`` by capturing
-additional metadata when trades open and close.  In addition, it
-standardises the locations of the active and historical trade logs so
-that both the trading engine and the Streamlit dashboard read and
-write the same files.  Paths are now resolved relative to the
-module’s own directory, unless overridden via environment variables.
+additional metadata when trades open and close.  It also centralises
+where trade data are written so that restarts do not wipe the agent’s
+memory.  Paths now default to a persistent data directory (configurable
+via the ``DATA_DIR`` environment variable) instead of the repository
+root, allowing containers such as Render services to mount a volume and
+retain trade history across process restarts.
 """
 
 import json
@@ -15,23 +16,31 @@ import csv
 from datetime import datetime
 from typing import Optional
 
-# Determine the directory where this file resides.  All log files
-# default to this directory so they remain consistent across
-# processes, regardless of the current working directory.
-_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ---------------------------------------------------------------------------
+# Storage locations
+# ---------------------------------------------------------------------------
 
-# File locations; these can be overridden via environment variables if desired.
-# ``ACTIVE_TRADES_FILE`` stores open trades in JSON format.  ``TRADE_LOG_FILE``
-# stores completed trades in CSV format.  Expose these constants so other
-# modules (e.g. ``trade_manager`` and ``dashboard``) can import them, ensuring
-# all components read and write the exact same files.
+# ``DATA_DIR`` can point to a mounted volume (e.g. /var/data on Render) to
+# ensure logs persist across restarts.  By default we use a hidden directory in
+# the user's home folder.
+DATA_DIR = os.environ.get(
+    "DATA_DIR",
+    os.path.join(os.path.expanduser("~"), ".spot_ai_agent"),
+)
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# File locations; these can be overridden individually via environment
+# variables if desired. ``ACTIVE_TRADES_FILE`` stores open trades in JSON
+# format. ``TRADE_LOG_FILE`` stores completed trades in CSV format.  Expose
+# these constants so other modules (e.g. ``trade_manager`` and ``dashboard``)
+# can import them, ensuring all components read and write the exact same files.
 ACTIVE_TRADES_FILE = os.environ.get(
     "ACTIVE_TRADES_FILE",
-    os.path.join(_MODULE_DIR, "active_trades.json"),
+    os.path.join(DATA_DIR, "active_trades.json"),
 )
 TRADE_LOG_FILE = os.environ.get(
     "TRADE_LOG_FILE",
-    os.path.join(_MODULE_DIR, "trade_log.csv"),
+    os.path.join(DATA_DIR, "trade_log.csv"),
 )
 
 
