@@ -2,11 +2,12 @@
 Enhanced trade storage for Spot AI Super Agent (updated).
 
 This module extends the original ``trade_storage.py`` by capturing
-additional metadata when trades open and close.  It also centralises
-where trade data are written so that restarts do not wipe the agent’s
-memory.  By default trades are stored on disk in a user directory, but
-if a ``DATABASE_URL`` environment variable is provided the module will
-store both active trades and the trade log in a PostgreSQL database.
+additional metadata when trades open and close. It centralises where
+trade data are written so that restarts do not wipe the agent's memory.
+Paths default to a persistent data directory (configurable via the
+``DATA_DIR`` environment variable), but if a ``DATABASE_URL``
+environment variable is provided the module will store both active
+trades and the trade log in a PostgreSQL database.
 """
 
 import json
@@ -47,7 +48,6 @@ if DATABASE_URL:
 # ---------------------------------------------------------------------------
 # Storage locations
 # ---------------------------------------------------------------------------
-
 # ``DATA_DIR`` can point to a mounted volume (e.g. /var/data on Render) to
 # ensure logs persist across restarts.  By default we use a hidden directory in
 # the user's home folder.
