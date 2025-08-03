@@ -48,7 +48,15 @@ def get_recent_trade_summary(symbol: str, pattern: str, max_entries: int = 3) ->
     # Filter by symbol and (optionally) pattern
     df = df[df.get("symbol") == symbol]
     if pattern and pattern.lower() != "none":
-        df = df[df.get("pattern", "").str.lower() == pattern.lower()]
+        # Only attempt pattern filtering if the column exists.  Using
+        # ``DataFrame.get`` with a default string would return a plain
+        # Python ``str`` for missing columns, causing attribute errors when
+        # accessing ``.str``.  Instead, check for the column explicitly and
+        # perform a safe, string-based comparison.
+        if "pattern" in df.columns:
+            df = df[df["pattern"].astype(str).str.lower() == pattern.lower()]
+        # If the pattern column is absent, skip the filter entirely so that
+        # we still return a summary without raising an exception.
     if df.empty:
         return "No prior trades on record."
     # Sort by timestamp (assuming timestamp column exists)
