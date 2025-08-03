@@ -5,9 +5,10 @@ This module extends the original ``trade_storage.py`` by capturing
 additional metadata when trades open and close. It centralises where
 trade data are written so that restarts do not wipe the agent's memory.
 Paths default to a persistent data directory (configurable via the
-``DATA_DIR`` environment variable), but if a ``DATABASE_URL``
-environment variable is provided the module will store both active
-trades and the trade log in a PostgreSQL database.
+``DATA_DIR`` environment variable). If a ``DATABASE_URL`` environment
+variable is provided, the module will store both active trades and the
+trade log in a PostgreSQL database, allowing containers such as Render
+services to retain trade history across restarts.
 """
 
 import json
