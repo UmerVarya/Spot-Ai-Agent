@@ -56,12 +56,20 @@ if DATABASE_URL:
 
 # ``DATA_DIR`` can point to a mounted volume (e.g. /var/data on Render) to
 # ensure logs persist across restarts.  By default we use a hidden directory in
-# the user's home folder.
-DATA_DIR = os.environ.get(
-    "DATA_DIR",
-    os.path.join(os.path.expanduser("~"), ".spot_ai_agent"),
-)
-os.makedirs(DATA_DIR, exist_ok=True)
+# the user's home folder.  Strip any inline comments (e.g. "path # comment") and
+# fall back to the default location if the supplied directory is not writable.
+DEFAULT_DATA_DIR = os.path.join(os.path.expanduser("~"), ".spot_ai_agent")
+raw_data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
+
+# Remove inline comments and surrounding whitespace
+raw_data_dir = raw_data_dir.split("#", 1)[0].strip() or DEFAULT_DATA_DIR
+
+try:
+    os.makedirs(raw_data_dir, exist_ok=True)
+    DATA_DIR = raw_data_dir
+except OSError:
+    DATA_DIR = DEFAULT_DATA_DIR
+    os.makedirs(DATA_DIR, exist_ok=True)
 
 # File locations; these can be overridden individually via environment
 # variables if desired. ``ACTIVE_TRADES_FILE`` stores open trades in JSON
@@ -71,11 +79,11 @@ os.makedirs(DATA_DIR, exist_ok=True)
 ACTIVE_TRADES_FILE = os.environ.get(
     "ACTIVE_TRADES_FILE",
     os.path.join(DATA_DIR, "active_trades.json"),
-)
+).split("#", 1)[0].strip()
 TRADE_LOG_FILE = os.environ.get(
     "TRADE_LOG_FILE",
     os.path.join(DATA_DIR, "trade_log.csv"),
-)
+).split("#", 1)[0].strip()
 
 
 def load_active_trades() -> list:
