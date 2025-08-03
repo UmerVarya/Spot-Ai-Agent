@@ -16,18 +16,60 @@ import csv
 from datetime import datetime
 from typing import Optional
 
+# Optional PostgreSQL support -------------------------------------------------
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+DB_CONN = DB_CURSOR = None
+Json = None
+
+if DATABASE_URL:
+    try:
+        import psycopg2
+        from psycopg2.extras import Json
+
+        DB_CONN = psycopg2.connect(DATABASE_URL)
+        DB_CONN.autocommit = True
+        DB_CURSOR = DB_CONN.cursor()
+        DB_CURSOR.execute(
+            """
+            CREATE TABLE IF NOT EXISTS active_trades (
+                symbol TEXT PRIMARY KEY,
+                data   JSONB NOT NULL
+            )
+            """
+        )
+        DB_CURSOR.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_log (
+                id   SERIAL PRIMARY KEY,
+                data JSONB NOT NULL
+            )
+            """
+        )
+    except Exception as exc:  # pragma: no cover - diagnostic only
+        print(f"Database initialisation failed: {exc}. Falling back to file storage.")
+        DB_CONN = DB_CURSOR = None
+
 # ---------------------------------------------------------------------------
 # Storage locations
 # ---------------------------------------------------------------------------
 
 # ``DATA_DIR`` can point to a mounted volume (e.g. /var/data on Render) to
 # ensure logs persist across restarts.  By default we use a hidden directory in
-# the user's home folder.
-DATA_DIR = os.environ.get(
-    "DATA_DIR",
-    os.path.join(os.path.expanduser("~"), ".spot_ai_agent"),
-)
-os.makedirs(DATA_DIR, exist_ok=True)
+# the user's home folder.  Strip any inline comments (e.g. "path # comment") and
+# fall back to the default location if the supplied directory is not writable.
+DEFAULT_DATA_DIR = os.path.join(os.path.expanduser("~"), ".spot_ai_agent")
+raw_data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
+
+# Remove inline comments and surrounding whitespace
+raw_data_dir = raw_data_dir.split("#", 1)[0].strip() or DEFAULT_DATA_DIR
+
+try:
+    os.makedirs(raw_data_dir, exist_ok=True)
+    DATA_DIR = raw_data_dir
+except OSError:
+    DATA_DIR = DEFAULT_DATA_DIR
+    os.makedirs(DATA_DIR, exist_ok=True)
 
 # File locations; these can be overridden individually via environment
 # variables if desired. ``ACTIVE_TRADES_FILE`` stores open trades in JSON
@@ -37,15 +79,18 @@ os.makedirs(DATA_DIR, exist_ok=True)
 ACTIVE_TRADES_FILE = os.environ.get(
     "ACTIVE_TRADES_FILE",
     os.path.join(DATA_DIR, "active_trades.json"),
-)
+).split("#", 1)[0].strip()
 TRADE_LOG_FILE = os.environ.get(
     "TRADE_LOG_FILE",
     os.path.join(DATA_DIR, "trade_log.csv"),
-)
+).split("#", 1)[0].strip()
 
 
 def load_active_trades() -> list:
-    """Return the list of currently active trades from disk."""
+    """Return the list of currently active trades."""
+    if DB_CURSOR:
+        DB_CURSOR.execute("SELECT data FROM active_trades")
+        return [row[0] for row in DB_CURSOR.fetchall()]
     if os.path.exists(ACTIVE_TRADES_FILE):
         try:
             with open(ACTIVE_TRADES_FILE, "r") as f:
@@ -56,7 +101,15 @@ def load_active_trades() -> list:
 
 
 def save_active_trades(trades: list) -> None:
-    """Persist the list of active trades to disk."""
+    """Persist the list of active trades."""
+    if DB_CURSOR:
+        DB_CURSOR.execute("DELETE FROM active_trades")
+        for trade in trades:
+            DB_CURSOR.execute(
+                "INSERT INTO active_trades (symbol, data) VALUES (%s, %s)",
+                (trade.get("symbol"), Json(trade)),
+            )
+        return
     # Ensure parent directory exists
     os.makedirs(os.path.dirname(ACTIVE_TRADES_FILE), exist_ok=True)
     with open(ACTIVE_TRADES_FILE, "w") as f:
@@ -64,31 +117,44 @@ def save_active_trades(trades: list) -> None:
 
 
 def is_trade_active(symbol: str) -> bool:
-    """Return True if a trade with ``symbol`` exists in the active file."""
+    """Return True if a trade with ``symbol`` exists."""
+    if DB_CURSOR:
+        DB_CURSOR.execute(
+            "SELECT 1 FROM active_trades WHERE symbol = %s LIMIT 1",
+            (symbol,),
+        )
+        return DB_CURSOR.fetchone() is not None
     trades = load_active_trades()
     return any(t.get("symbol") == symbol for t in trades)
 
 
 def store_trade(trade: dict) -> None:
-    """
-    Append a new trade to the active trades list.
-
-    The trade dict can include optional metadata such as ``entry_time``,
-    ``size``, ``strategy`` and ``session``.  If not provided,
-    ``entry_time`` will default to the current UTC time.
-    """
-    trades = load_active_trades()
+    """Append a new trade to the active trades list."""
     # Ensure entry_time is set
     if "entry_time" not in trade:
         trade["entry_time"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     # Remove leverage field (spot only)
     trade.pop("leverage", None)
+    if DB_CURSOR:
+        DB_CURSOR.execute(
+            """
+            INSERT INTO active_trades (symbol, data)
+            VALUES (%s, %s)
+            ON CONFLICT (symbol) DO UPDATE SET data = EXCLUDED.data
+            """,
+            (trade.get("symbol"), Json(trade)),
+        )
+        return
+    trades = load_active_trades()
     trades.append(trade)
     save_active_trades(trades)
 
 
 def remove_trade(symbol: str) -> None:
     """Remove a trade with a given symbol from the active list."""
+    if DB_CURSOR:
+        DB_CURSOR.execute("DELETE FROM active_trades WHERE symbol = %s", (symbol,))
+        return
     trades = load_active_trades()
     updated = [t for t in trades if t.get("symbol") != symbol]
     save_active_trades(updated)
@@ -104,7 +170,7 @@ def log_trade_result(
     slippage: float = 0.0,
 ) -> None:
     """
-    Append the result of a completed trade to ``trade_log.csv``.
+    Append the result of a completed trade to storage.
 
     Parameters
     ----------
@@ -169,6 +235,12 @@ def log_trade_result(
         "pattern": trade.get("pattern", "None"),
         "narrative": trade.get("narrative", "No explanation"),
     }
+    if DB_CURSOR:
+        DB_CURSOR.execute(
+            "INSERT INTO trade_log (data) VALUES (%s)",
+            (Json(row),),
+        )
+        return
     file_exists = os.path.exists(TRADE_LOG_FILE)
     # Ensure directory exists
     os.makedirs(os.path.dirname(TRADE_LOG_FILE), exist_ok=True)
