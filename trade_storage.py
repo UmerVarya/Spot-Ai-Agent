@@ -22,12 +22,14 @@ _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # File locations; these can be overridden via environment variables if desired.
 # ``ACTIVE_TRADES_FILE`` stores open trades in JSON format.  ``TRADE_LOG_FILE``
-# stores completed trades in CSV format.
-ACTIVE_FILE = os.environ.get(
+# stores completed trades in CSV format.  Expose these constants so other
+# modules (e.g. ``trade_manager`` and ``dashboard``) can import them, ensuring
+# all components read and write the exact same files.
+ACTIVE_TRADES_FILE = os.environ.get(
     "ACTIVE_TRADES_FILE",
     os.path.join(_MODULE_DIR, "active_trades.json"),
 )
-LOG_FILE = os.environ.get(
+TRADE_LOG_FILE = os.environ.get(
     "TRADE_LOG_FILE",
     os.path.join(_MODULE_DIR, "trade_log.csv"),
 )
@@ -35,9 +37,9 @@ LOG_FILE = os.environ.get(
 
 def load_active_trades() -> list:
     """Return the list of currently active trades from disk."""
-    if os.path.exists(ACTIVE_FILE):
+    if os.path.exists(ACTIVE_TRADES_FILE):
         try:
-            with open(ACTIVE_FILE, "r") as f:
+            with open(ACTIVE_TRADES_FILE, "r") as f:
                 return json.load(f)
         except Exception:
             pass
@@ -47,8 +49,8 @@ def load_active_trades() -> list:
 def save_active_trades(trades: list) -> None:
     """Persist the list of active trades to disk."""
     # Ensure parent directory exists
-    os.makedirs(os.path.dirname(ACTIVE_FILE), exist_ok=True)
-    with open(ACTIVE_FILE, "w") as f:
+    os.makedirs(os.path.dirname(ACTIVE_TRADES_FILE), exist_ok=True)
+    with open(ACTIVE_TRADES_FILE, "w") as f:
         json.dump(trades, f, indent=4)
 
 
@@ -158,11 +160,11 @@ def log_trade_result(
         "pattern": trade.get("pattern", "None"),
         "narrative": trade.get("narrative", "No explanation"),
     }
-    file_exists = os.path.exists(LOG_FILE)
+    file_exists = os.path.exists(TRADE_LOG_FILE)
     # Ensure directory exists
-    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    os.makedirs(os.path.dirname(TRADE_LOG_FILE), exist_ok=True)
     # Write the row to CSV
-    with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
+    with open(TRADE_LOG_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         if not file_exists:
             writer.writeheader()
