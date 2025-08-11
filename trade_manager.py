@@ -16,16 +16,19 @@ guaranteed to read and write the same JSON file regardless of the
 working directory.
 """
 
-import json
-import os
-import time
 from datetime import datetime
-from typing import Dict, Tuple, Optional
+from typing import List, Tuple, Optional
 
 from trade_utils import get_price_data, calculate_indicators, estimate_commission, simulate_slippage
 from macro_sentiment import analyze_macro_sentiment
 from notifier import send_email
-from trade_storage import log_trade_result, ACTIVE_TRADES_FILE  # unified storage paths
+from trade_storage import (
+    log_trade_result,
+    store_trade,
+    remove_trade,
+    load_active_trades,
+    save_active_trades,
+)
 
 # === Constants ===
 
@@ -34,32 +37,9 @@ EARLY_EXIT_THRESHOLD = 0.015  # 1.5% move against entry
 MACRO_CONFIDENCE_EXIT_THRESHOLD = 4
 
 
-
-
-def load_active_trades() -> Dict[str, dict]:
-    """Load all currently active trades from disk."""
-    try:
-        with open(ACTIVE_TRADES_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def save_active_trades(trades: Dict[str, dict]) -> None:
-    """Persist the current active trades to disk."""
-    try:
-        os.makedirs(os.path.dirname(ACTIVE_TRADES_FILE), exist_ok=True)
-        with open(ACTIVE_TRADES_FILE, "w") as f:
-            json.dump(trades, f, indent=4)
-    except Exception as e:
-        print(f"⚠️ Unable to save active trades: {e}")
-
-
 def create_new_trade(trade: dict) -> None:
-    """Add a new trade to the active trades file."""
-    active_trades = load_active_trades()
-    active_trades[trade["symbol"]] = trade
-    save_active_trades(active_trades)
+    """Add a new trade to persistent storage."""
+    store_trade(trade)
 
 
 def should_exit_early(trade: dict, current_price: float, price_data) -> Tuple[bool, Optional[str]]:
@@ -93,8 +73,9 @@ def should_exit_early(trade: dict, current_price: float, price_data) -> Tuple[bo
 def manage_trades() -> None:
     """Iterate over active trades and update or close them."""
     active_trades = load_active_trades()
-    updated_trades: Dict[str, dict] = {}
-    for symbol, trade in active_trades.items():
+    updated_trades: List[dict] = []
+    for trade in active_trades:
+        symbol = trade.get("symbol")
         price_data = get_price_data(symbol)
         if price_data is None or price_data.empty:
             continue
@@ -157,7 +138,7 @@ def manage_trades() -> None:
                 trade['profit_riding'] = True  # enable TP4 mode
                 trade['sl'] = tp2
                 print(f"✅ {symbol} hit TP3 — Entering TP4 Profit Riding Mode")
-                updated_trades[symbol] = trade
+                updated_trades.append(trade)
                 continue
             elif current_price <= sl:
                 # Stop loss hit
@@ -215,6 +196,6 @@ def manage_trades() -> None:
                     send_email(f"✅ TP4 Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                     continue
         # Add the trade back to the updated list if still active
-        updated_trades[symbol] = trade
-    # Persist updated trades to disk
+        updated_trades.append(trade)
+    # Persist updated trades to storage
     save_active_trades(updated_trades)

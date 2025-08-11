@@ -34,7 +34,8 @@ from trade_utils import (
     calculate_indicators,
     compute_performance_metrics,
 )
-from trade_manager import manage_trades, load_active_trades, save_active_trades, create_new_trade
+from trade_manager import manage_trades, create_new_trade  # trade logic
+from trade_storage import load_active_trades, save_active_trades  # persistent storage
 from notifier import send_email, log_rejection
 from trade_storage import log_trade_result  # import from trade_storage instead of trade_logger
 from brain import should_trade
@@ -64,9 +65,21 @@ def auto_run_news() -> None:
 
 
 def run_streamlit() -> None:
-    """Launch the Streamlit dashboard as a background process."""
+    """Launch the Streamlit dashboard using Streamlit's Python API."""
     port = os.environ.get("PORT", "10000")
-    os.system(f"streamlit run dashboard.py --server.port {port} --server.headless true")
+    import sys
+    import streamlit.web.cli as stcli
+
+    sys.argv = [
+        "streamlit",
+        "run",
+        "dashboard.py",
+        "--server.port",
+        str(port),
+        "--server.headless",
+        "true",
+    ]
+    stcli.main()
 
 
 def run_agent_loop() -> None:
@@ -184,11 +197,15 @@ def run_agent_loop() -> None:
             else:
                 macro_reason_text = ""
             # Load active trades and ensure only long trades remain (spot mode)
-            active_trades = load_active_trades()
-            for sym, trade in list(active_trades.items()):
-                if trade.get("direction") == "short":
-                    print(f"⚠️ Removing non-long trade {sym} from active trades (spot-only mode).")
-                    del active_trades[sym]
+            active_trades_raw = load_active_trades()
+            active_trades = []
+            for t in active_trades_raw:
+                if t.get("direction") == "short":
+                    print(
+                        f"⚠️ Removing non-long trade {t.get('symbol')} from active trades (spot-only mode)."
+                    )
+                    continue
+                active_trades.append(t)
             save_active_trades(active_trades)
             # Get top symbols to scan
             top_symbols = get_top_symbols(limit=30)
@@ -209,7 +226,7 @@ def run_agent_loop() -> None:
             symbol_scores: dict[str, dict[str, float | None]] = {}
             # Evaluate each symbol
             for symbol in top_symbols:
-                if symbol in active_trades:
+                if any(t.get("symbol") == symbol for t in active_trades):
                     print(f"⚠️ Skipping {symbol}: already in an active trade.")
                     continue
                 try:
@@ -385,7 +402,7 @@ def run_agent_loop() -> None:
                         f"Trade Opened ✅ {symbol} @ {entry_price} | Size={position_size} | TP1 {tp1} / TP2 {tp2} / TP3 {tp3}"
                     )
                     # Add to active trades and persist
-                    active_trades[symbol] = new_trade
+                    active_trades.append(new_trade)
                     create_new_trade(new_trade)
                     # Do NOT log the open trade as a completed trade.  It will be logged upon exit by trade_manager.py.
                     save_active_trades(active_trades)

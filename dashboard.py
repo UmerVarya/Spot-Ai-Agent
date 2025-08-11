@@ -19,7 +19,6 @@ rows where the outcome is recorded as ``open``.
 """
 
 import streamlit as st
-import json
 import pandas as pd
 import numpy as np
 import os
@@ -55,58 +54,7 @@ except Exception:
 st.set_page_config(page_title="Spot AI Super Agent Dashboard", page_icon="", layout="wide")
 st.title(" Spot AI Super Agent – Live Trade Dashboard")
 
-from trade_storage import ACTIVE_TRADES_FILE, TRADE_LOG_FILE  # shared paths
-
-# Base directory for any fallback files.  By deriving this from
-# ``TRADE_LOG_FILE`` we ensure all auxiliary paths reside alongside the
-# primary trade log.
-BASE_DIR = os.path.dirname(TRADE_LOG_FILE)
-
-
-def load_active_trades() -> dict:
-    """Return a dictionary of active trades from the configured JSON file."""
-    try:
-        with open(ACTIVE_TRADES_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def load_trade_history() -> pd.DataFrame:
-    """
-    Load completed trade history from CSV.
-
-    This function first attempts to read the path specified by
-    ``TRADE_LOG_FILE``.  If that file is empty or missing, it falls
-    back to ``trade_log.csv`` in the same directory, then to
-    ``trades_log.csv`` (legacy signal log) and finally to
-    ``trade_learning_log.csv`` in the same directory as this script.
-    If none are found, an empty DataFrame is returned.
-    Rows with ``outcome == 'open'`` are filtered out, since these are
-    open trades mistakenly logged in earlier versions.
-    """
-    candidates = [
-        TRADE_LOG_FILE,
-        os.path.join(BASE_DIR, "trade_log.csv"),
-        os.path.join(BASE_DIR, "trades_log.csv"),
-        os.path.join(BASE_DIR, "trade_learning_log.csv"),
-    ]
-    for candidate in candidates:
-        if not candidate or not os.path.exists(candidate):
-            continue
-        try:
-            df = pd.read_csv(candidate)
-            if df.empty:
-                # handle log files saved without a header row
-                df = pd.read_csv(candidate, header=None)
-            if not df.empty:
-                # Filter out rows with outcome == 'open' (incomplete trades)
-                if "outcome" in df.columns:
-                    df = df[df["outcome"].astype(str).str.lower() != "open"]
-                return df
-        except Exception:
-            continue
-    return pd.DataFrame()
+from trade_storage import load_active_trades, load_trade_history_df
 
 
 def get_live_price(symbol: str) -> float:
@@ -190,7 +138,8 @@ st_autorefresh(interval=refresh_interval * 1000, key="refresh")
 # Load active trades and format into rows
 trades = load_active_trades()
 active_rows = []
-for sym, data in trades.items():
+for data in trades:
+    sym = data.get("symbol", "")
     row = format_active_row(sym, data)
     if row:
         active_rows.append(row)
@@ -217,7 +166,7 @@ else:
     st.info("No active trades found.")
 
 # Load trade history and compute summary statistics
-hist_df = load_trade_history()
+hist_df = load_trade_history_df()
 st.subheader("📊 Historical Performance – Completed Trades")
 if not hist_df.empty:
     # Ensure date columns are parsed
