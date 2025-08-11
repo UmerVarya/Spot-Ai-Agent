@@ -105,5 +105,7 @@ def detect_candlestick_patterns(df):
         return patterns
 
     except Exception as e:
-        print(f"⚠️ Candlestick detection error: {e}")
+        from log_utils import setup_logger
+        logger = setup_logger(__name__)
+        logger.warning("Candlestick detection error: %s", e, exc_info=True)
         return patterns

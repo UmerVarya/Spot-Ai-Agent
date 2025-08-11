@@ -22,6 +22,7 @@ from typing import List, Tuple, Optional
 from trade_utils import get_price_data, calculate_indicators, estimate_commission, simulate_slippage
 from macro_sentiment import analyze_macro_sentiment
 from notifier import send_email
+from log_utils import setup_logger
 from trade_storage import (
     log_trade_result,
     store_trade,
@@ -35,6 +36,8 @@ from trade_storage import (
 # Exit thresholds
 EARLY_EXIT_THRESHOLD = 0.015  # 1.5% move against entry
 MACRO_CONFIDENCE_EXIT_THRESHOLD = 4
+
+logger = setup_logger(__name__)
 
 
 def create_new_trade(trade: dict) -> None:
@@ -89,7 +92,7 @@ def manage_trades() -> None:
         # Evaluate early exit conditions
         exit_now, reason = should_exit_early(trade, current_price, price_data)
         if exit_now:
-            print(f"🔔 Early exit triggered for {symbol}: {reason}")
+            logger.info("Early exit triggered for %s: %s", symbol, reason)
             # Compute fees and slippage on exit
             qty = float(trade.get('size', trade.get('position_size', 1)))
             commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
@@ -128,21 +131,21 @@ def manage_trades() -> None:
                 trade['status']['tp1'] = True
                 # Move stop loss to entry on TP1 hit
                 trade['sl'] = entry
-                print(f"✅ {symbol} hit TP1 — SL moved to Entry")
+                logger.info("%s hit TP1 — SL moved to Entry", symbol)
             elif trade['status'].get('tp1') and not trade['status'].get('tp2') and current_price >= tp2:
                 trade['status']['tp2'] = True
                 trade['sl'] = tp1
-                print(f"✅ {symbol} hit TP2 — SL moved to TP1")
+                logger.info("%s hit TP2 — SL moved to TP1", symbol)
             elif trade['status'].get('tp2') and not trade['status'].get('tp3') and current_price >= tp3:
                 trade['status']['tp3'] = True
                 trade['profit_riding'] = True  # enable TP4 mode
                 trade['sl'] = tp2
-                print(f"✅ {symbol} hit TP3 — Entering TP4 Profit Riding Mode")
+                logger.info("%s hit TP3 — Entering TP4 Profit Riding Mode", symbol)
                 updated_trades.append(trade)
                 continue
             elif current_price <= sl:
                 # Stop loss hit
-                print(f"🛑 {symbol} hit Stop Loss!")
+                logger.info("%s hit Stop Loss!", symbol)
                 qty = float(trade.get('size', trade.get('position_size', 1)))
                 commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
                 fees = sl * qty * commission_rate
@@ -167,16 +170,16 @@ def manage_trades() -> None:
                     tightened_sl = round(current_price - atr, 6)
                     if tightened_sl > trade['sl']:
                         trade['sl'] = tightened_sl
-                        print(f"🔒 SL tightened for {symbol} to {trade['sl']}")
+                        logger.info("SL tightened for %s to %s", symbol, trade['sl'])
             # TP4 profit riding logic
             if trade.get('profit_riding'):
                 if adx > 25 and macd_hist > 0:
                     trail_sl = round(current_price - atr, 6)
                     if trail_sl > trade['sl']:
                         trade['sl'] = trail_sl
-                        print(f"🚀 {symbol} TP4 ride: SL trailed to {trail_sl}")
+                        logger.info("%s TP4 ride: SL trailed to %s", symbol, trail_sl)
                 else:
-                    print(f"⚠️ {symbol} momentum weakening — exiting TP4")
+                    logger.warning("%s momentum weakening — exiting TP4", symbol)
                     qty = float(trade.get('size', trade.get('position_size', 1)))
                     commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
                     fees = current_price * qty * commission_rate

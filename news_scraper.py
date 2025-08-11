@@ -5,6 +5,7 @@ FOREX_FACTORY_RSS = "https://www.forexfactory.com/calendar.php?week=this&day=thi
 import requests
 import feedparser
 from datetime import datetime
+from log_utils import setup_logger
 
 # === Method 1: Use CryptoPanic RSS (Free RSS feed)
 CRYPTO_PANIC_RSS = "https://cryptopanic.com/news/rss/"
@@ -16,6 +17,9 @@ COINDESK_RSS = "https://feeds.feedburner.com/CoinDesk"
 FOREX_FACTORY_RSS = "https://www.forexfactory.com/rss.php"
 
 
+logger = setup_logger(__name__)
+
+
 def fetch_headlines_from_rss(url, limit=10):
     try:
         feed = feedparser.parse(url)
@@ -23,7 +27,7 @@ def fetch_headlines_from_rss(url, limit=10):
         headlines = [f"{entry.title}: {entry.link}" for entry in entries]
         return headlines
     except Exception as e:
-        print(f"⚠️ Failed to fetch RSS: {e}")
+        logger.warning("Failed to fetch RSS: %s", e, exc_info=True)
         return []
 
 
@@ -37,6 +41,6 @@ def get_combined_headlines():
 
 if __name__ == "__main__":
     headlines = get_combined_headlines()
-    print("\n📰 Latest News Headlines (Auto-Fetched):\n")
+    logger.info("Latest News Headlines (Auto-Fetched):")
     for h in headlines:
-        print(f"- {h}")
+        logger.info("- %s", h)

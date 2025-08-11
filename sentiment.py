@@ -3,6 +3,7 @@ import json
 import re
 import requests
 from dotenv import load_dotenv
+from log_utils import setup_logger
 
 load_dotenv()
 
@@ -18,6 +19,8 @@ try:
         latest_macro_sentiment = json.load(f)
 except Exception:
     pass
+
+logger = setup_logger(__name__)
 
 def analyze_macro_news(news_text: str) -> dict:
     """Analyze combined macro news headlines using the Groq LLM API and return bias, confidence, summary."""
@@ -47,10 +50,10 @@ def analyze_macro_news(news_text: str) -> dict:
     try:
         response = requests.post(GROQ_ENDPOINT, headers=headers, json=payload)
     except Exception as e:
-        print(f"❌ Error connecting to Groq API: {e}")
+        logger.error("Error connecting to Groq API: %s", e, exc_info=True)
         return {"bias": "neutral", "confidence": 5.0, "summary": "No analysis (API error)"}
     if not response.ok:
-        print(f"❌ Groq API returned error: {response.status_code}, {response.text}")
+        logger.error("Groq API returned error: %s, %s", response.status_code, response.text)
         return {"bias": "neutral", "confidence": 5.0, "summary": "No analysis (API error)"}
     # Extract the content from the API response
     result_text = ""
@@ -58,7 +61,7 @@ def analyze_macro_news(news_text: str) -> dict:
         result_json = response.json()
         result_text = result_json.get("choices", [])[0].get("message", {}).get("content", "")
     except Exception as e:
-        print(f"⚠️ Failed to parse Groq API response: {e}")
+        logger.warning("Failed to parse Groq API response: %s", e, exc_info=True)
         result_text = response.text or ""
     # ✅ Robust JSON parsing from LLM output
     result_text = result_text.strip()

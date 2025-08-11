@@ -5,6 +5,7 @@ from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
+from log_utils import setup_logger
 
 load_dotenv()
 
@@ -15,6 +16,8 @@ SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
 __all__ = ["send_email", "log_rejection"]
+
+logger = setup_logger(__name__)
 
 def send_email(subject, trade_details):
     try:
@@ -50,10 +53,10 @@ def send_email(subject, trade_details):
         server.send_message(msg)
         server.quit()
 
-        print("📩 LLM Explanation Email Sent!")
+        logger.info("LLM Explanation Email Sent!")
 
     except Exception as e:
-        print(f"❌ Email sending failed: {e}")
+        logger.error("Email sending failed: %s", e, exc_info=True)
 
 
 def log_rejection(symbol: str, reason: str) -> None:

@@ -19,6 +19,9 @@ import os
 import requests
 import re
 import json
+import aiohttp
+import asyncio
+from log_utils import setup_logger
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -27,6 +30,8 @@ HEADERS = {
     "Authorization": f"Bearer {GROQ_API_KEY}",
     "Content-Type": "application/json"
 }
+
+logger = setup_logger(__name__)
 
 
 def _sanitize_prompt(prompt: str, max_len: int = 3000) -> str:
@@ -76,8 +81,38 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
             content = response.json().get("choices", [])[0].get("message", {}).get("content", "").strip()
             return content
         else:
-            print(f"❌ LLM request failed: {response.status_code}, {response.text}")
+            logger.error("LLM request failed: %s, %s", response.status_code, response.text)
             return "LLM error: Unable to generate response."
     except Exception as e:
-        print(f"❌ LLM Exception: {e}")
+        logger.error("LLM Exception: %s", e, exc_info=True)
+        return "LLM error: Exception occurred."
+
+
+async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 500) -> str:
+    """Asynchronous version of ``get_llm_judgment`` using aiohttp."""
+    try:
+        safe_prompt = _sanitize_prompt(prompt)
+        user_prompt = (
+            safe_prompt
+            + "\n\nPlease respond in JSON format with the following keys:"
+            + " decision (Yes or No), confidence (0 to 10 as a number) and reason (a short explanation)."
+        )
+        data = {
+            "model": MODEL,
+            "messages": [
+                {"role": "system", "content": "You are a highly experienced crypto trader assistant. Always respond in JSON."},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(GROQ_API_URL, headers=HEADERS, json=data) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    return result.get("choices", [])[0].get("message", {}).get("content", "").strip()
+                logger.error("LLM request failed: %s, %s", resp.status, await resp.text())
+                return "LLM error: Unable to generate response."
+    except Exception as e:
+        logger.error("Async LLM Exception: %s", e, exc_info=True)
         return "LLM error: Exception occurred."
