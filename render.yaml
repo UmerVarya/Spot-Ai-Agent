@@ -10,6 +10,12 @@ services:
         fromDatabase:
           name: spot-ai-db
           property: connectionString
+      - key: DATA_DIR
+        value: /var/data
+    disks:
+      - name: trade-data
+        mountPath: /var/data
+        sizeGB: 1
 databases:
   - name: spot-ai-db
     plan: free

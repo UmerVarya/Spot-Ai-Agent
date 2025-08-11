@@ -13,10 +13,15 @@ retain trade history across process restarts.
 import json
 import os
 import csv
+import logging
 from datetime import datetime
 from typing import Optional
 
+import pandas as pd
+
 # Optional PostgreSQL support -------------------------------------------------
+
+logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DB_CONN = DB_CURSOR = None
@@ -46,8 +51,9 @@ if DATABASE_URL:
             )
             """
         )
+        logger.info("Connected to PostgreSQL for trade storage.")
     except Exception as exc:  # pragma: no cover - diagnostic only
-        print(f"Database initialisation failed: {exc}. Falling back to file storage.")
+        logger.exception("Database initialisation failed: %s. Falling back to file storage.", exc)
         DB_CONN = DB_CURSOR = None
 
 # ---------------------------------------------------------------------------
@@ -89,27 +95,33 @@ TRADE_LOG_FILE = os.environ.get(
 def load_active_trades() -> list:
     """Return the list of currently active trades."""
     if DB_CURSOR:
-        DB_CURSOR.execute("SELECT data FROM active_trades")
-        return [row[0] for row in DB_CURSOR.fetchall()]
+        try:
+            DB_CURSOR.execute("SELECT data FROM active_trades")
+            return [row[0] for row in DB_CURSOR.fetchall()]
+        except Exception as exc:
+            logger.exception("Failed to load active trades from database: %s", exc)
     if os.path.exists(ACTIVE_TRADES_FILE):
         try:
             with open(ACTIVE_TRADES_FILE, "r") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception("Failed to read active trades file: %s", exc)
     return []
 
 
 def save_active_trades(trades: list) -> None:
     """Persist the list of active trades."""
     if DB_CURSOR:
-        DB_CURSOR.execute("DELETE FROM active_trades")
-        for trade in trades:
-            DB_CURSOR.execute(
-                "INSERT INTO active_trades (symbol, data) VALUES (%s, %s)",
-                (trade.get("symbol"), Json(trade)),
-            )
-        return
+        try:
+            DB_CURSOR.execute("DELETE FROM active_trades")
+            for trade in trades:
+                DB_CURSOR.execute(
+                    "INSERT INTO active_trades (symbol, data) VALUES (%s, %s)",
+                    (trade.get("symbol"), Json(trade)),
+                )
+            return
+        except Exception as exc:
+            logger.exception("Failed to save active trades to database: %s", exc)
     # Ensure parent directory exists
     os.makedirs(os.path.dirname(ACTIVE_TRADES_FILE), exist_ok=True)
     with open(ACTIVE_TRADES_FILE, "w") as f:
@@ -136,15 +148,18 @@ def store_trade(trade: dict) -> None:
     # Remove leverage field (spot only)
     trade.pop("leverage", None)
     if DB_CURSOR:
-        DB_CURSOR.execute(
-            """
-            INSERT INTO active_trades (symbol, data)
-            VALUES (%s, %s)
-            ON CONFLICT (symbol) DO UPDATE SET data = EXCLUDED.data
-            """,
-            (trade.get("symbol"), Json(trade)),
-        )
-        return
+        try:
+            DB_CURSOR.execute(
+                """
+                INSERT INTO active_trades (symbol, data)
+                VALUES (%s, %s)
+                ON CONFLICT (symbol) DO UPDATE SET data = EXCLUDED.data
+                """,
+                (trade.get("symbol"), Json(trade)),
+            )
+            return
+        except Exception as exc:
+            logger.exception("Failed to store trade in database: %s", exc)
     trades = load_active_trades()
     trades.append(trade)
     save_active_trades(trades)
@@ -153,8 +168,11 @@ def store_trade(trade: dict) -> None:
 def remove_trade(symbol: str) -> None:
     """Remove a trade with a given symbol from the active list."""
     if DB_CURSOR:
-        DB_CURSOR.execute("DELETE FROM active_trades WHERE symbol = %s", (symbol,))
-        return
+        try:
+            DB_CURSOR.execute("DELETE FROM active_trades WHERE symbol = %s", (symbol,))
+            return
+        except Exception as exc:
+            logger.exception("Failed to remove trade from database: %s", exc)
     trades = load_active_trades()
     updated = [t for t in trades if t.get("symbol") != symbol]
     save_active_trades(updated)
@@ -236,11 +254,14 @@ def log_trade_result(
         "narrative": trade.get("narrative", "No explanation"),
     }
     if DB_CURSOR:
-        DB_CURSOR.execute(
-            "INSERT INTO trade_log (data) VALUES (%s)",
-            (Json(row),),
-        )
-        return
+        try:
+            DB_CURSOR.execute(
+                "INSERT INTO trade_log (data) VALUES (%s)",
+                (Json(row),),
+            )
+            return
+        except Exception as exc:
+            logger.exception("Failed to log trade result to database: %s", exc)
     file_exists = os.path.exists(TRADE_LOG_FILE)
     # Ensure directory exists
     os.makedirs(os.path.dirname(TRADE_LOG_FILE), exist_ok=True)
@@ -250,3 +271,24 @@ def log_trade_result(
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+
+
+def load_trade_history_df() -> pd.DataFrame:
+    """Return historical trades as a DataFrame."""
+    df = pd.DataFrame()
+    if DB_CURSOR:
+        try:
+            DB_CURSOR.execute("SELECT data FROM trade_log ORDER BY id")
+            rows = [row[0] for row in DB_CURSOR.fetchall()]
+            df = pd.DataFrame(rows)
+        except Exception as exc:
+            logger.exception("Failed to load trade history from database: %s", exc)
+    else:
+        if os.path.exists(TRADE_LOG_FILE):
+            try:
+                df = pd.read_csv(TRADE_LOG_FILE)
+            except Exception as exc:
+                logger.exception("Failed to read trade log file: %s", exc)
+    if not df.empty and "outcome" in df.columns:
+        df = df[df["outcome"].astype(str).str.lower() != "open"]
+    return df
