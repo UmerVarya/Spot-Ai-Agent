@@ -1,241 +1,120 @@
 import os
-import requests
-from bs4 import BeautifulSoup
-from groq import Groq
 import json
+import asyncio
+from datetime import datetime
+from typing import List, Dict
+
+import aiohttp
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-import re
-import time
-from datetime import datetime, timedelta
+from groq import Groq
+
+from log_utils import setup_logger
+
 load_dotenv()
+logger = setup_logger(__name__)
 
-# Configuration: News API settings (ensure to insert your API key)
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "YOUR_NEWSAPI_KEY_HERE")
-# Define how frequently to fetch fresh news (in seconds)
-NEWS_REFRESH_INTERVAL = 5 * 60  # 5 minutes
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Module-level cache for news results and last fetch time
-_last_news_fetch = 0.0
-_cached_news = []
 
-def fetch_news(symbol: str):
-    """
-    Fetch recent news articles for the given symbol, with caching to avoid frequent API calls.
-    Uses NewsAPI to retrieve the latest news related to the symbol. If called again within a short interval,
-    it will return cached results instead of making a new API request.
-    Args:
-        symbol (str): The keyword or ticker symbol to search news for.
-    Returns:
-        list: A list of news articles (each article is a dict with keys like 'title', 'description', 'url', etc.).
-    """
-    global _last_news_fetch, _cached_news
-    # Check if we recently fetched news and can use cached data
-    current_time = time.time()
-    if _last_news_fetch and (current_time - _last_news_fetch < NEWS_REFRESH_INTERVAL) and _cached_news:
-        return _cached_news
-
-    # Prepare NewsAPI request for latest news about the symbol
-    query = symbol
-    # Limit search to recent news (last day) and English language for relevance
-    from_date = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
-    url = (
-        f"https://newsapi.org/v2/everything?q={query}&from={from_date}"
-        f"&sortBy=publishedAt&language=en&pageSize=5&apiKey={NEWS_API_KEY}"
-    )
-
+async def _fetch_rss(session: aiohttp.ClientSession, url: str, impact: str) -> List[Dict[str, str]]:
+    events: List[Dict[str, str]] = []
     try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
+        async with session.get(url, timeout=10) as resp:
+            text = await resp.text()
     except Exception as e:
-        print(f"Warning: Failed to fetch news for {symbol} - {e}")
-        # If the fetch fails, return the last cached news if available, otherwise empty list
-        return _cached_news if _cached_news else []
-
-    # Parse the response data
-    articles = data.get("articles", [])
-    # Update cache
-    _cached_news = articles
-    _last_news_fetch = current_time
-
-    return articles
-
-# ... (any additional helper functions for news processing remain unchanged or can be added here) ...
-
-# === Fetch Crypto News ===
-def fetch_crypto_news():
-    url = "https://cryptopanic.com/news/rss/"
-    events = []
+        logger.warning("Failed to fetch RSS %s: %s", url, e, exc_info=True)
+        return events
     try:
-        response = requests.get(url, timeout=10)
+        soup = BeautifulSoup(text, features="xml")
+        items = soup.find_all("item")[:10]
+        for item in items:
+            events.append({
+                "event": item.title.text,
+                "datetime": datetime.utcnow().isoformat() + "Z",
+                "impact": impact,
+            })
     except Exception as e:
-        print("⚠️ Crypto news fetch failed:", e)
-        return []
-    content = response.content
-    try:
-        soup = BeautifulSoup(content, features="xml")
-        items = soup.find_all("item")
-        if not items:
-            raise Exception("No items found in XML response")
-    except Exception as e_xml:
-        print("⚠️ Crypto news XML parse error:", e_xml)
-        try:
-            soup = BeautifulSoup(content, "html.parser")
-            items = soup.find_all("item")
-            if not items:
-                raise Exception("No items found with HTML parser")
-        except Exception as e_html:
-            print("⚠️ Crypto news parse failed:", e_html)
-            return []
-    for item in items[:10]:
-        events.append({
-            "event": item.title.text,
-            "datetime": datetime.utcnow().isoformat() + "Z",
-            "impact": "medium"
-        })
+        logger.warning("RSS parse error for %s: %s", url, e, exc_info=True)
     return events
 
-# === Fetch Macro News ===
-def fetch_macro_news():
-    url = "https://www.fxstreet.com/rss/news"
-    events = []
-    try:
-        response = requests.get(url, timeout=10)
-    except Exception as e:
-        print("⚠️ Macro news fetch failed:", e)
-        return []
-    content = response.content
-    try:
-        soup = BeautifulSoup(content, features="xml")
-        items = soup.find_all("item")
-        if not items:
-            raise Exception("No items found in XML response")
-    except Exception as e_xml:
-        print("⚠️ Macro news XML parse error:", e_xml)
-        try:
-            soup = BeautifulSoup(content, "html.parser")
-            items = soup.find_all("item")
-            if not items:
-                raise Exception("No items found with HTML parser")
-        except Exception as e_html:
-            print("⚠️ Macro news parse failed:", e_html)
-            return []
-    for item in items[:10]:
-        events.append({
-            "event": item.title.text,
-            "datetime": datetime.utcnow().isoformat() + "Z",
-            "impact": "high" if ("Fed" in item.title.text or "inflation" in item.title.text) else "medium"
-        })
+
+async def fetch_crypto_news(session: aiohttp.ClientSession) -> List[Dict[str, str]]:
+    return await _fetch_rss(session, "https://cryptopanic.com/news/rss/", "medium")
+
+
+async def fetch_macro_news(session: aiohttp.ClientSession) -> List[Dict[str, str]]:
+    return await _fetch_rss(session, "https://www.fxstreet.com/rss/news", "high")
+
+
+async def _run_news_fetcher(path: str = "news_events.json") -> List[Dict[str, str]]:
+    async with aiohttp.ClientSession() as session:
+        crypto, macro = await asyncio.gather(fetch_crypto_news(session), fetch_macro_news(session))
+    events = crypto + macro
+    if events:
+        save_events(events, path)
     return events
 
-# === Save to JSON ===
-def save_events(events, path="news_events.json"):
+
+def run_news_fetcher(path: str = "news_events.json") -> List[Dict[str, str]]:
+    """Synchronous wrapper for fetching news events."""
+    return asyncio.run(_run_news_fetcher(path))
+
+
+def save_events(events: List[Dict[str, str]], path: str = "news_events.json") -> None:
     with open(path, "w") as f:
         json.dump(events, f, indent=2)
-    print(f"✅ Saved {len(events)} events to {path}")
+    logger.info("Saved %d events to %s", len(events), path)
 
-# === Build LLM Prompt ===
-def build_news_prompt(events):
+
+def build_news_prompt(events: List[Dict[str, str]]) -> str:
     now = datetime.utcnow()
-    filtered_events = []
-    prompt = (
-        "You're a macro risk analyst for crypto markets.\n"
-        "Evaluate the following events for their 6-hour crypto market impact.\n"
-        "Respond ONLY with a JSON array of objects, no extra text or markdown.\n"
-        "Each object should have: \"safe\" (bool), \"sensitivity\" (1-10), \"reason\" (string).\n\n"
-        "Events JSON:\n```json\n"
-    )
-
+    filtered = []
     for event in events:
         try:
             event_time = datetime.fromisoformat(event["datetime"].replace("Z", ""))
             hours_until = (event_time - now).total_seconds() / 3600.0
-            if hours_until >= -48:  # allow recent and future events
-                filtered_events.append(event)
-        except:
+            if hours_until >= -48:
+                filtered.append(event)
+        except Exception:
             continue
+    return json.dumps(filtered, indent=2)
 
-    prompt += json.dumps(filtered_events, indent=2)
-    prompt += "\n```"
-    return prompt.strip()
 
-# === Analyze News ===
-def analyze_news_with_llm(events):
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+def analyze_news_with_llm(events: List[Dict[str, str]]) -> Dict[str, str]:
+    if not GROQ_API_KEY:
+        return {"safe": True, "sensitivity": 0, "reason": "No API key"}
     prompt = build_news_prompt(events)
-
+    client = Groq(api_key=GROQ_API_KEY)
     try:
         chat_completion = client.chat.completions.create(
             model="llama3-70b-8192",
             messages=[
-                {"role": "system", "content": "You are a crypto macro risk analyst. Analyze impact of each event."},
-                {"role": "user", "content": prompt}
-            ]
+                {"role": "system", "content": "You are a crypto macro risk analyst."},
+                {"role": "user", "content": prompt},
+            ],
         )
         raw_reply = chat_completion.choices[0].message.content
-        print("\n🔍 Raw LLM Reply:\n", raw_reply)
-
-        parsed = None
-        # 1. Try direct JSON parse
-        try:
-            parsed = json.loads(raw_reply.strip())
-        except Exception:
-            # 2. Try JSON within fenced code block
-            match = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", raw_reply)
-            if match:
-                try:
-                    parsed = json.loads(match.group(1))
-                except Exception:
-                    parsed = None
-            # 3. Fallback: first '[' to last ']'
-            if parsed is None:
-                start = raw_reply.find('[')
-                end = raw_reply.rfind(']')
-                if start != -1 and end != -1:
-                    try:
-                        parsed = json.loads(raw_reply[start:end+1])
-                    except Exception:
-                        parsed = None
-
-        if parsed is None:
-            return {
-                "safe": True,
-                "sensitivity": 0,
-                "reason": "Failed to parse LLM JSON reply."
-            }
-
-        if not parsed:
-            return {
-                "safe": True,
-                "sensitivity": 0,
-                "reason": "No actionable events detected."
-            }
-
-        high_risk = [e for e in parsed if not e["safe"] and e["sensitivity"] >= 7]
-        return {
-            "safe": len(high_risk) == 0,
-            "sensitivity": max(e["sensitivity"] for e in parsed),
-            "reason": high_risk[0]["reason"] if high_risk else "No major risk detected."
-        }
-
+        return json.loads(raw_reply)
     except Exception as e:
-        print("⚠️ Groq LLM analysis failed:", e)
-        return {
-            "safe": True,
-            "sensitivity": 0,
-            "reason": "Error during Groq analysis"
-        }
+        logger.error("Groq LLM analysis failed: %s", e, exc_info=True)
+        return {"safe": True, "sensitivity": 0, "reason": "LLM error"}
 
-# === Main Runner ===
-def run_news_fetcher():
-    print("🌐 Fetching Crypto and Macro News...")
-    crypto_articles = fetch_crypto_news()
-    macro_articles = fetch_macro_news()
-    all_events = crypto_articles + macro_articles
-    save_events(all_events)
 
-    result = analyze_news_with_llm(all_events)
-    print("\n🧠 Groq News Analysis:", result)
-
-if __name__ == "__main__":
-    run_news_fetcher()
+async def fetch_news(symbol: str) -> List[Dict[str, str]]:
+    """Fetch recent news using NewsAPI asynchronously."""
+    if not NEWS_API_KEY:
+        logger.warning("NEWS_API_KEY not set; returning empty news list")
+        return []
+    url = (
+        f"https://newsapi.org/v2/everything?q={symbol}&sortBy=publishedAt&language=en&pageSize=5&apiKey={NEWS_API_KEY}"
+    )
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=5) as resp:
+                data = await resp.json()
+                return data.get("articles", [])
+    except Exception as e:
+        logger.warning("Failed to fetch news for %s: %s", symbol, e, exc_info=True)
+        return []

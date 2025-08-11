@@ -19,6 +19,9 @@ diagnostic information and returns 50.0 as a neutral default.
 """
 
 import requests
+from log_utils import setup_logger
+
+logger = setup_logger(__name__)
 
 
 def get_btc_dominance() -> float:
@@ -54,9 +57,9 @@ def get_btc_dominance() -> float:
         if dominance is not None:
             return round(dominance, 2)
         else:
-            print("⚠️ BTC dominance data missing in API response; using default 50.0")
+            logger.warning("BTC dominance data missing in API response; using default 50.0")
             return 50.0
     except Exception as e:
-        print(f"⚠️ Failed to fetch BTC dominance: {e}")
+        logger.warning("Failed to fetch BTC dominance: %s", e, exc_info=True)
         # Use neutral fallback
         return 50.0

@@ -13,9 +13,9 @@ computed ``allowed_new`` value was being treated as a correlation threshold,
 resulting in at most two signals being selected regardless of available slots.
 """
 
-import logging
-logging.basicConfig(level=logging.INFO)
-logging.info("agent.py starting...")
+from log_utils import setup_logger
+
+logger = setup_logger(__name__)
 
 import time
 import os
@@ -59,7 +59,7 @@ NEWS_INTERVAL = 3600
 def auto_run_news() -> None:
     """Background thread that periodically fetches news."""
     while True:
-        print("🗞️ Running scheduled news fetcher...")
+        logger.info("Running scheduled news fetcher...")
         run_news_fetcher()
         time.sleep(NEWS_INTERVAL)
 
@@ -84,7 +84,7 @@ def run_streamlit() -> None:
 
 def run_agent_loop() -> None:
     """Main loop that scans the market, evaluates signals and opens trades."""
-    print("\n🤖 Spot AI Super Agent running in paper trading mode...\n")
+    logger.info("Spot AI Super Agent running in paper trading mode...")
     # start news and dashboard threads
     threading.Thread(target=auto_run_news, daemon=True).start()
     threading.Thread(target=run_streamlit, daemon=True).start()
@@ -92,18 +92,18 @@ def run_agent_loop() -> None:
     if not os.path.exists("symbol_scores.json"):
         with open("symbol_scores.json", "w") as f:
             json.dump({}, f)
-        print("ℹ️ Initialized empty symbol_scores.json")
+        logger.info("Initialized empty symbol_scores.json")
     while True:
         try:
-            print(f"=== Scan @ {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+            logger.info("=== Scan @ %s ===", time.strftime('%Y-%m-%d %H:%M:%S'))
             # Check drawdown guard
             if is_trading_blocked():
-                print("⛔ Drawdown limit reached. Skipping trading for today.\n")
+                logger.warning("Drawdown limit reached. Skipping trading for today.")
                 time.sleep(SCAN_INTERVAL)
                 continue
             perf = compute_performance_metrics()
             if perf.get("max_drawdown", 0) < -0.25:
-                print("⚠️ Max drawdown exceeded 25%. Halting trading.")
+                logger.warning("Max drawdown exceeded 25%. Halting trading.")
                 time.sleep(SCAN_INTERVAL)
                 continue
             # Macro signals
@@ -125,8 +125,12 @@ def run_agent_loop() -> None:
                 fg = int(fg)
             except Exception:
                 fg = 0
-            print(
-                f"🌐 BTC Dominance: {btc_d:.2f}% | Fear & Greed: {fg} | Sentiment: {sentiment_bias} (Confidence: {sentiment_confidence})"
+            logger.info(
+                "BTC Dominance: %.2f%% | Fear & Greed: %s | Sentiment: %s (Confidence: %s)",
+                btc_d,
+                fg,
+                sentiment_bias,
+                sentiment_confidence,
             )
             # Improved macro gating: analyse macro conditions and decide whether to skip
             def _macro_filter(btc_dom: float, fear_greed: int, bias: str, conf: float):
@@ -187,7 +191,7 @@ def run_agent_loop() -> None:
             skip_all, skip_alt, macro_reasons = _macro_filter(btc_d, fg, sentiment_bias, sentiment_confidence)
             if skip_all:
                 reason_text = " + ".join(macro_reasons) if macro_reasons else "unfavorable conditions"
-                print(f"🚫 Market unfavorable ({reason_text}). Skipping scan.\n")
+                logger.warning("Market unfavorable (%s). Skipping scan.", reason_text)
                 time.sleep(SCAN_INTERVAL)
                 continue
             # If we are only skipping altcoins, filter top_symbols down to BTCUSDT
@@ -201,8 +205,9 @@ def run_agent_loop() -> None:
             active_trades = []
             for t in active_trades_raw:
                 if t.get("direction") == "short":
-                    print(
-                        f"⚠️ Removing non-long trade {t.get('symbol')} from active trades (spot-only mode)."
+                    logger.warning(
+                        "Removing non-long trade %s from active trades (spot-only mode).",
+                        t.get("symbol"),
                     )
                     continue
                 active_trades.append(t)
@@ -210,8 +215,8 @@ def run_agent_loop() -> None:
             # Get top symbols to scan
             top_symbols = get_top_symbols(limit=30)
             if not top_symbols:
-                print(
-                    "⚠️ No symbols fetched from Binance. Check your python-binance installation and network connectivity."
+                logger.warning(
+                    "No symbols fetched from Binance. Check your python-binance installation and network connectivity."
                 )
             # Apply macro filtering to symbols: if macro filter indicated to skip altcoins,
             # restrict the universe to BTCUSDT only.  We do this after fetching the symbols
@@ -220,28 +225,33 @@ def run_agent_loop() -> None:
                 # keep BTCUSDT and potentially stablecoins if you wish; here we only keep BTCUSDT
                 top_symbols = [sym for sym in top_symbols if sym.upper() == "BTCUSDT"]
                 if macro_reason_text:
-                    print(f"⚠️ Macro gating ({macro_reason_text}). Scanning only BTCUSDT.")
+                    logger.warning("Macro gating (%s). Scanning only BTCUSDT.", macro_reason_text)
             session = get_market_session()
             potential_trades: list[dict] = []
             symbol_scores: dict[str, dict[str, float | None]] = {}
             # Evaluate each symbol
             for symbol in top_symbols:
                 if any(t.get("symbol") == symbol for t in active_trades):
-                    print(f"⚠️ Skipping {symbol}: already in an active trade.")
+                    logger.warning("Skipping %s: already in an active trade.", symbol)
                     continue
                 try:
                     price_data = get_price_data(symbol)
                     if price_data is None or price_data.empty or len(price_data) < 40:
-                        print(f"⚠️ Skipping {symbol} due to insufficient data.\n")
+                        logger.warning("Skipping %s due to insufficient data.", symbol)
                         continue
                     score, direction, position_size, pattern_name = evaluate_signal(price_data, symbol)
-                    print(
-                        f"[🔍] {symbol}: Score={score:.2f}, Direction={direction}, Pattern={pattern_name}, PosSize={position_size}"
+                    logger.info(
+                        "%s: Score=%.2f, Direction=%s, Pattern=%s, PosSize=%s",
+                        symbol,
+                        score,
+                        direction,
+                        pattern_name,
+                        position_size,
                     )
                     symbol_scores[symbol] = {"score": score, "direction": direction}
                     # Force long direction if high score but no direction
                     if direction is None and score >= 4.5:
-                        print(f"⚠️ No clear direction for {symbol} despite score={score:.2f}. Forcing 'long' direction.")
+                        logger.warning("No clear direction for %s despite score=%.2f. Forcing 'long' direction.", symbol, score)
                         direction = "long"
                     # Skip non-long or invalid position sizes
                     if direction != "long" or position_size <= 0:
@@ -254,13 +264,14 @@ def run_agent_loop() -> None:
                         if position_size <= 0:
                             skip_reasons.append("zero position (low confidence)")
                         reason_text = " and ".join(skip_reasons) if skip_reasons else "not eligible"
-                        print(f"[🚫] Skipping {symbol}: direction={direction}, size={position_size} – {reason_text}, Score={score:.2f}")
+                        logger.info("[SKIP] %s: direction=%s, size=%s – %s, Score=%.2f", symbol, direction, position_size, reason_text, score)
                         continue
                     # Order flow caution
                     flow_status = detect_aggression(price_data)
                     if flow_status == "sellers in control":
-                        print(
-                            f"⚠️ Bearish order flow detected in {symbol}. Proceeding with caution (penalized score handled in evaluate_signal)."
+                        logger.warning(
+                            "Bearish order flow detected in %s. Proceeding with caution (penalized score handled in evaluate_signal).",
+                            symbol,
                         )
                     potential_trades.append({
                         "symbol": symbol,
@@ -270,11 +281,14 @@ def run_agent_loop() -> None:
                         "pattern": pattern_name,
                         "price_data": price_data,
                     })
-                    print(
-                        f"[✅] Potential Trade: {symbol} | Score={score:.2f} | Direction=long | Size={position_size}"
+                    logger.info(
+                        "[Potential Trade] %s | Score=%.2f | Direction=long | Size=%s",
+                        symbol,
+                        score,
+                        position_size,
                     )
                 except Exception as e:
-                    print(f"❌ Error evaluating {symbol}: {e}")
+                    logger.error("Error evaluating %s: %s", symbol, e, exc_info=True)
                     continue
             # Sort by score and select diversified signals
             potential_trades.sort(key=lambda x: x['score'], reverse=True)
@@ -318,7 +332,7 @@ def run_agent_loop() -> None:
                         macro_news={"safe": True, "reason": ""},
                     )
                 except Exception as e:
-                    print(f"❌ Error in should_trade for {symbol}: {e}")
+                    logger.error("Error in should_trade for %s: %s", symbol, e, exc_info=True)
                     decision_obj = {
                         "decision": False,
                         "confidence": 0.0,
@@ -328,8 +342,12 @@ def run_agent_loop() -> None:
                 final_conf = float(decision_obj.get("confidence", score))
                 narrative = decision_obj.get("narrative", "")
                 reason = decision_obj.get("reason", "")
-                print(
-                    f"[🧠] Brain Decision for {symbol} -> {decision} | Confidence: {final_conf:.2f} | Reason: {reason}"
+                logger.info(
+                    "[Brain] %s -> %s | Confidence: %.2f | Reason: %s",
+                    symbol,
+                    decision,
+                    final_conf,
+                    reason,
                 )
                 if not decision:
                     log_rejection(symbol, reason or "Unknown reason")
@@ -345,7 +363,11 @@ def run_agent_loop() -> None:
                     pattern=pattern_name,
                 )
                 if ml_prob < 0.5:
-                    print(f"🚫 ML model predicted low success probability ({ml_prob:.2f}) for {symbol}. Skipping trade.")
+                    logger.info(
+                        "ML model predicted low success probability (%.2f) for %s. Skipping trade.",
+                        ml_prob,
+                        symbol,
+                    )
                     log_rejection(symbol, f"ML prob {ml_prob:.2f} too low")
                     continue
                 # Blend ML probability into final confidence
@@ -397,9 +419,15 @@ def run_agent_loop() -> None:
                         "status": {"tp1": False, "tp2": False, "tp3": False, "sl": False},
                         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     }
-                    print(f"📝 Narrative:\n{narrative}\n")
-                    print(
-                        f"Trade Opened ✅ {symbol} @ {entry_price} | Size={position_size} | TP1 {tp1} / TP2 {tp2} / TP3 {tp3}"
+                    logger.info("Narrative:\n%s\n", narrative)
+                    logger.info(
+                        "Trade Opened %s @ %s | Size=%s | TP1 %s / TP2 %s / TP3 %s",
+                        symbol,
+                        entry_price,
+                        position_size,
+                        tp1,
+                        tp2,
+                        tp3,
                     )
                     # Add to active trades and persist
                     active_trades.append(new_trade)
@@ -419,13 +447,13 @@ def run_agent_loop() -> None:
             old_data.update(symbol_scores)
             with open("symbol_scores.json", "w") as f:
                 json.dump(old_data, f, indent=4)
-            print("💾 Saved symbol scores (persistent memory updated).")
+            logger.info("Saved symbol scores (persistent memory updated).")
             time.sleep(SCAN_INTERVAL)
         except Exception as e:
-            print(f"❌ Main Loop Error: {e}")
+            logger.error("Main Loop Error: %s", e, exc_info=True)
             time.sleep(10)
 
 
 if __name__ == "__main__":
-    logging.info("🎬 Starting Spot AI Super Agent loop...")
+    logger.info("Starting Spot AI Super Agent loop...")
     run_agent_loop()

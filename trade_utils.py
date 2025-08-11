@@ -5,6 +5,8 @@ import json
 from datetime import datetime
 from typing import Optional
 import traceback
+import asyncio
+from log_utils import setup_logger
 
 from trade_storage import TRADE_LOG_FILE  # shared trade log path
 
@@ -22,6 +24,8 @@ _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Path to the signal log file (formerly trades_log.csv)
 SIGNAL_LOG_FILE = os.getenv("SIGNAL_LOG_FILE",
                             os.path.join(_MODULE_DIR, "signal_log.csv"))
+
+logger = setup_logger(__name__)
 
 # Optional TA-Lib imports (with pandas fallbacks if unavailable)
 try:
@@ -291,9 +295,10 @@ SYMBOL_SCORES_FILE = os.path.join(os.path.dirname(__file__), "symbol_scores.json
 try:
     client = Client()
 except Exception as e:
-    print(
-        f"⚠️ Failed to initialize Binance client: {e}.\n"
-        "   Install the 'python-binance' package and ensure network/credentials are configured."
+    logger.warning(
+        "Failed to initialize Binance client: %s. Install the 'python-binance' package and ensure network/credentials are configured.",
+        e,
+        exc_info=True,
     )
     client = None
 
@@ -317,7 +322,7 @@ def get_market_session() -> str:
 def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
     """Fetch recent OHLCV data for a symbol from Binance."""
     if client is None:
-        print(f"⚠️ Binance client unavailable; cannot fetch data for {symbol}.")
+        logger.warning("Binance client unavailable; cannot fetch data for %s.", symbol)
         return None
     try:
         mapped_symbol = map_symbol_for_binance(symbol)
@@ -335,8 +340,14 @@ def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
         df["quote_volume"] = df["quote_asset_volume"]
         return df[["open", "high", "low", "close", "volume", "quote_volume"]]
     except Exception as e:
-        print(f"⚠️ Failed to fetch data for {symbol}: {e}")
+        logger.warning("Failed to fetch data for %s: %s", symbol, e, exc_info=True)
         return None
+
+
+async def get_price_data_async(symbol: str) -> Optional[pd.DataFrame]:
+    """Asynchronous wrapper around ``get_price_data`` using ``asyncio``."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, get_price_data, symbol)
 
 def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
     """Fetch order book depth from Binance."""
@@ -358,7 +369,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     required = {"open", "high", "low", "close", "volume"}
     if not required.issubset(df.columns):
         missing = required - set(df.columns)
-        print(f"[INDICATOR] Missing columns: {', '.join(sorted(missing))}")
+        logger.debug("[INDICATOR] Missing columns: %s", ', '.join(sorted(missing)))
         return df
     df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna(subset=['high', 'low', 'close'])
@@ -388,13 +399,13 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         atr = AverageTrueRange(df['high'], df['low'], df['close'], window=14)
         df['atr'] = atr.average_true_range()
     except Exception as e:
-        print(f"[INDICATOR] Warning: failed to compute some indicators: {e}")
+        logger.warning("[INDICATOR] failed to compute some indicators: %s", e, exc_info=True)
     return df
 
 def get_top_symbols(limit: int = 30) -> list:
     """Return the top quote-volume symbols trading against USDT."""
     if client is None:
-        print("⚠️ Binance client unavailable; get_top_symbols returning empty list.")
+        logger.warning("Binance client unavailable; get_top_symbols returning empty list.")
         return []
     tickers = client.get_ticker()
     sorted_tickers = sorted(tickers, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
@@ -491,13 +502,13 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
     """Evaluate a trading signal given a price DataFrame."""
     try:
         if price_data is None or price_data.empty or len(price_data) < 40:
-            print(f"[DEBUG] Skipping {symbol}: insufficient price data.")
+            logger.debug("[DEBUG] Skipping %s: insufficient price data.", symbol)
             return 0, None, 0, None
 
         required = {"open", "high", "low", "close", "volume"}
         if not required.issubset(price_data.columns):
             missing = required - set(price_data.columns)
-            print(f"[DEBUG] Skipping {symbol}: missing columns {', '.join(sorted(missing))}.")
+            logger.debug("[DEBUG] Skipping %s: missing columns %s.", symbol, ', '.join(sorted(missing)))
             return 0, None, 0, None
 
         price_data = price_data.replace([np.inf, -np.inf], np.nan)
@@ -556,10 +567,11 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         # TRAINING_MODE support: skip volume filter when in training mode
         training_mode = os.getenv("TRAINING_MODE", "false").lower() == "true"
         if not training_mode and latest_quote_vol < vol_threshold:
-            print(
-                f"⛔ Skipping due to low volume: "
-                f"{latest_quote_vol:,.0f} < {vol_threshold:,.0f} "
-                f"({vol_factor*100:.0f}% of 20-bar avg)"
+            logger.info(
+                "Skipping due to low volume: %s < %s (%s%% of 20-bar avg)",
+                f"{latest_quote_vol:,.0f}",
+                f"{vol_threshold:,.0f}",
+                f"{vol_factor*100:.0f}",
             )
             return 0, None, 0, None
 
@@ -643,10 +655,10 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         if all(v > 0 for v in confluence.values() if v == v):
             score += w["confluence"]
         if spread == spread and price_now > 0 and spread / price_now > 0.001:
-            print(f"⚠️ Skipping {symbol}: spread {spread:.6f} is >0.1% of price.")
+            logger.warning("Skipping %s: spread %.6f is >0.1%% of price.", symbol, spread)
             return 0, None, 0, None
         if imbalance == imbalance and abs(imbalance) > 0.7:
-            print(f"⚠️ Skipping {symbol}: order book imbalance {imbalance:.2f} exceeds threshold.")
+            logger.warning("Skipping %s: order book imbalance %.2f exceeds threshold.", symbol, imbalance)
             return 0, None, 0, None
         aggression = detect_aggression(price_data)
         if aggression == "buyers in control":
@@ -669,10 +681,10 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             near_resistance = is_price_near_zone(current_price, zones, 'resistance', 0.005)
             near_support = is_price_near_zone(current_price, zones, 'support', 0.015 if sentiment_bias == "bullish" else 0.01)
             if near_resistance and normalized_score < 6.5:
-                print(f"⚠️ Skipping {symbol}: near resistance zone with score {normalized_score:.2f} < 6.5")
+                logger.warning("Skipping %s: near resistance zone with score %.2f < 6.5", symbol, normalized_score)
                 return 0, None, 0, None
             if not near_support and normalized_score < 5.5:
-                print(f"⚠️ Skipping {symbol}: away from support with score {normalized_score:.2f} < 5.5")
+                logger.warning("Skipping %s: away from support with score %.2f < 5.5", symbol, normalized_score)
                 return 0, None, 0, None
         pattern_name = triggered_patterns[0] if triggered_patterns else (chart_pattern if chart_pattern else "None")
         try:
@@ -690,9 +702,9 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             with open(SYMBOL_SCORES_FILE, "w") as f:
                 json.dump(scores, f, indent=2)
         except Exception as e:
-            print(f"[SYMBOL SCORES] Failed to update symbol_scores.json: {e}")
+            logger.warning("[SYMBOL SCORES] Failed to update symbol_scores.json: %s", e, exc_info=True)
         return normalized_score, direction, position_size, pattern_name
     except Exception as e:
-        print(f"⚠️ Signal evaluation error in {symbol}: {e}")
+        logger.error("Signal evaluation error in %s: %s", symbol, e, exc_info=True)
         traceback.print_exc()
         return 0, None, 0, None

@@ -3,6 +3,7 @@ from news_scraper import get_combined_headlines
 from groq import Groq
 from dotenv import load_dotenv
 import os
+from log_utils import setup_logger
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -11,6 +12,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # === Load Groq API Key from Environment ===
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
+
+logger = setup_logger(__name__)
 
 def analyze_macro_sentiment():
     headlines = get_combined_headlines()
@@ -45,7 +48,7 @@ Confidence: <0-10 score>
         )
 
         result = response.choices[0].message.content.strip()
-        print("🧠 Raw LLM Response:\n", result)  # Optional debug
+        logger.debug("Raw LLM Response: %s", result)
 
         summary = "No summary extracted"
         bias = "neutral"
@@ -72,7 +75,7 @@ Confidence: <0-10 score>
         }
 
     except Exception as e:
-        print(f"❌ News sentiment LLM error: {e}")
+        logger.error("News sentiment LLM error: %s", e, exc_info=True)
         return {
             "summary": "Error during LLM analysis.",
             "bias": "neutral",
@@ -82,6 +85,6 @@ Confidence: <0-10 score>
 # === Optional test ===
 if __name__ == "__main__":
     result = analyze_macro_sentiment()
-    print("\n🧠 LLM Market Sentiment Analysis")
-    print(f"Summary: {result['summary']}")
-    print(f"Bias: {result['bias'].upper()} | Confidence: {result['confidence']}")
+    logger.info("LLM Market Sentiment Analysis")
+    logger.info("Summary: %s", result['summary'])
+    logger.info("Bias: %s | Confidence: %s", result['bias'].upper(), result['confidence'])

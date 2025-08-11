@@ -43,11 +43,13 @@ from typing import List, Tuple, Dict, Any, Optional
 
 import numpy as np
 import pandas as pd
+from log_utils import setup_logger
 
 try:
     # Core sklearn components used for modelling and preprocessing
     from sklearn.linear_model import LogisticRegression
     from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+    from sklearn.neural_network import MLPClassifier
     from sklearn.preprocessing import StandardScaler
     from sklearn.model_selection import GridSearchCV, StratifiedKFold
     from sklearn.metrics import make_scorer, accuracy_score
@@ -63,6 +65,8 @@ except Exception:
     joblib = None  # type: ignore
     accuracy_score = None  # type: ignore
     SKLEARN_AVAILABLE = False
+
+logger = setup_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -100,6 +104,10 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
             pattern = row.get("pattern", "none")
             pattern_len = len(str(pattern))
             session_id = session_map.get(str(session), 3)
+            volatility = float(row.get("volatility", 0.0)) / 100.0
+            htf_trend = float(row.get("htf_trend", 0.0)) / 100.0
+            order_imbalance = float(row.get("order_imbalance", 0.0)) / 100.0
+            macro_indicator = float(row.get("macro_indicator", 0.0)) / 100.0
             features = [
                 score,
                 conf,
@@ -108,6 +116,10 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
                 fg / 100.0,
                 sent_conf_val / 10.0,
                 pattern_len / 10.0,
+                volatility,
+                htf_trend,
+                order_imbalance,
+                macro_indicator,
             ]
             feature_list.append(features)
             outcome = str(row.get("outcome", "loss")).lower()
@@ -146,19 +158,19 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
     """
     # Ensure there is sufficient data
     if not os.path.exists(LOG_FILE):
-        print("⚠️ No trade learning log found. Cannot train ML model.")
+        logger.warning("No trade learning log found. Cannot train ML model.")
         return
     try:
         df = pd.read_csv(LOG_FILE, engine="python", on_bad_lines="skip")
     except Exception as e:
-        print(f"⚠️ Failed to read learning log: {e}")
+        logger.warning("Failed to read learning log: %s", e, exc_info=True)
         return
     if len(df) < 20:
-        print("⚠️ Not enough data to train ML model. Need at least 20 trades.")
+        logger.warning("Not enough data to train ML model. Need at least 20 trades.")
         return
     X, y = _extract_features(df)
     if X.size == 0:
-        print("⚠️ No valid training samples extracted.")
+        logger.warning("No valid training samples extracted.")
         return
     # Remove existing model artefacts before training a new one
     for artefact in (MODEL_PKL, MODEL_JSON):
@@ -178,6 +190,7 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
             'logistic': LogisticRegression(max_iter=1000, class_weight='balanced', solver='lbfgs'),
             'random_forest': RandomForestClassifier(class_weight='balanced'),
             'gradient_boosting': GradientBoostingClassifier(),
+            'mlp': MLPClassifier(max_iter=500),
         }
         param_grid: Dict[str, Dict[str, List[Any]]] = {
             'logistic': {
@@ -193,6 +206,10 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
                 'n_estimators': [50, 100, 200],
                 'learning_rate': [0.01, 0.1, 0.2],
                 'max_depth': [3, 5],
+            },
+            'mlp': {
+                'hidden_layer_sizes': [(50,), (100,), (50, 50)],
+                'alpha': [0.0001, 0.001],
             },
         }
         # Use stratified K‑fold to preserve class distribution
@@ -219,13 +236,13 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
                 gs.fit(X_norm, y)
                 candidate_model = gs.best_estimator_
                 score = float(gs.best_score_)
-            print(f"✅ {model_name} trained. CV accuracy: {score:.2%}")
+            logger.info("%s trained. CV accuracy: %.2f%%", model_name, score * 100)
             if score > best_score:
                 best_score = score
                 best_model = candidate_model
                 best_type = model_name
         if best_model is None:
-            print("⚠️ Failed to select a best model. Falling back to logistic regression.")
+            logger.warning("Failed to select a best model. Falling back to logistic regression.")
             best_model = models['logistic'].fit(X_norm, y)
             best_type = 'logistic'
         # Persist the chosen model and scaling parameters
@@ -242,9 +259,9 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
             }
             with open(MODEL_JSON, 'w') as f:
                 json.dump(model_metadata, f, indent=2)
-            print(f"✅ Best model ({best_type}) saved to {MODEL_PKL} with metadata {MODEL_JSON}")
+            logger.info("Best model (%s) saved to %s with metadata %s", best_type, MODEL_PKL, MODEL_JSON)
         except Exception as e:
-            print(f"⚠️ Failed to save model: {e}")
+            logger.warning("Failed to save model: %s", e, exc_info=True)
     else:
         # ------------------------------------------------------------------
         # Fallback: manual logistic regression without sklearn
@@ -259,7 +276,7 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
             h = _sigmoid(z)
             gradient = (X_aug.T @ (h - y)) / len(y)
             weights -= learning_rate * gradient
-        print("✅ Manual logistic regression trained.")
+        logger.info("Manual logistic regression trained.")
         model_data = {
             'model_type': 'manual',
             'weights': weights.tolist(),
@@ -273,9 +290,9 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
         try:
             with open(MODEL_JSON, 'w') as f:
                 json.dump(model_data, f, indent=2)
-            print(f"✅ Manual model saved to {MODEL_JSON}")
+            logger.info("Manual model saved to %s", MODEL_JSON)
         except Exception as e:
-            print(f"⚠️ Failed to save manual model: {e}")
+            logger.warning("Failed to save manual model: %s", e, exc_info=True)
 
 
 def _load_model_metadata() -> Dict[str, Any]:

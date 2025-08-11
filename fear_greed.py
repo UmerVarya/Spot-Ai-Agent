@@ -1,4 +1,7 @@
 import requests
+from log_utils import setup_logger
+
+logger = setup_logger(__name__)
 
 def get_fear_greed_index():
     try:
@@ -8,5 +11,5 @@ def get_fear_greed_index():
         index_value = int(data['data'][0]['value'])
         return index_value
     except Exception as e:
-        print(f"⚠️ Failed to fetch Fear & Greed Index: {e}")
+        logger.warning("Failed to fetch Fear & Greed Index: %s", e, exc_info=True)
         return 50

@@ -17,6 +17,10 @@ from __future__ import annotations
 import re
 import json
 from typing import Any, Dict, Tuple
+from log_utils import setup_logger
+import logging
+
+logger = setup_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Optional imports for external modules.
@@ -204,7 +208,7 @@ def should_trade(
         # Set default direction based on score and sentiment
         if direction is None and score >= score_threshold and sentiment_bias != "bearish":
             direction = "long"
-            print(f"🧠 Fallback direction applied: long (Sentiment: {sentiment_bias})")
+            logger.info("Fallback direction applied: long (Sentiment: %s)", sentiment_bias)
 
         confidence: float = float(score)
 
