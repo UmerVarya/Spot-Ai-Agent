@@ -2,7 +2,8 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 
-LOG_FILE = os.path.join(os.path.dirname(__file__), 'spot_ai.log')
+DATA_DIR = os.environ.get('DATA_DIR', os.path.dirname(__file__))
+LOG_FILE = os.path.join(DATA_DIR, 'spot_ai.log')
 
 
 def setup_logger(name: str) -> logging.Logger:

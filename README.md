@@ -13,7 +13,8 @@ pip install -r requirements.txt
 Set the following environment variables as needed:
 
 - `BINANCE_API_KEY` / `BINANCE_API_SECRET`
-- `DATA_DIR` – directory for persistent trade logs
+- `DATA_DIR` – directory for persistent trade logs and `spot_ai.log`
+- `DATABASE_URL` – optional PostgreSQL connection string for trade storage
 - `RUN_DASHBOARD` – set to `1` to launch the Streamlit dashboard from the agent
 
 ## Running
@@ -37,6 +38,7 @@ python backtest.py
 ```
 
 Upload a CSV of trade logs on the dashboard's *Backtest* tab to visualise equity curves and return distributions.
+The agent logs activity and uncaught exceptions to `spot_ai.log` in `DATA_DIR` for later analysis.
 
 ## Architecture
 

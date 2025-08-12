@@ -13,7 +13,7 @@ services:
           name: spot-ai-db
           property: connectionString
       - key: DATA_DIR
-        value: /var/data
+        value: /var/data  # persistent logs and trades
     disks:
       - name: trade-data
         mountPath: /var/data
@@ -26,7 +26,7 @@ services:
     startCommand: streamlit run dashboard.py --server.port $PORT --server.headless true
     envVars:
       - key: DATA_DIR
-        value: /var/data
+        value: /var/data  # persistent logs and trades
     disks:
       - name: trade-data
         mountPath: /var/data
