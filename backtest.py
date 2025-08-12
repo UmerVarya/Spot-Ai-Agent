@@ -27,7 +27,7 @@ Usage::
     results = bt.run(params)
     # For parameter optimisation
     best = grid_search(bt, param_grid)
-    print(best)
+    logger.info(best)
 """
 
 from __future__ import annotations
@@ -37,6 +37,9 @@ import pandas as pd
 from typing import Callable, Dict, Iterable, List, Tuple, Any
 
 from risk_metrics import sharpe_ratio, max_drawdown
+from log_utils import setup_logger
+
+logger = setup_logger(__name__)
 
 
 class Backtester:
