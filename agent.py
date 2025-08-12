@@ -19,6 +19,8 @@ logger = setup_logger(__name__)
 
 import time
 import os
+import sys
+import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
@@ -28,7 +30,7 @@ from fetch_news import fetch_news, run_news_fetcher  # noqa: F401
 from trade_utils import simulate_slippage, estimate_commission  # noqa: F401
 from trade_utils import (
     get_top_symbols,
-    get_price_data,
+    get_price_data_async,
     evaluate_signal,
     get_market_session,
     calculate_indicators,
@@ -48,12 +50,74 @@ from ml_model import predict_success_probability
 from drawdown_guard import is_trading_blocked
 import numpy as np
 
+
+def handle_exception(exc_type, exc_value, exc_traceback):
+    """Log uncaught exceptions with stack traces."""
+    if issubclass(exc_type, KeyboardInterrupt):
+        return
+    logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+
+
+sys.excepthook = handle_exception
+
 # Maximum concurrent open trades
 MAX_ACTIVE_TRADES = 2
 # Interval between scans (in seconds)
 SCAN_INTERVAL = 15
 # Interval between news fetches (in seconds)
 NEWS_INTERVAL = 3600
+RUN_DASHBOARD = os.getenv("RUN_DASHBOARD", "0") == "1"
+
+
+def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: float):
+    """Return macro gating decision.
+
+    Parameters
+    ----------
+    btc_dom : float
+        Bitcoin dominance percentage.
+    fear_greed : int
+        Fear & Greed index value.
+    bias : str
+        Macro sentiment bias.
+    conf : float
+        Confidence in the sentiment assessment.
+
+    Returns
+    -------
+    tuple
+        ``(skip_all, skip_alt, reasons)`` where ``reasons`` is a list of
+        explanatory strings.
+    """
+    skip_all = False
+    skip_alt = False
+    reasons: list[str] = []
+
+    if fear_greed < 10:
+        skip_all = True
+        reasons.append("extreme fear (FG < 10)")
+    elif bias == "bearish" and conf >= 8.0 and fear_greed < 15:
+        skip_all = True
+        reasons.append("very bearish sentiment with deep fear")
+
+    alt_risk_score = 0
+    if btc_dom > 60.0:
+        alt_risk_score += 1
+    if fear_greed < 20:
+        alt_risk_score += 1
+    if bias == "bearish" and conf >= 6.0:
+        alt_risk_score += 1
+
+    if not skip_all and alt_risk_score >= 2:
+        skip_alt = True
+        if btc_dom > 60.0:
+            reasons.append("very high BTC dominance")
+        if fear_greed < 20:
+            reasons.append("low Fear & Greed")
+        if bias == "bearish" and conf >= 6.0:
+            reasons.append("bearish sentiment")
+
+    return skip_all, skip_alt, reasons
 
 
 def auto_run_news() -> None:
@@ -87,7 +151,8 @@ def run_agent_loop() -> None:
     logger.info("Spot AI Super Agent running in paper trading mode...")
     # start news and dashboard threads
     threading.Thread(target=auto_run_news, daemon=True).start()
-    threading.Thread(target=run_streamlit, daemon=True).start()
+    if RUN_DASHBOARD:
+        threading.Thread(target=run_streamlit, daemon=True).start()
     # Ensure symbol_scores.json exists
     if not os.path.exists("symbol_scores.json"):
         with open("symbol_scores.json", "w") as f:
@@ -132,63 +197,9 @@ def run_agent_loop() -> None:
                 sentiment_bias,
                 sentiment_confidence,
             )
-            # Improved macro gating: analyse macro conditions and decide whether to skip
-            def _macro_filter(btc_dom: float, fear_greed: int, bias: str, conf: float):
-                """
-                Determine whether to skip scanning based on macro conditions.
-
-                This macro filter is designed to be more nuanced than a
-                simple hard cutoff.  As a quantitative scalper, we want to
-                avoid trading in extremely unfavorable environments but
-                continue scanning when there are still pockets of opportunity.
-
-                Returns a tuple `(skip_all, skip_alt, reasons)`:
-                * `skip_all` – if True, skip all symbols entirely (market closed).
-                * `skip_alt` – if True, skip alt‑coins but still allow BTCUSDT (and possibly stable pairs).
-                * `reasons` – list of human‑readable reasons explaining the gating decision.
-                """
-                skip_all = False
-                skip_alt = False
-                reasons: list[str] = []
-
-                # 1. Extreme fear or very bearish conditions: shut down all trading
-                #    We consider extreme fear when the Fear & Greed index is below 10.
-                #    Additionally, if sentiment is strongly bearish with very high
-                #    confidence and fear is deeply negative (<15), we also halt trading.
-                if fear_greed < 10:
-                    skip_all = True
-                    reasons.append("extreme fear (FG < 10)")
-                elif bias == "bearish" and conf >= 8.0 and fear_greed < 15:
-                    skip_all = True
-                    reasons.append("very bearish sentiment with deep fear")
-
-                # 2. Construct an alt‑coins risk score.  We want to avoid alt‑coins
-                #    when multiple risk factors align.  Each risk factor contributes
-                #    one point, and we skip alt‑coins only if at least two points
-                #    are present.  This allows occasional trading in risky
-                #    environments when not all conditions are stacked against us.
-                alt_risk_score = 0
-                if btc_dom > 60.0:
-                    alt_risk_score += 1
-                if fear_greed < 20:
-                    alt_risk_score += 1
-                if bias == "bearish" and conf >= 6.0:
-                    alt_risk_score += 1
-
-                # Determine whether to skip alt‑coins based on the accumulated risk score
-                if not skip_all and alt_risk_score >= 2:
-                    skip_alt = True
-                    # Add specific reasons for each contributing factor
-                    if btc_dom > 60.0:
-                        reasons.append("very high BTC dominance")
-                    if fear_greed < 20:
-                        reasons.append("low Fear & Greed")
-                    if bias == "bearish" and conf >= 6.0:
-                        reasons.append("bearish sentiment")
-
-                return skip_all, skip_alt, reasons
-
-            skip_all, skip_alt, macro_reasons = _macro_filter(btc_d, fg, sentiment_bias, sentiment_confidence)
+            skip_all, skip_alt, macro_reasons = macro_filter_decision(
+                btc_d, fg, sentiment_bias, sentiment_confidence
+            )
             if skip_all:
                 reason_text = " + ".join(macro_reasons) if macro_reasons else "unfavorable conditions"
                 logger.warning("Market unfavorable (%s). Skipping scan.", reason_text)
@@ -229,13 +240,21 @@ def run_agent_loop() -> None:
             session = get_market_session()
             potential_trades: list[dict] = []
             symbol_scores: dict[str, dict[str, float | None]] = {}
-            # Evaluate each symbol
-            for symbol in top_symbols:
-                if any(t.get("symbol") == symbol for t in active_trades):
-                    logger.warning("Skipping %s: already in an active trade.", symbol)
-                    continue
+            symbols_to_fetch = [
+                sym for sym in top_symbols if not any(t.get("symbol") == sym for t in active_trades)
+            ]
+            if symbols_to_fetch:
+                async def fetch_batch(symbols):
+                    tasks = [get_price_data_async(s) for s in symbols]
+                    return await asyncio.gather(*tasks)
+
+                price_results = asyncio.run(fetch_batch(symbols_to_fetch))
+                price_map = dict(zip(symbols_to_fetch, price_results))
+            else:
+                price_map = {}
+            for symbol in symbols_to_fetch:
                 try:
-                    price_data = get_price_data(symbol)
+                    price_data = price_map.get(symbol)
                     if price_data is None or price_data.empty or len(price_data) < 40:
                         logger.warning("Skipping %s due to insufficient data.", symbol)
                         continue
@@ -249,11 +268,13 @@ def run_agent_loop() -> None:
                         position_size,
                     )
                     symbol_scores[symbol] = {"score": score, "direction": direction}
-                    # Force long direction if high score but no direction
                     if direction is None and score >= 4.5:
-                        logger.warning("No clear direction for %s despite score=%.2f. Forcing 'long' direction.", symbol, score)
+                        logger.warning(
+                            "No clear direction for %s despite score=%.2f. Forcing 'long' direction.",
+                            symbol,
+                            score,
+                        )
                         direction = "long"
-                    # Skip non-long or invalid position sizes
                     if direction != "long" or position_size <= 0:
                         skip_reasons: list[str] = []
                         if direction != "long":
@@ -264,23 +285,31 @@ def run_agent_loop() -> None:
                         if position_size <= 0:
                             skip_reasons.append("zero position (low confidence)")
                         reason_text = " and ".join(skip_reasons) if skip_reasons else "not eligible"
-                        logger.info("[SKIP] %s: direction=%s, size=%s – %s, Score=%.2f", symbol, direction, position_size, reason_text, score)
+                        logger.info(
+                            "[SKIP] %s: direction=%s, size=%s – %s, Score=%.2f",
+                            symbol,
+                            direction,
+                            position_size,
+                            reason_text,
+                            score,
+                        )
                         continue
-                    # Order flow caution
                     flow_status = detect_aggression(price_data)
                     if flow_status == "sellers in control":
                         logger.warning(
                             "Bearish order flow detected in %s. Proceeding with caution (penalized score handled in evaluate_signal).",
                             symbol,
                         )
-                    potential_trades.append({
-                        "symbol": symbol,
-                        "score": score,
-                        "direction": "long",
-                        "position_size": position_size,
-                        "pattern": pattern_name,
-                        "price_data": price_data,
-                    })
+                    potential_trades.append(
+                        {
+                            "symbol": symbol,
+                            "score": score,
+                            "direction": "long",
+                            "position_size": position_size,
+                            "pattern": pattern_name,
+                            "price_data": price_data,
+                        }
+                    )
                     logger.info(
                         "[Potential Trade] %s | Score=%.2f | Direction=long | Size=%s",
                         symbol,
