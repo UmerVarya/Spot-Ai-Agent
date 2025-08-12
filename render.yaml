@@ -1,15 +1,30 @@
 services:
-  - type: web
-    name: spot-ai-agent
+  - type: worker
+    name: spot-ai-trader
     env: python
     pythonVersion: 3.10.13
     buildCommand: pip install -r requirements.txt
     startCommand: python3 agent.py
     envVars:
+      - key: RUN_DASHBOARD
+        value: "0"
       - key: DATABASE_URL
         fromDatabase:
           name: spot-ai-db
           property: connectionString
+      - key: DATA_DIR
+        value: /var/data
+    disks:
+      - name: trade-data
+        mountPath: /var/data
+        sizeGB: 1
+  - type: web
+    name: spot-ai-dashboard
+    env: python
+    pythonVersion: 3.10.13
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run dashboard.py --server.port $PORT --server.headless true
+    envVars:
       - key: DATA_DIR
         value: /var/data
     disks:

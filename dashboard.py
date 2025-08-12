@@ -127,146 +127,170 @@ def format_active_row(symbol: str, data: dict) -> dict:
     }
 
 
-# Sidebar controls
-refresh_interval = st.sidebar.slider("⏱️ Refresh Interval (seconds)", 10, 60, 30)
-st.sidebar.markdown("---")
-st.sidebar.markdown("Built for  **Spot AI Super Agent**")
+def render_live_tab():
+        # Sidebar controls
+        refresh_interval = st.sidebar.slider("⏱️ Refresh Interval (seconds)", 10, 60, 30)
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("Built for  **Spot AI Super Agent**")
 
-# Auto refresh
-st_autorefresh(interval=refresh_interval * 1000, key="refresh")
+        # Auto refresh
+        st_autorefresh(interval=refresh_interval * 1000, key="refresh")
 
-# Load active trades and format into rows
-trades = load_active_trades()
-active_rows = []
-for data in trades:
-    sym = data.get("symbol", "")
-    row = format_active_row(sym, data)
-    if row:
-        active_rows.append(row)
+        # Load active trades and format into rows
+        trades = load_active_trades()
+        active_rows = []
+        for data in trades:
+            sym = data.get("symbol", "")
+            row = format_active_row(sym, data)
+            if row:
+                active_rows.append(row)
 
-# Display live PnL section
-st.subheader("📈 Live PnL – Active Trades")
-if active_rows:
-    df_active = pd.DataFrame(active_rows)
-    # Summary metrics for active trades
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Active Trades", len(df_active))
-    avg_pnl_pct = df_active["PnL (%)"].mean() if not df_active.empty else 0.0
-    col2.metric("Average PnL (%)", f"{avg_pnl_pct:.2f}%", delta=f"{avg_pnl_pct:.2f}%")
-    total_unrealised = df_active["PnL ($)"].sum() if not df_active.empty else 0.0
-    col3.metric("Total Unrealised PnL", f"${total_unrealised:.2f}")
-    wins_active = (df_active["PnL (%)"] > 0).sum()
-    col4.metric("Winning Trades", wins_active)
-    # Display active trades table with formatted PnL columns
-    df_display = df_active.copy()
-    df_display["PnL (%)"] = df_display["PnL (%)"].apply(lambda x: f" {x:.2f}%")
-    df_display["PnL ($)"] = df_display["PnL ($)"].apply(lambda x: f" ${x:.2f}")
-    st.dataframe(df_display, use_container_width=True)
-else:
-    st.info("No active trades found.")
+        # Display live PnL section
+        st.subheader("📈 Live PnL – Active Trades")
+        if active_rows:
+            df_active = pd.DataFrame(active_rows)
+            # Summary metrics for active trades
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Active Trades", len(df_active))
+            avg_pnl_pct = df_active["PnL (%)"].mean() if not df_active.empty else 0.0
+            col2.metric("Average PnL (%)", f"{avg_pnl_pct:.2f}%", delta=f"{avg_pnl_pct:.2f}%")
+            total_unrealised = df_active["PnL ($)"].sum() if not df_active.empty else 0.0
+            col3.metric("Total Unrealised PnL", f"${total_unrealised:.2f}")
+            wins_active = (df_active["PnL (%)"] > 0).sum()
+            col4.metric("Winning Trades", wins_active)
+            # Display active trades table with formatted PnL columns
+            df_display = df_active.copy()
+            df_display["PnL (%)"] = df_display["PnL (%)"].apply(lambda x: f" {x:.2f}%")
+            df_display["PnL ($)"] = df_display["PnL ($)"].apply(lambda x: f" ${x:.2f}")
+            st.dataframe(df_display, use_container_width=True)
+        else:
+            st.info("No active trades found.")
 
-# Load trade history and compute summary statistics
-hist_df = load_trade_history_df()
-st.subheader("📊 Historical Performance – Completed Trades")
-if not hist_df.empty:
-    # Ensure date columns are parsed
-    for col in ["entry_time", "exit_time"]:
-        if col in hist_df.columns:
-            hist_df[col] = pd.to_datetime(hist_df[col], errors="coerce")
-    # Derive size column
-    if "size" not in hist_df.columns and "position_size" in hist_df.columns:
-        hist_df["size"] = hist_df["position_size"].astype(float)
-    # Compute PnL absolute and percent
-    if "direction" in hist_df.columns:
-        directions = hist_df["direction"].astype(str)
-    else:
-        directions = pd.Series(["long"] * len(hist_df))
-    if "entry" in hist_df.columns:
-        entries = pd.to_numeric(hist_df["entry"], errors="coerce")
-    else:
-        entries = pd.Series([0] * len(hist_df), dtype=float)
-    if "exit" in hist_df.columns:
-        exits = pd.to_numeric(hist_df["exit"], errors="coerce")
-    else:
-        exits = pd.to_numeric(hist_df.get("exit_price", pd.Series([np.nan] * len(hist_df))), errors="coerce")
-    if "size" in hist_df.columns:
-        sizes = pd.to_numeric(hist_df["size"], errors="coerce").fillna(1)
-    else:
-        sizes = pd.Series([1] * len(hist_df), dtype=float)
-    fees = pd.to_numeric(hist_df.get("fees", pd.Series([0] * len(hist_df))), errors="coerce").fillna(0)
-    slippage = pd.to_numeric(hist_df.get("slippage", pd.Series([0] * len(hist_df))), errors="coerce").fillna(0)
-    # Determine direction multiplier
-    direction_sign = np.where(directions.str.lower().str.startswith("s"), -1, 1)
-    pnl_abs = (exits - entries) * sizes * direction_sign
-    pnl_net = pnl_abs - fees - slippage
-    pnl_pct = np.where(
-        entries > 0,
-        pnl_abs / (entries * sizes) * 100,
-        0
-    )
-    hist_df["PnL ($)"] = pnl_abs
-    hist_df["PnL (net $)"] = pnl_net
-    hist_df["PnL (%)"] = pnl_pct
-    # Compute duration in minutes
-    if "entry_time" in hist_df.columns and "exit_time" in hist_df.columns:
-        hist_df["Duration (min)"] = (hist_df["exit_time"] - hist_df["entry_time"]).dt.total_seconds() / 60
-    # Summary metrics
-    total_trades = len(hist_df)
-    wins = (hist_df["PnL (net $)"] > 0).sum()
-    losses = (hist_df["PnL (net $)"] < 0).sum()
-    win_loss_ratio = wins / losses if losses > 0 else float('inf')
-    total_gross = pnl_abs.sum()
-    total_net = pnl_net.sum()
-    largest_win = pnl_net.max() if not hist_df.empty else 0
-    largest_loss = pnl_net.min() if not hist_df.empty else 0
-    # Display summary metrics
-    mcol1, mcol2, mcol3, mcol4, mcol5, mcol6 = st.columns(6)
-    mcol1.metric("Total Trades", total_trades)
-    mcol2.metric("Profitable Trades", wins)
-    mcol3.metric("Losing Trades", losses)
-    mcol4.metric("Win/Loss Ratio", f"{win_loss_ratio:.2f}" if np.isfinite(win_loss_ratio) else "∞")
-    mcol5.metric("Total Gross PnL", f"${total_gross:.2f}")
-    mcol6.metric("Total Net PnL", f"${total_net:.2f}")
-    # Equity curve chart
-    if "exit_time" in hist_df.columns:
-        curve_df = hist_df.sort_values("exit_time").copy()
-        curve_df["Cumulative PnL"] = curve_df["PnL (net $)"].cumsum()
-        st.line_chart(curve_df.set_index("exit_time")["Cumulative PnL"], use_container_width=True)
-    # Strategy breakdown
-    if "strategy" in hist_df.columns:
-        strat_perf = hist_df.groupby("strategy")["PnL (net $)"].sum().reset_index()
-        st.bar_chart(strat_perf.set_index("strategy"), use_container_width=True)
-    # Session breakdown
-    if "session" in hist_df.columns:
-        session_perf = hist_df.groupby("session")["PnL (net $)"].sum().reset_index()
-        st.bar_chart(session_perf.set_index("session"), use_container_width=True)
-    # Display historical trades table
-    display_cols = [
-        col
-        for col in [
-            "entry_time",
-            "exit_time",
-            "symbol",
-            "direction",
-            "strategy",
-            "session",
-            "entry",
-            "exit",
-            "size",
-            "fees",
-            "slippage",
-            "outcome",
-        ]
-        if col in hist_df.columns
-    ] + [c for c in ["PnL (net $)", "PnL (%)", "Duration (min)"] if c in hist_df.columns]
-    hist_display = hist_df[display_cols].copy()
-    # Format numeric columns
-    for col in ["PnL (net $)", "PnL (%)", "Duration (min)", "fees", "slippage"]:
-        if col in hist_display.columns:
-            hist_display[col] = hist_display[col].apply(lambda x: round(x, 2) if pd.notnull(x) else x)
-    st.dataframe(hist_display, use_container_width=True)
-    # CSV download button
-    csv_data = hist_df.to_csv(index=False).encode('utf-8')
-    st.download_button("Download Trade History", csv_data, "trade_history.csv", "text/csv")
-else:
-    st.info("No completed trades logged yet.")
+        # Load trade history and compute summary statistics
+        hist_df = load_trade_history_df()
+        st.subheader("📊 Historical Performance – Completed Trades")
+        if not hist_df.empty:
+            # Ensure date columns are parsed
+            for col in ["entry_time", "exit_time"]:
+                if col in hist_df.columns:
+                    hist_df[col] = pd.to_datetime(hist_df[col], errors="coerce")
+            # Derive size column
+            if "size" not in hist_df.columns and "position_size" in hist_df.columns:
+                hist_df["size"] = hist_df["position_size"].astype(float)
+            # Compute PnL absolute and percent
+            if "direction" in hist_df.columns:
+                directions = hist_df["direction"].astype(str)
+            else:
+                directions = pd.Series(["long"] * len(hist_df))
+            if "entry" in hist_df.columns:
+                entries = pd.to_numeric(hist_df["entry"], errors="coerce")
+            else:
+                entries = pd.Series([0] * len(hist_df), dtype=float)
+            if "exit" in hist_df.columns:
+                exits = pd.to_numeric(hist_df["exit"], errors="coerce")
+            else:
+                exits = pd.to_numeric(hist_df.get("exit_price", pd.Series([np.nan] * len(hist_df))), errors="coerce")
+            if "size" in hist_df.columns:
+                sizes = pd.to_numeric(hist_df["size"], errors="coerce").fillna(1)
+            else:
+                sizes = pd.Series([1] * len(hist_df), dtype=float)
+            fees = pd.to_numeric(hist_df.get("fees", pd.Series([0] * len(hist_df))), errors="coerce").fillna(0)
+            slippage = pd.to_numeric(hist_df.get("slippage", pd.Series([0] * len(hist_df))), errors="coerce").fillna(0)
+            # Determine direction multiplier
+            direction_sign = np.where(directions.str.lower().str.startswith("s"), -1, 1)
+            pnl_abs = (exits - entries) * sizes * direction_sign
+            pnl_net = pnl_abs - fees - slippage
+            pnl_pct = np.where(
+                entries > 0,
+                pnl_abs / (entries * sizes) * 100,
+                0
+            )
+            hist_df["PnL ($)"] = pnl_abs
+            hist_df["PnL (net $)"] = pnl_net
+            hist_df["PnL (%)"] = pnl_pct
+            # Compute duration in minutes
+            if "entry_time" in hist_df.columns and "exit_time" in hist_df.columns:
+                hist_df["Duration (min)"] = (hist_df["exit_time"] - hist_df["entry_time"]).dt.total_seconds() / 60
+            # Summary metrics
+            total_trades = len(hist_df)
+            wins = (hist_df["PnL (net $)"] > 0).sum()
+            losses = (hist_df["PnL (net $)"] < 0).sum()
+            win_loss_ratio = wins / losses if losses > 0 else float('inf')
+            total_gross = pnl_abs.sum()
+            total_net = pnl_net.sum()
+            largest_win = pnl_net.max() if not hist_df.empty else 0
+            largest_loss = pnl_net.min() if not hist_df.empty else 0
+            # Display summary metrics
+            mcol1, mcol2, mcol3, mcol4, mcol5, mcol6 = st.columns(6)
+            mcol1.metric("Total Trades", total_trades)
+            mcol2.metric("Profitable Trades", wins)
+            mcol3.metric("Losing Trades", losses)
+            mcol4.metric("Win/Loss Ratio", f"{win_loss_ratio:.2f}" if np.isfinite(win_loss_ratio) else "∞")
+            mcol5.metric("Total Gross PnL", f"${total_gross:.2f}")
+            mcol6.metric("Total Net PnL", f"${total_net:.2f}")
+            # Equity curve chart
+            if "exit_time" in hist_df.columns:
+                curve_df = hist_df.sort_values("exit_time").copy()
+                curve_df["Cumulative PnL"] = curve_df["PnL (net $)"].cumsum()
+                st.line_chart(curve_df.set_index("exit_time")["Cumulative PnL"], use_container_width=True)
+            # Strategy breakdown
+            if "strategy" in hist_df.columns:
+                strat_perf = hist_df.groupby("strategy")["PnL (net $)"].sum().reset_index()
+                st.bar_chart(strat_perf.set_index("strategy"), use_container_width=True)
+            # Session breakdown
+            if "session" in hist_df.columns:
+                session_perf = hist_df.groupby("session")["PnL (net $)"].sum().reset_index()
+                st.bar_chart(session_perf.set_index("session"), use_container_width=True)
+            # Display historical trades table
+            display_cols = [
+                col
+                for col in [
+                    "entry_time",
+                    "exit_time",
+                    "symbol",
+                    "direction",
+                    "strategy",
+                    "session",
+                    "entry",
+                    "exit",
+                    "size",
+                    "fees",
+                    "slippage",
+                    "outcome",
+                ]
+                if col in hist_df.columns
+            ] + [c for c in ["PnL (net $)", "PnL (%)", "Duration (min)"] if c in hist_df.columns]
+            hist_display = hist_df[display_cols].copy()
+            # Format numeric columns
+            for col in ["PnL (net $)", "PnL (%)", "Duration (min)", "fees", "slippage"]:
+                if col in hist_display.columns:
+                    hist_display[col] = hist_display[col].apply(lambda x: round(x, 2) if pd.notnull(x) else x)
+            st.dataframe(hist_display, use_container_width=True)
+            # CSV download button
+            csv_data = hist_df.to_csv(index=False).encode('utf-8')
+            st.download_button("Download Trade History", csv_data, "trade_history.csv", "text/csv")
+        else:
+            st.info("No completed trades logged yet.")
+
+
+
+def render_backtest_tab():
+    """Upload a CSV of trade logs and visualise backtest results."""
+    st.subheader("Backtest Trade Log")
+    uploaded = st.file_uploader("Upload trade log CSV", type="csv")
+    if uploaded:
+        df = pd.read_csv(uploaded)
+        if "pnl" in df.columns and "equity" not in df.columns:
+            df["equity"] = (1 + df["pnl"].astype(float)).cumprod()
+        if "equity" in df.columns:
+            st.line_chart(df["equity"], use_container_width=True)
+        if "pnl" in df.columns:
+            st.bar_chart(df["pnl"], use_container_width=True)
+        st.dataframe(df, use_container_width=True)
+
+
+tab_live, tab_backtest = st.tabs(["Dashboard", "Backtest"])
+with tab_live:
+    render_live_tab()
+with tab_backtest:
+    render_backtest_tab()

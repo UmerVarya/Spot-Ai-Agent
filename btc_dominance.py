@@ -12,10 +12,10 @@ Examples
 --------
 
 >>> dominance = get_btc_dominance()
->>> print(f"BTC dominance is {dominance}%")
+>>> logger.info(f"BTC dominance is {dominance}%")
 
-If an error occurs or the API response is malformed, the function prints
-diagnostic information and returns 50.0 as a neutral default.
+If an error occurs or the API response is malformed, details are logged and
+the function returns 50.0 as a neutral default.
 """
 
 import requests
