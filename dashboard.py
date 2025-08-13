@@ -286,6 +286,10 @@ def render_backtest_tab():
             st.line_chart(df["equity"], use_container_width=True)
         if "pnl" in df.columns:
             st.bar_chart(df["pnl"], use_container_width=True)
+            # Display distribution of returns as a histogram
+            hist, bins = np.histogram(df["pnl"].astype(float), bins=20)
+            hist_df = pd.DataFrame({"Return": bins[:-1], "Count": hist})
+            st.bar_chart(hist_df.set_index("Return"), use_container_width=True)
         st.dataframe(df, use_container_width=True)
 
 

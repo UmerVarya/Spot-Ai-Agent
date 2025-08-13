@@ -246,10 +246,15 @@ def run_agent_loop() -> None:
             if symbols_to_fetch:
                 async def fetch_batch(symbols):
                     tasks = [get_price_data_async(s) for s in symbols]
-                    return await asyncio.gather(*tasks)
+                    return await asyncio.gather(*tasks, return_exceptions=True)
 
                 price_results = asyncio.run(fetch_batch(symbols_to_fetch))
-                price_map = dict(zip(symbols_to_fetch, price_results))
+                price_map = {}
+                for sym, res in zip(symbols_to_fetch, price_results):
+                    if isinstance(res, Exception):
+                        logger.error("Error fetching %s: %s", sym, res, exc_info=True)
+                    else:
+                        price_map[sym] = res
             else:
                 price_map = {}
             for symbol in symbols_to_fetch:
