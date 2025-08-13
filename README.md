@@ -37,8 +37,7 @@ streamlit run dashboard.py
 python backtest.py
 ```
 
-Upload a CSV of trade logs on the dashboard's *Backtest* tab to visualise equity curves and return distributions.
-The agent logs activity and uncaught exceptions to `spot_ai.log` in `DATA_DIR` for later analysis.
+Upload a CSV of trade logs on the dashboard's *Backtest* tab to visualise equity curves and return distributions. The agent logs activity and uncaught exceptions to `spot_ai.log` in `DATA_DIR` for later analysis.
 
 ## Architecture
 
