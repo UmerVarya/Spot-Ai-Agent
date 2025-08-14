@@ -18,3 +18,4 @@ beautifulsoup4
 psycopg2-binary
 aiohttp
 pytest
+gunicorn

@@ -5,6 +5,7 @@ services:
     pythonVersion: 3.10.13
     buildCommand: pip install -r requirements.txt
     startCommand: python3 agent.py
+    healthCheckPath: /
     envVars:
       - key: RUN_DASHBOARD
         value: "0"
@@ -24,6 +25,7 @@ services:
     pythonVersion: 3.10.13
     buildCommand: pip install -r requirements.txt
     startCommand: streamlit run dashboard.py --server.port $PORT --server.headless true
+    healthCheckPath: /
     envVars:
       - key: DATA_DIR
         value: /var/data
