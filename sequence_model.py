@@ -18,13 +18,25 @@ from log_utils import setup_logger
 try:
     from sklearn.ensemble import RandomForestRegressor
     from sklearn.preprocessing import StandardScaler
+    from sklearn.model_selection import cross_val_score
     import joblib  # type: ignore
     SKLEARN_AVAILABLE = True
 except Exception:  # pragma: no cover - optional dependency
     RandomForestRegressor = None  # type: ignore
     StandardScaler = None  # type: ignore
+    cross_val_score = None  # type: ignore
     joblib = None  # type: ignore
     SKLEARN_AVAILABLE = False
+
+try:
+    from xgboost import XGBRegressor  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    XGBRegressor = None  # type: ignore
+
+try:
+    from lightgbm import LGBMRegressor  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    LGBMRegressor = None  # type: ignore
 
 logger = setup_logger(__name__)
 
@@ -61,17 +73,51 @@ def train_sequence_model(df: pd.DataFrame, window_size: int = 10) -> None:
         return
     scaler = StandardScaler()
     X_norm = scaler.fit_transform(X)
-    model = RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42)
-    model.fit(X_norm, y)
+
+    models = {
+        'random_forest': RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42),
+    }
+    if XGBRegressor is not None:
+        models['xgboost'] = XGBRegressor(
+            n_estimators=200,
+            max_depth=4,
+            learning_rate=0.1,
+            subsample=0.8,
+            objective='reg:squarederror',
+        )
+    if LGBMRegressor is not None:
+        models['lightgbm'] = LGBMRegressor(
+            n_estimators=200,
+            num_leaves=31,
+            learning_rate=0.1,
+            max_depth=-1,
+        )
+
+    best_model_name = 'random_forest'
+    best_score = float('-inf')
+    for name, model in models.items():
+        try:
+            scores = cross_val_score(model, X_norm, y, cv=3, scoring='neg_mean_squared_error')
+            score = float(scores.mean())
+        except Exception:
+            score = float('-inf')
+        logger.info("%s CV neg-MSE: %.6f", name, score)
+        if score > best_score:
+            best_score = score
+            best_model_name = name
+
+    best_model = models[best_model_name]
+    best_model.fit(X_norm, y)
     try:
         joblib.dump({
-            'model': model,
+            'model': best_model,
             'scaler_mean': scaler.mean_,
             'scaler_scale': scaler.scale_,
             'window_size': window_size,
-            'feature_dim': X.shape[1]
+            'feature_dim': X.shape[1],
+            'model_type': best_model_name,
         }, SEQ_PKL)
-        logger.info("Sequence model trained and saved to %s", SEQ_PKL)
+        logger.info("Sequence model (%s) trained and saved to %s", best_model_name, SEQ_PKL)
     except Exception as e:  # pragma: no cover - IO errors
         logger.warning("Failed to save sequence model: %s", e, exc_info=True)
 

@@ -270,6 +270,14 @@ def should_trade(
             ):
                 confidence += 0.8
 
+        exp_ret = indicators.get('next_return')
+        if exp_ret is not None:
+            try:
+                adj = max(min(float(exp_ret) * 50.0, 2.0), -2.0)
+                confidence += adj
+            except Exception:
+                pass
+
         # Clamp confidence into [0, 10]
         final_confidence = round(max(0.0, min(confidence, 10.0)), 2)
 

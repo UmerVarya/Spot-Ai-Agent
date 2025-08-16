@@ -66,6 +66,16 @@ except Exception:
     accuracy_score = None  # type: ignore
     SKLEARN_AVAILABLE = False
 
+try:
+    from xgboost import XGBClassifier  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    XGBClassifier = None  # type: ignore
+
+try:
+    from lightgbm import LGBMClassifier  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    LGBMClassifier = None  # type: ignore
+
 logger = setup_logger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -192,6 +202,13 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
             'gradient_boosting': GradientBoostingClassifier(),
             'mlp': MLPClassifier(max_iter=500),
         }
+        if XGBClassifier is not None:
+            models['xgboost'] = XGBClassifier(
+                eval_metric='logloss',
+                use_label_encoder=False,
+            )
+        if LGBMClassifier is not None:
+            models['lightgbm'] = LGBMClassifier()
         param_grid: Dict[str, Dict[str, List[Any]]] = {
             'logistic': {
                 'C': [0.1, 1.0, 10.0],
@@ -212,6 +229,20 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
                 'alpha': [0.0001, 0.001],
             },
         }
+        if XGBClassifier is not None:
+            param_grid['xgboost'] = {
+                'n_estimators': [50, 100, 200],
+                'max_depth': [3, 5, 7],
+                'learning_rate': [0.01, 0.1, 0.2],
+                'subsample': [0.8, 1.0],
+            }
+        if LGBMClassifier is not None:
+            param_grid['lightgbm'] = {
+                'n_estimators': [50, 100, 200],
+                'num_leaves': [31, 63, 127],
+                'learning_rate': [0.01, 0.1, 0.2],
+                'max_depth': [3, 5, -1],
+            }
         # Use stratified K‑fold to preserve class distribution
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         best_model: Optional[Any] = None
@@ -346,7 +377,7 @@ def predict_success_probability(
     model_type = metadata.get('model_type', 'manual')
     try:
         # Use sklearn model if available
-        if model_type in {'logistic', 'random_forest', 'gradient_boosting'} and SKLEARN_AVAILABLE and os.path.exists(MODEL_PKL):
+        if model_type in {'logistic', 'random_forest', 'gradient_boosting', 'mlp', 'xgboost', 'lightgbm'} and SKLEARN_AVAILABLE and os.path.exists(MODEL_PKL):
             # Load scaler statistics
             mean = np.array(metadata.get('scaler_mean'))
             scale = np.array(metadata.get('scaler_scale'))
