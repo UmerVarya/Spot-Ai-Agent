@@ -47,6 +47,7 @@ from fear_greed import get_fear_greed_index
 from orderflow import detect_aggression
 from diversify import select_diversified_signals
 from ml_model import predict_success_probability
+from sequence_model import predict_next_return
 from drawdown_guard import is_trading_blocked
 import numpy as np
 
@@ -349,6 +350,12 @@ def run_agent_loop() -> None:
                     }
                 except Exception:
                     indicators = {"rsi": 50.0, "macd": 0.0, "adx": 20.0}
+                next_ret = 0.0
+                try:
+                    next_ret = predict_next_return(price_data.tail(10))
+                except Exception:
+                    pass
+                indicators['next_return'] = next_ret
                 # Ask the brain whether to take the trade
                 # Call the brain with error handling.  If the brain throws an
                 # exception, record it as the reason for skipping so users
