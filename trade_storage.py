@@ -1,13 +1,22 @@
 """
-Enhanced trade storage for Spot AI Super Agent (updated).
+Enhanced trade storage utilities for the Spot AI Super Agent.
 
-This module extends the original ``trade_storage.py`` by capturing
-additional metadata when trades open and close.  It also centralises
-where trade data are written so that restarts do not wipe the agent’s
-memory.  Paths now default to a persistent data directory (configurable
-via the ``DATA_DIR`` environment variable) instead of the repository
-root, allowing containers such as Render services to mount a volume and
-retain trade history across process restarts.
+This module mirrors the original ``trade_storage.py`` while
+introducing the following improvements:
+
+* **Notional calculation** – each logged trade now includes a
+  ``notional`` field equal to ``entry_price * size``.  Storing the
+  notional explicitly simplifies downstream PnL percentage
+  calculations and clarifies how much capital was committed to each
+  position.
+* **Flexible data directories** – preserves the existing environment
+  variable behaviour for locating data files and database support.
+* **Safer history loading** – gracefully handles missing files or
+  malformed rows.
+
+These changes are backward compatible with existing logs because
+``load_trade_history_df`` still falls back to deriving ``notional``
+from ``entry`` and ``size`` when absent.
 """
 
 import json
@@ -19,19 +28,16 @@ from typing import Optional
 
 import pandas as pd
 
-# Optional PostgreSQL support -------------------------------------------------
-
 logger = logging.getLogger(__name__)
 
+# Optional PostgreSQL support (unchanged from original)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DB_CONN = DB_CURSOR = None
 Json = None
-
 if DATABASE_URL:
     try:
         import psycopg2
-        from psycopg2.extras import Json
-
+        from psycopg2.extras import Json  # type: ignore
         DB_CONN = psycopg2.connect(DATABASE_URL)
         DB_CONN.autocommit = True
         DB_CURSOR = DB_CONN.cursor()
@@ -53,7 +59,10 @@ if DATABASE_URL:
         )
         logger.info("Connected to PostgreSQL for trade storage.")
     except Exception as exc:  # pragma: no cover - diagnostic only
-        logger.exception("Database initialisation failed: %s. Falling back to file storage.", exc)
+        logger.exception(
+            "Database initialisation failed: %s. Falling back to file storage.",
+            exc,
+        )
         DB_CONN = DB_CURSOR = None
 
 # ---------------------------------------------------------------------------
@@ -61,12 +70,12 @@ if DATABASE_URL:
 # ---------------------------------------------------------------------------
 
 # ``DATA_DIR`` can point to a mounted volume (e.g. /var/data on Render) to
-# ensure logs persist across restarts.  By default we use a hidden directory in
-# the user's home folder.  Strip any inline comments (e.g. "path # comment") and
-# fall back to the default location if the supplied directory is not writable.
+# ensure logs persist across restarts.  By default we use a hidden directory
+# in the user's home folder.  Strip any inline comments (e.g. "path # comment")
+# and fall back to the default location if the supplied directory is not
+# writable.
 DEFAULT_DATA_DIR = os.path.join(os.path.expanduser("~"), ".spot_ai_agent")
 raw_data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
-
 # Remove inline comments and surrounding whitespace
 raw_data_dir = raw_data_dir.split("#", 1)[0].strip() or DEFAULT_DATA_DIR
 
@@ -83,12 +92,10 @@ except OSError:
 # these constants so other modules (e.g. ``trade_manager`` and ``dashboard``)
 # can import them, ensuring all components read and write the exact same files.
 ACTIVE_TRADES_FILE = os.environ.get(
-    "ACTIVE_TRADES_FILE",
-    os.path.join(DATA_DIR, "active_trades.json"),
+    "ACTIVE_TRADES_FILE", os.path.join(DATA_DIR, "active_trades.json")
 ).split("#", 1)[0].strip()
 TRADE_LOG_FILE = os.environ.get(
-    "TRADE_LOG_FILE",
-    os.path.join(DATA_DIR, "trade_log.csv"),
+    "TRADE_LOG_FILE", os.path.join(DATA_DIR, "trade_log.csv")
 ).split("#", 1)[0].strip()
 
 
@@ -129,7 +136,7 @@ def save_active_trades(trades: list) -> None:
 
 
 def is_trade_active(symbol: str) -> bool:
-    """Return True if a trade with ``symbol`` exists."""
+    """Return True if a trade with ``symbol`` exists in active storage."""
     if DB_CURSOR:
         DB_CURSOR.execute(
             "SELECT 1 FROM active_trades WHERE symbol = %s LIMIT 1",
@@ -209,7 +216,7 @@ def log_trade_result(
     slippage : float, default 0.0
         Slippage incurred on exit.
     """
-    # Build headers if the file is empty / non-existent
+    # Build headers including notional
     headers = [
         "timestamp",
         "symbol",
@@ -219,6 +226,7 @@ def log_trade_result(
         "entry",
         "exit",
         "size",
+        "notional",
         "fees",
         "slippage",
         "outcome",
@@ -232,6 +240,19 @@ def log_trade_result(
         "narrative",
     ]
     # Compose row
+    entry_price = trade.get("entry")
+    size_val = trade.get("size", trade.get("position_size", 0))
+    try:
+        size_val = float(size_val)
+    except Exception:
+        size_val = 0.0
+    try:
+        entry_val = float(entry_price) if entry_price is not None else None
+    except Exception:
+        entry_val = None
+    notional = None
+    if entry_val is not None:
+        notional = entry_val * size_val
     row = {
         "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "symbol": trade.get("symbol"),
@@ -240,7 +261,8 @@ def log_trade_result(
         "exit_time": exit_time or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "entry": trade.get("entry"),
         "exit": exit_price,
-        "size": trade.get("size", trade.get("position_size", 0)),
+        "size": size_val,
+        "notional": notional,
         "fees": fees,
         "slippage": slippage,
         "outcome": outcome,
@@ -289,6 +311,7 @@ def load_trade_history_df() -> pd.DataFrame:
                 df = pd.read_csv(TRADE_LOG_FILE)
             except Exception as exc:
                 logger.exception("Failed to read trade log file: %s", exc)
+    # Filter out rows with outcome recorded as "open"
     if not df.empty and "outcome" in df.columns:
         df = df[df["outcome"].astype(str).str.lower() != "open"]
     return df
