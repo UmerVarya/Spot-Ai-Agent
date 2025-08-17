@@ -50,6 +50,8 @@ from ml_model import predict_success_probability
 from sequence_model import predict_next_return
 from drawdown_guard import is_trading_blocked
 import numpy as np
+from rl_policy import RLPositionSizer
+from trade_utils import get_last_trade_outcome
 
 
 def handle_exception(exc_type, exc_value, exc_traceback):
@@ -68,6 +70,7 @@ SCAN_INTERVAL = 15
 # Interval between news fetches (in seconds)
 NEWS_INTERVAL = 3600
 RUN_DASHBOARD = os.getenv("RUN_DASHBOARD", "0") == "1"
+rl_sizer = RLPositionSizer()
 
 
 def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: float):
@@ -416,22 +419,25 @@ def run_agent_loop() -> None:
                 # Proceed if we still have room for a new trade
                 if position_size > 0:
                     entry_price = round(price_data['close'].iloc[-1], 6)
-                    # Determine dynamic SL/TP using ATR if available
                     try:
                         atr_val = indicators_df['atr'].iloc[-1] if 'atr' in indicators_df else None
-                        if atr_val is not None and not np.isnan(atr_val) and atr_val > 0:
-                            sl = round(entry_price - atr_val * 2.0, 6)
-                            tp1 = round(entry_price + atr_val * 2.0, 6)
-                            tp2 = round(entry_price + atr_val * 3.0, 6)
-                            tp3 = round(entry_price + atr_val * 4.0, 6)
-                        else:
-                            raise ValueError("Invalid ATR")
                     except Exception:
-                        # Fallback to static percentages
-                        sl = round(entry_price - entry_price * 0.01, 6)
-                        tp1 = round(entry_price + entry_price * 0.01, 6)
-                        tp2 = round(entry_price + entry_price * 0.015, 6)
-                        tp3 = round(entry_price + entry_price * 0.025, 6)
+                        atr_val = None
+                    equity = float(os.getenv("ACCOUNT_EQUITY", "10000"))
+                    risk_pct = float(os.getenv("RISK_PCT", "0.01"))
+                    risk_amt = equity * risk_pct
+                    if atr_val is not None and not np.isnan(atr_val) and atr_val > 0:
+                        base_size = risk_amt / (atr_val * 2.0)
+                    else:
+                        atr_val = entry_price * 0.02
+                        base_size = risk_amt / (entry_price * 0.02)
+                    state = get_last_trade_outcome() or "neutral"
+                    mult = rl_sizer.select_multiplier(state)
+                    position_size = round(max(base_size * mult, 0), 6)
+                    sl = round(entry_price - atr_val * 2.0, 6)
+                    tp1 = round(entry_price + atr_val * 2.0, 6)
+                    tp2 = round(entry_price + atr_val * 3.0, 6)
+                    tp3 = round(entry_price + atr_val * 4.0, 6)
                     # Compose the new trade dictionary with extra metadata
                     new_trade = {
                         "symbol": symbol,
@@ -459,6 +465,7 @@ def run_agent_loop() -> None:
                         "ml_prob": ml_prob,
                         "status": {"tp1": False, "tp2": False, "tp3": False, "sl": False},
                         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "news_summary": decision_obj.get("news_summary", ""),
                     }
                     logger.info("Narrative:\n%s\n", narrative)
                     logger.info(
@@ -475,7 +482,10 @@ def run_agent_loop() -> None:
                     create_new_trade(new_trade)
                     # Do NOT log the open trade as a completed trade.  It will be logged upon exit by trade_manager.py.
                     save_active_trades(active_trades)
-                    send_email(f"New Trade Opened: {symbol}", str(new_trade))
+                    send_email(
+                        f"New Trade Opened: {symbol}",
+                        f"{new_trade}\n\n Narrative:\n{narrative}\n\nNews Summary:\n{decision_obj.get('news_summary', '')}",
+                    )
                     opened_count += 1
             # Manage existing trades after opening new ones
             manage_trades()

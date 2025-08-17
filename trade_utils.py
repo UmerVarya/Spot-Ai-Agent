@@ -439,6 +439,33 @@ def compute_performance_metrics(log_file: str = TRADE_LOG_FILE, lookback: int = 
     except Exception:
         return {}
 
+
+def get_last_trade_outcome(log_file: str = TRADE_LOG_FILE) -> str | None:
+    """Return ``'win'`` or ``'loss'`` based on the most recent closed trade.
+
+    The helper is used by the RL position‑sizer to condition its action
+    selection on the outcome of the previous trade.  If the trade log is
+    missing or empty, ``None`` is returned so that callers can fall back to a
+    neutral state.
+    """
+    if not os.path.exists(log_file):
+        return None
+    try:
+        df = pd.read_csv(log_file, names=[
+            "timestamp", "symbol", "direction", "entry", "exit", "outcome",
+            "btc_d", "fg", "sent_conf", "sent_bias", "score",
+        ])
+        if df.empty:
+            return None
+        last = df.tail(1)
+        entry = pd.to_numeric(last["entry"], errors="coerce").iloc[0]
+        exit_price = pd.to_numeric(last["exit"], errors="coerce").iloc[0]
+        if pd.isna(entry) or pd.isna(exit_price):
+            return None
+        return "win" if exit_price > entry else "loss"
+    except Exception:
+        return None
+
 def log_signal(symbol: str, session: str, score: float, direction: Optional[str], weights: dict,
                candle_patterns: list, chart_pattern: Optional[str]) -> None:
     """Append a signal entry to the trades log."""

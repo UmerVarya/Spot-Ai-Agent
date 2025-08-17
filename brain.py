@@ -76,8 +76,31 @@ except Exception:
     def get_recent_trade_summary(symbol: str, pattern: str, max_entries: int = 3) -> str:  # type: ignore
         return ""
 
+try:
+    from fetch_news import run_news_fetcher, analyze_news_with_llm  # type: ignore
+except Exception:
+    def run_news_fetcher() -> list:  # type: ignore
+        return []
+
+    def analyze_news_with_llm(events: list) -> Dict[str, Any]:  # type: ignore
+        return {"safe": True, "reason": ""}
+
 # Cache for BTC context awareness
 symbol_context_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def summarize_recent_news() -> str:
+    """Fetch recent events and summarise them via the LLM."""
+    try:
+        try:
+            with open("news_events.json", "r") as f:
+                events = json.load(f)
+        except Exception:
+            events = run_news_fetcher()
+        analysis = analyze_news_with_llm(events)
+        return analysis.get("reason", "")
+    except Exception:
+        return ""
 
 
 def _parse_llm_response(resp: str) -> Tuple[bool | None, float | None, str]:
@@ -153,6 +176,8 @@ def should_trade(
                 "confidence": 0.0,
                 "reason": "Macro news unsafe: " + macro_news.get("reason", "unknown"),
             }
+
+        news_summary = summarize_recent_news()
 
         # Determine adaptive score threshold based on sentiment
         base_threshold: float = get_adaptive_conf_threshold() or 4.5
@@ -346,12 +371,14 @@ def should_trade(
                 orderflow=orderflow,
                 pattern=pattern_name,
                 macro_reason=macro_news.get("reason", ""),
+                news_summary=news_summary,
             ) or f"No major pattern, but macro/sentiment context favors {direction} setup."
             return {
                 "decision": True,
                 "confidence": final_confidence,
                 "reason": "LLM unavailable or returned error; auto-approval",
                 "narrative": narrative,
+                "news_summary": news_summary,
             }
 
         # Parse the LLM response (JSON or fallback)
@@ -378,6 +405,7 @@ def should_trade(
                 "decision": False,
                 "confidence": final_confidence,
                 "reason": f"LLM advisor vetoed trade: {advisor_reason}",
+                "news_summary": news_summary,
             }
 
         # Generate narrative
@@ -392,6 +420,7 @@ def should_trade(
             orderflow=orderflow,
             pattern=pattern_name,
             macro_reason=macro_news.get("reason", ""),
+            news_summary=news_summary,
         ) or f"No major pattern, but macro/sentiment context favors {direction} setup."
 
         return {
@@ -399,6 +428,7 @@ def should_trade(
             "confidence": final_confidence,
             "reason": "All filters passed",
             "narrative": narrative,
+            "news_summary": news_summary,
         }
 
     except Exception as e:

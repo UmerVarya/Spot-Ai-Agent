@@ -118,6 +118,15 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
             htf_trend = float(row.get("htf_trend", 0.0)) / 100.0
             order_imbalance = float(row.get("order_imbalance", 0.0)) / 100.0
             macro_indicator = float(row.get("macro_indicator", 0.0)) / 100.0
+            # Additional technical indicators from the learning log.  These
+            # columns may not always be present so we fall back to sensible
+            # defaults when missing.
+            macd_val = float(row.get("macd", 0.0)) / 100.0
+            rsi_val = float(row.get("rsi", 50.0)) / 100.0
+            sma_val = float(row.get("sma", 0.0)) / 100.0
+            atr_val = float(row.get("atr", 0.0)) / 100.0
+            vol_val = float(row.get("volume", 0.0)) / 1_000_000.0
+            macd_rsi = macd_val * rsi_val  # interaction feature to filter noise
             features = [
                 score,
                 conf,
@@ -130,6 +139,12 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
                 htf_trend,
                 order_imbalance,
                 macro_indicator,
+                macd_val,
+                rsi_val,
+                sma_val,
+                atr_val,
+                vol_val,
+                macd_rsi,
             ]
             feature_list.append(features)
             outcome = str(row.get("outcome", "loss")).lower()
