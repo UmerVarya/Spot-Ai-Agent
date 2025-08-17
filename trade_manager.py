@@ -30,6 +30,7 @@ from trade_storage import (
     load_active_trades,
     save_active_trades,
 )
+from rl_policy import RLPositionSizer
 
 # === Constants ===
 
@@ -38,6 +39,18 @@ EARLY_EXIT_THRESHOLD = 0.015  # 1.5% move against entry
 MACRO_CONFIDENCE_EXIT_THRESHOLD = 4
 
 logger = setup_logger(__name__)
+rl_sizer = RLPositionSizer()
+
+def _update_rl(entry: float, exit_price: float) -> None:
+    """Update RL position sizer based on trade outcome."""
+    try:
+        reward = (exit_price - entry) / entry
+        if reward < -0.25:
+            reward -= 1.0
+        state = "win" if reward > 0 else "loss"
+        rl_sizer.update(state, reward)
+    except Exception:
+        pass
 
 
 def create_new_trade(trade: dict) -> None:
@@ -113,6 +126,7 @@ def manage_trades() -> None:
                 fees=fees,
                 slippage=slippage,
             )
+            _update_rl(entry, current_price)
             send_email(f" Early Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
             continue
         # Compute updated indicators for trailing stops and TP
@@ -162,6 +176,7 @@ def manage_trades() -> None:
                     fees=fees,
                     slippage=slippage_amt,
                 )
+                _update_rl(entry, sl)
                 send_email(f" Stop Loss Hit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                 continue
             # Tighten stop-loss after TP1 if momentum fades (no TP4 mode)
@@ -196,6 +211,7 @@ def manage_trades() -> None:
                         fees=fees,
                         slippage=slippage_amt,
                     )
+                    _update_rl(entry, current_price)
                     send_email(f"✅ TP4 Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                     continue
         # Add the trade back to the updated list if still active
