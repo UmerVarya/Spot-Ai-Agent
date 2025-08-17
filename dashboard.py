@@ -118,7 +118,12 @@ except Exception:
 # each trade's ``size`` is assumed to represent notional in quote
 # currency (e.g., USDT).  When false, ``size`` represents the token
 # quantity.  See ``format_active_row`` for details.
-SIZE_AS_NOTIONAL = os.getenv("SIZE_AS_NOTIONAL", "false").lower() == "true"
+#
+# Default to ``true`` because most users allocate a fixed dollar amount per
+# trade rather than specifying a raw token quantity.  You can override
+# this behaviour by setting the ``SIZE_AS_NOTIONAL`` environment variable to
+# "false".
+SIZE_AS_NOTIONAL = os.getenv("SIZE_AS_NOTIONAL", "true").lower() == "true"
 
 # Page configuration
 st.set_page_config(
@@ -439,6 +444,34 @@ def render_live_tab() -> None:
             "Expected Shortfall",
             f"{es_val:.2%}" if np.isfinite(es_val) else "N/A",
         )
+
+        # ------------------------------------------------------------------
+        # Aggregated PnL over different horizons
+        # Compute PnL for trades closed today, this week, last 30 days and lifetime
+        try:
+            # Ensure exit_time is datetime
+            exit_times = pd.to_datetime(hist_df.get("exit_time"), errors="coerce")
+            now_ts = pd.Timestamp.utcnow()
+            # Start of day, week and month relative to current UTC time
+            today_start = now_ts.normalize()
+            week_start = now_ts - pd.Timedelta(days=7)
+            month_start = now_ts - pd.Timedelta(days=30)
+            pnl_net_series = hist_df["PnL (net $)"].astype(float)
+            pnl_today = pnl_net_series[exit_times >= today_start].sum()
+            pnl_week = pnl_net_series[exit_times >= week_start].sum()
+            pnl_month = pnl_net_series[exit_times >= month_start].sum()
+            pnl_lifetime = pnl_net_series.sum()
+        except Exception:
+            pnl_today = 0.0
+            pnl_week = 0.0
+            pnl_month = 0.0
+            pnl_lifetime = 0.0
+
+        pcol1, pcol2, pcol3, pcol4 = st.columns(4)
+        pcol1.metric("PnL Today", f"${pnl_today:.2f}")
+        pcol2.metric("PnL This Week", f"${pnl_week:.2f}")
+        pcol3.metric("PnL 30 Days", f"${pnl_month:.2f}")
+        pcol4.metric("PnL Lifetime", f"${pnl_lifetime:.2f}")
         # Equity curve chart
         if "exit_time" in hist_df.columns:
             curve_df = hist_df.sort_values("exit_time").copy()
