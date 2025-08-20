@@ -20,6 +20,15 @@ import os
 from datetime import datetime
 
 
+def _ensure_symlink(target: str, link: str) -> None:
+    try:
+        if os.path.islink(link) or os.path.exists(link):
+            return
+        os.symlink(target, link)
+    except OSError:
+        pass
+
+
 def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
     """
     Append the result of a completed trade to the learning log.
@@ -43,6 +52,11 @@ def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
     # ensures relative paths are resolved correctly.
     log_file = os.environ.get(
         "TRADE_LEARNING_LOG_FILE",
+        "/home/ubuntu/spot_data/trades/trade_logs.csv",
+    )
+
+    _ensure_symlink(
+        log_file,
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_learning_log.csv"),
     )
     fields = [
