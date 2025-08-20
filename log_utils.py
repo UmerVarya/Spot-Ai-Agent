@@ -8,6 +8,19 @@ import os
 LOG_FILE = "/home/ubuntu/spot_data/logs/spot_ai.log"
 
 
+def _ensure_symlink(target: str, link: str) -> None:
+    try:
+        if os.path.islink(link) or os.path.exists(link):
+            return
+        os.symlink(target, link)
+    except OSError:
+        pass
+
+
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ensure_symlink(LOG_FILE, os.path.join(_REPO_ROOT, "spot_ai.log"))
+
+
 def setup_logger(name: str) -> logging.Logger:
     """Configure and return a module-level logger.
 

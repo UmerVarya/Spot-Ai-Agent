@@ -19,6 +19,23 @@ __all__ = ["send_email", "log_rejection"]
 
 logger = setup_logger(__name__)
 
+REJECTED_TRADES_FILE = os.environ.get(
+    "REJECTED_TRADES_FILE", "/home/ubuntu/spot_data/trades/rejected_trades.csv"
+)
+
+
+def _ensure_symlink(target: str, link: str) -> None:
+    try:
+        if os.path.islink(link) or os.path.exists(link):
+            return
+        os.symlink(target, link)
+    except OSError:
+        pass
+
+
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ensure_symlink(REJECTED_TRADES_FILE, os.path.join(_REPO_ROOT, "rejected_trades.csv"))
+
 def send_email(subject, trade_details):
     try:
         msg = MIMEMultipart()
@@ -70,7 +87,7 @@ def log_rejection(symbol: str, reason: str) -> None:
         Explanation for why the trade was rejected.
     """
 
-    log_file = "rejected_trades.csv"
+    log_file = REJECTED_TRADES_FILE
     headers = ["timestamp", "symbol", "reason"]
     row = {
         "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
@@ -78,6 +95,7 @@ def log_rejection(symbol: str, reason: str) -> None:
         "reason": reason,
     }
 
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
     file_exists = os.path.isfile(log_file)
     with open(log_file, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=headers)
