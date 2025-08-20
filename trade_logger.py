@@ -19,32 +19,14 @@ import csv
 import os
 from datetime import datetime
 
-
-def _ensure_symlink(target: str, link: str) -> None:
-    try:
-        if os.path.islink(link):
-            if os.readlink(link) != target:
-                os.remove(link)
-                os.symlink(target, link)
-            return
-        if os.path.exists(link):
-            return
-        os.symlink(target, link)
-    except OSError:
-        pass
-
-
+# Learning log is written directly to the persistent data directory.  Older
+# paths are no longer used, so the compatibility symlink has been removed.
 TRADE_LEARNING_LOG_FILE = os.environ.get(
     "TRADE_LEARNING_LOG_FILE", "/home/ubuntu/spot_data/trades/trade_logs.csv"
 ).split("#", 1)[0].strip()
 TRADE_LOG_FILE = os.environ.get("TRADE_LOG_FILE", TRADE_LEARNING_LOG_FILE)
 
 __all__ = ["log_trade_result", "TRADE_LEARNING_LOG_FILE", "TRADE_LOG_FILE"]
-
-_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-_ensure_symlink(
-    TRADE_LEARNING_LOG_FILE, os.path.join(_REPO_ROOT, "trade_learning_log.csv")
-)
 
 
 def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:

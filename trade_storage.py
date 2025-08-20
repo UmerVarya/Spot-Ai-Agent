@@ -103,28 +103,6 @@ COMPLETED_TRADES_FILE = os.environ.get(
 TRADE_LOG_FILE = os.environ.get("TRADE_LOG_FILE", COMPLETED_TRADES_FILE)
 
 
-def _ensure_symlink(target: str, link: str) -> None:
-    """Create a compatibility symlink if one does not already exist."""
-    try:
-        if os.path.islink(link):
-            if os.readlink(link) != target:
-                os.remove(link)
-                os.symlink(target, link)
-            return
-        if os.path.exists(link):
-            return
-        os.symlink(target, link)
-    except OSError:
-        pass
-
-
-# Symlinks in the repository root allow read-only access for legacy code
-# that still expects files beside the source tree.
-_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-_ensure_symlink(ACTIVE_TRADES_FILE, os.path.join(_REPO_ROOT, "active_trades.json"))
-_ensure_symlink(COMPLETED_TRADES_FILE, os.path.join(_REPO_ROOT, "completed_trades.csv"))
-
-
 def load_active_trades() -> list:
     """Return the list of currently active trades."""
     if DB_CURSOR:

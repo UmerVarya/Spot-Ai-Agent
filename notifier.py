@@ -23,24 +23,6 @@ REJECTED_TRADES_FILE = os.environ.get(
     "REJECTED_TRADES_FILE", "/home/ubuntu/spot_data/trades/rejected_trades.csv"
 )
 
-
-def _ensure_symlink(target: str, link: str) -> None:
-    try:
-        if os.path.islink(link):
-            if os.readlink(link) != target:
-                os.remove(link)
-                os.symlink(target, link)
-            return
-        if os.path.exists(link):
-            return
-        os.symlink(target, link)
-    except OSError:
-        pass
-
-
-_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-_ensure_symlink(REJECTED_TRADES_FILE, os.path.join(_REPO_ROOT, "rejected_trades.csv"))
-
 def send_email(subject, trade_details):
     try:
         msg = MIMEMultipart()

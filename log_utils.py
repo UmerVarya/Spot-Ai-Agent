@@ -2,28 +2,10 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 
-# Use the actual data path rather than relying on a potentially restricted
-# symlink. This avoids PermissionError in hardened environments and ensures
-# the agent reads and writes logs directly from the data storage location.
+# Write logs directly to the canonical data path.  Historically a symlink
+# was created in the repository root for compatibility, but the service now
+# references this absolute path so no symlink is required.
 LOG_FILE = "/home/ubuntu/spot_data/logs/spot_ai.log"
-
-
-def _ensure_symlink(target: str, link: str) -> None:
-    try:
-        if os.path.islink(link):
-            if os.readlink(link) != target:
-                os.remove(link)
-                os.symlink(target, link)
-            return
-        if os.path.exists(link):
-            return
-        os.symlink(target, link)
-    except OSError:
-        pass
-
-
-_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-_ensure_symlink(LOG_FILE, os.path.join(_REPO_ROOT, "spot_ai.log"))
 
 
 def setup_logger(name: str) -> logging.Logger:
