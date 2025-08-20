@@ -6,6 +6,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from log_utils import setup_logger
+from trade_storage import REJECTED_TRADES_FILE
 
 load_dotenv()
 
@@ -15,13 +16,9 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
-__all__ = ["send_email", "log_rejection"]
+__all__ = ["send_email", "log_rejection", "REJECTED_TRADES_FILE"]
 
 logger = setup_logger(__name__)
-
-REJECTED_TRADES_FILE = os.environ.get(
-    "REJECTED_TRADES_FILE", "/home/ubuntu/spot_data/trades/rejected_trades.csv"
-)
 
 def send_email(subject, trade_details):
     try:

@@ -19,12 +19,7 @@ import csv
 import os
 from datetime import datetime
 
-# Learning log is written directly to the persistent data directory.  Older
-# paths are no longer used, so the compatibility symlink has been removed.
-TRADE_LEARNING_LOG_FILE = os.environ.get(
-    "TRADE_LEARNING_LOG_FILE", "/home/ubuntu/spot_data/trades/trade_logs.csv"
-).split("#", 1)[0].strip()
-TRADE_LOG_FILE = os.environ.get("TRADE_LOG_FILE", TRADE_LEARNING_LOG_FILE)
+from trade_storage import TRADE_LEARNING_LOG_FILE, TRADE_LOG_FILE
 
 __all__ = ["log_trade_result", "TRADE_LEARNING_LOG_FILE", "TRADE_LOG_FILE"]
 

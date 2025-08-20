@@ -100,6 +100,12 @@ ACTIVE_TRADES_FILE = os.environ.get(
 COMPLETED_TRADES_FILE = os.environ.get(
     "COMPLETED_TRADES_FILE", os.path.join(DATA_DIR, "completed_trades.csv")
 ).split("#", 1)[0].strip()
+REJECTED_TRADES_FILE = os.environ.get(
+    "REJECTED_TRADES_FILE", os.path.join(DATA_DIR, "rejected_trades.csv")
+).split("#", 1)[0].strip()
+TRADE_LEARNING_LOG_FILE = os.environ.get(
+    "TRADE_LEARNING_LOG_FILE", os.path.join(DATA_DIR, "trade_logs.csv")
+).split("#", 1)[0].strip()
 TRADE_LOG_FILE = os.environ.get("TRADE_LOG_FILE", COMPLETED_TRADES_FILE)
 
 
