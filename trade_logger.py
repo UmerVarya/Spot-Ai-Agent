@@ -20,6 +20,33 @@ import os
 from datetime import datetime
 
 
+def _ensure_symlink(target: str, link: str) -> None:
+    try:
+        if os.path.islink(link):
+            if os.readlink(link) != target:
+                os.remove(link)
+                os.symlink(target, link)
+            return
+        if os.path.exists(link):
+            return
+        os.symlink(target, link)
+    except OSError:
+        pass
+
+
+TRADE_LEARNING_LOG_FILE = os.environ.get(
+    "TRADE_LEARNING_LOG_FILE", "/home/ubuntu/spot_data/trades/trade_logs.csv"
+).split("#", 1)[0].strip()
+TRADE_LOG_FILE = os.environ.get("TRADE_LOG_FILE", TRADE_LEARNING_LOG_FILE)
+
+__all__ = ["log_trade_result", "TRADE_LEARNING_LOG_FILE", "TRADE_LOG_FILE"]
+
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ensure_symlink(
+    TRADE_LEARNING_LOG_FILE, os.path.join(_REPO_ROOT, "trade_learning_log.csv")
+)
+
+
 def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
     """
     Append the result of a completed trade to the learning log.
@@ -38,13 +65,7 @@ def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
         Additional keyword arguments are accepted for compatibility (e.g.,
         ``exit_price``) but are ignored by the logger.
     """
-    # Determine log file path: environment variable takes precedence,
-    # otherwise use the module directory.  Using ``os.path.abspath``
-    # ensures relative paths are resolved correctly.
-    log_file = os.environ.get(
-        "TRADE_LEARNING_LOG_FILE",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_learning_log.csv"),
-    )
+    log_file = TRADE_LEARNING_LOG_FILE
     fields = [
         "timestamp",
         "symbol",
@@ -84,9 +105,8 @@ def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
     }
 
     file_exists = os.path.isfile(log_file)
-    # Ensure parent directory exists
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
-    with open(log_file, mode="a", newline="") as f:
+    with open(log_file, mode="a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         if not file_exists:
             writer.writeheader()

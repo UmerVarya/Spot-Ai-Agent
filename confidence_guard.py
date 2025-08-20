@@ -11,11 +11,7 @@ brain/decision logic to calibrate how strict the bot should be.
 import pandas as pd
 import os
 
-import os
-
-# Path to the learning log CSV.  Use a fixed path relative to this module
-# so it is consistent regardless of the current working directory.
-LEARNING_LOG = os.path.join(os.path.dirname(__file__), "trade_learning_log.csv")
+from trade_logger import TRADE_LEARNING_LOG_FILE
 
 
 def get_adaptive_conf_threshold() -> float:
@@ -35,12 +31,14 @@ def get_adaptive_conf_threshold() -> float:
         history or the file is missing.  The result is clamped to a
         reasonable range (4.5 to 7.5).
     """
-    if not os.path.exists(LEARNING_LOG):
+    if not os.path.exists(TRADE_LEARNING_LOG_FILE):
         return 5.5  # Default if no data
 
     try:
         # Use python engine and skip bad lines to handle inconsistent log entries
-        df = pd.read_csv(LEARNING_LOG, engine="python", on_bad_lines="skip")
+        df = pd.read_csv(
+            TRADE_LEARNING_LOG_FILE, engine="python", on_bad_lines="skip", encoding="utf-8"
+        )
     except Exception:
         return 5.5
 

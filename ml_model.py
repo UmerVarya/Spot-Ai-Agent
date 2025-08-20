@@ -44,6 +44,7 @@ from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 import pandas as pd
 from log_utils import setup_logger
+from trade_logger import TRADE_LEARNING_LOG_FILE
 
 try:
     # Core sklearn components used for modelling and preprocessing
@@ -88,7 +89,6 @@ logger = setup_logger(__name__)
 # ---------------------------------------------------------------------------
 
 ROOT_DIR = os.path.dirname(__file__)
-LOG_FILE = os.path.join(ROOT_DIR, "trade_learning_log.csv")
 MODEL_JSON = os.path.join(ROOT_DIR, "ml_model.json")
 MODEL_PKL = os.path.join(ROOT_DIR, "ml_model.pkl")
 
@@ -182,11 +182,13 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
     ``ml_model.json``.
     """
     # Ensure there is sufficient data
-    if not os.path.exists(LOG_FILE):
+    if not os.path.exists(TRADE_LEARNING_LOG_FILE):
         logger.warning("No trade learning log found. Cannot train ML model.")
         return
     try:
-        df = pd.read_csv(LOG_FILE, engine="python", on_bad_lines="skip")
+        df = pd.read_csv(
+            TRADE_LEARNING_LOG_FILE, engine="python", on_bad_lines="skip", encoding="utf-8"
+        )
     except Exception as e:
         logger.warning("Failed to read learning log: %s", e, exc_info=True)
         return

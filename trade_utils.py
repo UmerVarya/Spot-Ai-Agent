@@ -421,7 +421,7 @@ def compute_performance_metrics(log_file: str = TRADE_LOG_FILE, lookback: int = 
             "timestamp", "symbol", "direction", "entry", "exit", "outcome",
             "btc_d", "fg", "sent_conf", "sent_bias", "score",
         ]
-        df = pd.read_csv(log_file, names=cols)
+        df = pd.read_csv(log_file, names=cols, encoding="utf-8")
         df = df.tail(lookback)
         df["entry"] = pd.to_numeric(df["entry"], errors="coerce")
         df["exit"] = pd.to_numeric(df["exit"], errors="coerce")
@@ -454,7 +454,7 @@ def get_last_trade_outcome(log_file: str = TRADE_LOG_FILE) -> str | None:
         df = pd.read_csv(log_file, names=[
             "timestamp", "symbol", "direction", "entry", "exit", "outcome",
             "btc_d", "fg", "sent_conf", "sent_bias", "score",
-        ])
+        ], encoding="utf-8")
         if df.empty:
             return None
         last = df.tail(1)

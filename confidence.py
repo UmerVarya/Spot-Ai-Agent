@@ -12,11 +12,7 @@ recent trades show better performance.
 import pandas as pd
 import os
 
-import os
-
-# Path to the learning log CSV.  Use a fixed path relative to this module
-# so it is consistent regardless of the current working directory.
-LOG_FILE = os.path.join(os.path.dirname(__file__), "trade_learning_log.csv")
+from trade_logger import TRADE_LEARNING_LOG_FILE
 
 
 def calculate_historical_confidence(symbol, score, direction, session="Unknown", pattern_name=None):
@@ -42,11 +38,13 @@ def calculate_historical_confidence(symbol, score, direction, session="Unknown",
         A dictionary with keys ``confidence`` (0–100) and ``reasoning``.
     """
     try:
-        if not os.path.exists(LOG_FILE):
+        if not os.path.exists(TRADE_LEARNING_LOG_FILE):
             return {"confidence": 50, "reasoning": "No historical data yet."}
 
         # Use python engine and skip bad lines to handle inconsistent logs
-        df = pd.read_csv(LOG_FILE, engine="python", on_bad_lines="skip")
+        df = pd.read_csv(
+            TRADE_LEARNING_LOG_FILE, engine="python", on_bad_lines="skip", encoding="utf-8"
+        )
 
         if df.empty or 'score' not in df.columns or 'direction' not in df.columns or 'outcome' not in df.columns:
             return {"confidence": 50, "reasoning": "Incomplete or invalid learning log."}

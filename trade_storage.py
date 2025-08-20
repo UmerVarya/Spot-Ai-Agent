@@ -69,12 +69,12 @@ if DATABASE_URL:
 # Storage locations
 # ---------------------------------------------------------------------------
 
-# ``DATA_DIR`` can point to a mounted volume (e.g. /var/data on Render) to
-# ensure logs persist across restarts.  By default we use a hidden directory
-# in the user's home folder.  Strip any inline comments (e.g. "path # comment")
-# and fall back to the default location if the supplied directory is not
-# writable.
-DEFAULT_DATA_DIR = os.path.join(os.path.expanduser("~"), ".spot_ai_agent")
+# ``DATA_DIR`` now defaults to the shared spot data directory so that trades
+# are written directly to persistent storage instead of a symlink inside the
+# repository.  This avoids ``ReadWritePaths`` restrictions in systemd and
+# ensures historical data survives service restarts.  The environment variable
+# is still honoured for flexibility.
+DEFAULT_DATA_DIR = "/home/ubuntu/spot_data/trades"
 raw_data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
 # Remove inline comments and surrounding whitespace
 raw_data_dir = raw_data_dir.split("#", 1)[0].strip() or DEFAULT_DATA_DIR
@@ -91,12 +91,38 @@ except OSError:
 # format. ``TRADE_LOG_FILE`` stores completed trades in CSV format.  Expose
 # these constants so other modules (e.g. ``trade_manager`` and ``dashboard``)
 # can import them, ensuring all components read and write the exact same files.
+# Canonical file locations within the data directory.  ``completed_trades.csv``
+# replaces the legacy ``trade_log.csv`` name; ``TRADE_LOG_FILE`` is kept as an
+# alias for backward compatibility.
 ACTIVE_TRADES_FILE = os.environ.get(
     "ACTIVE_TRADES_FILE", os.path.join(DATA_DIR, "active_trades.json")
 ).split("#", 1)[0].strip()
-TRADE_LOG_FILE = os.environ.get(
-    "TRADE_LOG_FILE", os.path.join(DATA_DIR, "trade_log.csv")
+COMPLETED_TRADES_FILE = os.environ.get(
+    "COMPLETED_TRADES_FILE", os.path.join(DATA_DIR, "completed_trades.csv")
 ).split("#", 1)[0].strip()
+TRADE_LOG_FILE = os.environ.get("TRADE_LOG_FILE", COMPLETED_TRADES_FILE)
+
+
+def _ensure_symlink(target: str, link: str) -> None:
+    """Create a compatibility symlink if one does not already exist."""
+    try:
+        if os.path.islink(link):
+            if os.readlink(link) != target:
+                os.remove(link)
+                os.symlink(target, link)
+            return
+        if os.path.exists(link):
+            return
+        os.symlink(target, link)
+    except OSError:
+        pass
+
+
+# Symlinks in the repository root allow read-only access for legacy code
+# that still expects files beside the source tree.
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ensure_symlink(ACTIVE_TRADES_FILE, os.path.join(_REPO_ROOT, "active_trades.json"))
+_ensure_symlink(COMPLETED_TRADES_FILE, os.path.join(_REPO_ROOT, "completed_trades.csv"))
 
 
 def load_active_trades() -> list:
@@ -308,7 +334,7 @@ def load_trade_history_df() -> pd.DataFrame:
     else:
         if os.path.exists(TRADE_LOG_FILE):
             try:
-                df = pd.read_csv(TRADE_LOG_FILE)
+                df = pd.read_csv(TRADE_LOG_FILE, encoding="utf-8")
             except Exception as exc:
                 logger.exception("Failed to read trade log file: %s", exc)
     # Filter out rows with outcome recorded as "open"
