@@ -26,7 +26,12 @@ REJECTED_TRADES_FILE = os.environ.get(
 
 def _ensure_symlink(target: str, link: str) -> None:
     try:
-        if os.path.islink(link) or os.path.exists(link):
+        if os.path.islink(link):
+            if os.readlink(link) != target:
+                os.remove(link)
+                os.symlink(target, link)
+            return
+        if os.path.exists(link):
             return
         os.symlink(target, link)
     except OSError:

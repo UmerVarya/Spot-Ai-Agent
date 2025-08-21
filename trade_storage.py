@@ -106,7 +106,12 @@ TRADE_LOG_FILE = os.environ.get("TRADE_LOG_FILE", COMPLETED_TRADES_FILE)
 def _ensure_symlink(target: str, link: str) -> None:
     """Create a compatibility symlink if one does not already exist."""
     try:
-        if os.path.islink(link) or os.path.exists(link):
+        if os.path.islink(link):
+            if os.readlink(link) != target:
+                os.remove(link)
+                os.symlink(target, link)
+            return
+        if os.path.exists(link):
             return
         os.symlink(target, link)
     except OSError:
@@ -329,7 +334,7 @@ def load_trade_history_df() -> pd.DataFrame:
     else:
         if os.path.exists(TRADE_LOG_FILE):
             try:
-                df = pd.read_csv(TRADE_LOG_FILE)
+                df = pd.read_csv(TRADE_LOG_FILE, encoding="utf-8")
             except Exception as exc:
                 logger.exception("Failed to read trade log file: %s", exc)
     # Filter out rows with outcome recorded as "open"

@@ -25,6 +25,7 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime, timezone
+from log_utils import setup_logger, LOG_FILE
 
 # Optional Binance client for live prices
 try:
@@ -114,6 +115,15 @@ try:
 except Exception:
     client = None
 
+# Import shared paths after environment variables are loaded
+from trade_storage import (
+    load_active_trades,
+    COMPLETED_TRADES_FILE,
+    ACTIVE_TRADES_FILE,
+)
+from notifier import REJECTED_TRADES_FILE
+from trade_logger import TRADE_LEARNING_LOG_FILE
+
 # Determine how to interpret the trade "size" field.  When set to true,
 # each trade's ``size`` is assumed to represent notional in quote
 # currency (e.g., USDT).  When false, ``size`` represents the token
@@ -131,9 +141,17 @@ st.set_page_config(
     page_icon="",
     layout="wide",
 )
-st.title(" Spot AI Super Agent – Live Trade Dashboard")
+logger = setup_logger(__name__)
+logger.info(
+    "Paths: LOG_FILE=%s COMPLETED_TRADES=%s ACTIVE_TRADES=%s REJECTED_TRADES=%s LEARNING_LOG=%s",
+    LOG_FILE,
+    COMPLETED_TRADES_FILE,
+    ACTIVE_TRADES_FILE,
+    REJECTED_TRADES_FILE,
+    TRADE_LEARNING_LOG_FILE,
+)
 
-from trade_storage import load_active_trades, load_trade_history_df
+st.title(" Spot AI Super Agent – Live Trade Dashboard")
 
 
 def get_live_price(symbol: str) -> float:
@@ -292,7 +310,10 @@ def render_live_tab() -> None:
     else:
         st.info("No active trades found.")
     # Load trade history and compute summary statistics
-    hist_df = load_trade_history_df()
+    if os.path.exists(COMPLETED_TRADES_FILE):
+        hist_df = pd.read_csv(COMPLETED_TRADES_FILE, encoding="utf-8")
+    else:
+        hist_df = pd.DataFrame()
     st.subheader("📊 Historical Performance – Completed Trades")
     if not hist_df.empty:
         # Ensure date columns are parsed
@@ -550,7 +571,7 @@ def render_backtest_tab() -> None:
     st.subheader("Backtest Trade Log")
     uploaded = st.file_uploader("Upload trade log CSV", type="csv")
     if uploaded:
-        df = pd.read_csv(uploaded)
+        df = pd.read_csv(uploaded, encoding="utf-8")
         if "pnl" in df.columns and "equity" not in df.columns:
             df["equity"] = (1 + df["pnl"].astype(float)).cumprod()
         if "equity" in df.columns:

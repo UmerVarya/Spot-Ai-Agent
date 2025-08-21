@@ -13,7 +13,7 @@ computed ``allowed_new`` value was being treated as a correlation threshold,
 resulting in at most two signals being selected regardless of available slots.
 """
 
-from log_utils import setup_logger
+from log_utils import setup_logger, LOG_FILE
 
 logger = setup_logger(__name__)
 
@@ -37,9 +37,15 @@ from trade_utils import (
     compute_performance_metrics,
 )
 from trade_manager import manage_trades, create_new_trade  # trade logic
-from trade_storage import load_active_trades, save_active_trades  # persistent storage
-from notifier import send_email, log_rejection
-from trade_storage import log_trade_result  # import from trade_storage instead of trade_logger
+from trade_storage import (
+    load_active_trades,
+    save_active_trades,
+    ACTIVE_TRADES_FILE,
+    COMPLETED_TRADES_FILE,
+    log_trade_result,
+)
+from notifier import send_email, log_rejection, REJECTED_TRADES_FILE
+from trade_logger import TRADE_LEARNING_LOG_FILE
 from brain import should_trade
 from sentiment import get_macro_sentiment
 from btc_dominance import get_btc_dominance
@@ -71,6 +77,15 @@ SCAN_INTERVAL = 15
 NEWS_INTERVAL = 3600
 RUN_DASHBOARD = os.getenv("RUN_DASHBOARD", "0") == "1"
 rl_sizer = RLPositionSizer()
+
+logger.info(
+    "Paths: LOG_FILE=%s COMPLETED_TRADES=%s ACTIVE_TRADES=%s REJECTED_TRADES=%s LEARNING_LOG=%s",
+    LOG_FILE,
+    COMPLETED_TRADES_FILE,
+    ACTIVE_TRADES_FILE,
+    REJECTED_TRADES_FILE,
+    TRADE_LEARNING_LOG_FILE,
+)
 
 
 def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: float):

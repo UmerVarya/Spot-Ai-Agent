@@ -42,7 +42,7 @@ def get_recent_trade_summary(symbol: str, pattern: str, max_entries: int = 3) ->
     if not os.path.exists(LOG_FILE):
         return "No prior trades on record."
     try:
-        df = pd.read_csv(LOG_FILE, engine="python", on_bad_lines="skip")
+        df = pd.read_csv(LOG_FILE, engine="python", on_bad_lines="skip", encoding="utf-8")
     except Exception:
         return "(Unable to read trade log.)"
     # Filter by symbol and (optionally) pattern
