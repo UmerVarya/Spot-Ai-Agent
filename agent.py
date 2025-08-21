@@ -22,8 +22,9 @@ import os
 import sys
 import asyncio
 from datetime import datetime
-from dotenv import load_dotenv
-load_dotenv()
+
+# Centralized configuration loader
+import config
 import json
 import threading
 from fetch_news import fetch_news, run_news_fetcher  # noqa: F401
@@ -191,9 +192,14 @@ def run_agent_loop() -> None:
                 time.sleep(SCAN_INTERVAL)
                 continue
             # Macro signals
-            btc_d = get_btc_dominance()
-            fg = get_fear_greed_index()
-            sentiment = get_macro_sentiment()
+            try:
+                btc_d = get_btc_dominance()
+                fg = get_fear_greed_index()
+                sentiment = get_macro_sentiment()
+            except Exception as e:
+                logger.error("Macro data fetch error: %s", e, exc_info=True)
+                time.sleep(SCAN_INTERVAL)
+                continue
             # Extract sentiment bias and confidence safely
             try:
                 sentiment_confidence = float(sentiment.get("confidence", 5.0))
@@ -243,7 +249,11 @@ def run_agent_loop() -> None:
                 active_trades.append(t)
             save_active_trades(active_trades)
             # Get top symbols to scan
-            top_symbols = get_top_symbols(limit=30)
+            try:
+                top_symbols = get_top_symbols(limit=30)
+            except Exception as e:
+                logger.error("Error fetching top symbols: %s", e, exc_info=True)
+                top_symbols = []
             if not top_symbols:
                 logger.warning(
                     "No symbols fetched from Binance. Check your python-binance installation and network connectivity."
@@ -433,87 +443,99 @@ def run_agent_loop() -> None:
                 final_conf = round((final_conf + ml_prob * 10) / 2.0, 2)
                 # Proceed if we still have room for a new trade
                 if position_size > 0:
-                    entry_price = round(price_data['close'].iloc[-1], 6)
                     try:
-                        atr_val = indicators_df['atr'].iloc[-1] if 'atr' in indicators_df else None
-                    except Exception:
-                        atr_val = None
-                    equity = float(os.getenv("ACCOUNT_EQUITY", "10000"))
-                    risk_pct = float(os.getenv("RISK_PCT", "0.01"))
-                    risk_amt = equity * risk_pct
-                    if atr_val is not None and not np.isnan(atr_val) and atr_val > 0:
-                        base_size = risk_amt / (atr_val * 2.0)
-                    else:
-                        atr_val = entry_price * 0.02
-                        base_size = risk_amt / (entry_price * 0.02)
-                    state = get_last_trade_outcome() or "neutral"
-                    mult = rl_sizer.select_multiplier(state)
-                    position_size = round(max(base_size * mult, 0), 6)
-                    sl = round(entry_price - atr_val * 2.0, 6)
-                    tp1 = round(entry_price + atr_val * 2.0, 6)
-                    tp2 = round(entry_price + atr_val * 3.0, 6)
-                    tp3 = round(entry_price + atr_val * 4.0, 6)
-                    # Compose the new trade dictionary with extra metadata
-                    new_trade = {
-                        "symbol": symbol,
-                        "direction": "long",
-                        "entry": entry_price,
-                        "entry_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),  # record open time
-                        "sl": sl,
-                        "tp1": tp1,
-                        "tp2": tp2,
-                        "tp3": tp3,
-                        "position_size": position_size,
-                        "size": position_size,  # duplicate for dashboard convenience
-                        "leverage": 1,  # default leverage (spot)
-                        "confidence": final_conf,
-                        "score": score,
-                        "session": session,
-                        "btc_dominance": btc_d,
-                        "fear_greed": fg,
-                        "sentiment_bias": sentiment_bias,
-                        "sentiment_confidence": sentiment_confidence,
-                        "sentiment_summary": sentiment.get("summary", ""),
-                        "pattern": pattern_name,
-                        "strategy": pattern_name,  # tag strategy by pattern
-                        "narrative": narrative,
-                        "ml_prob": ml_prob,
-                        "status": {"tp1": False, "tp2": False, "tp3": False, "sl": False},
-                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "news_summary": decision_obj.get("news_summary", ""),
-                    }
-                    logger.info("Narrative:\n%s\n", narrative)
-                    logger.info(
-                        "Trade Opened %s @ %s | Size=%s | TP1 %s / TP2 %s / TP3 %s",
-                        symbol,
-                        entry_price,
-                        position_size,
-                        tp1,
-                        tp2,
-                        tp3,
-                    )
-                    # Add to active trades and persist
-                    active_trades.append(new_trade)
-                    create_new_trade(new_trade)
-                    # Do NOT log the open trade as a completed trade.  It will be logged upon exit by trade_manager.py.
-                    save_active_trades(active_trades)
-                    send_email(
-                        f"New Trade Opened: {symbol}",
-                        f"{new_trade}\n\n Narrative:\n{narrative}\n\nNews Summary:\n{decision_obj.get('news_summary', '')}",
-                    )
-                    opened_count += 1
+                        entry_price = round(price_data['close'].iloc[-1], 6)
+                        try:
+                            atr_val = indicators_df['atr'].iloc[-1] if 'atr' in indicators_df else None
+                        except Exception:
+                            atr_val = None
+                        equity = float(os.getenv("ACCOUNT_EQUITY", "10000"))
+                        risk_pct = float(os.getenv("RISK_PCT", "0.01"))
+                        risk_amt = equity * risk_pct
+                        if atr_val is not None and not np.isnan(atr_val) and atr_val > 0:
+                            base_size = risk_amt / (atr_val * 2.0)
+                        else:
+                            atr_val = entry_price * 0.02
+                            base_size = risk_amt / (entry_price * 0.02)
+                        state = get_last_trade_outcome() or "neutral"
+                        mult = rl_sizer.select_multiplier(state)
+                        position_size = round(max(base_size * mult, 0), 6)
+                        sl = round(entry_price - atr_val * 2.0, 6)
+                        tp1 = round(entry_price + atr_val * 2.0, 6)
+                        tp2 = round(entry_price + atr_val * 3.0, 6)
+                        tp3 = round(entry_price + atr_val * 4.0, 6)
+                        # Compose the new trade dictionary with extra metadata
+                        new_trade = {
+                            "symbol": symbol,
+                            "direction": "long",
+                            "entry": entry_price,
+                            "entry_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),  # record open time
+                            "sl": sl,
+                            "tp1": tp1,
+                            "tp2": tp2,
+                            "tp3": tp3,
+                            "position_size": position_size,
+                            "size": position_size,  # duplicate for dashboard convenience
+                            "leverage": 1,  # default leverage (spot)
+                            "confidence": final_conf,
+                            "score": score,
+                            "session": session,
+                            "btc_dominance": btc_d,
+                            "fear_greed": fg,
+                            "sentiment_bias": sentiment_bias,
+                            "sentiment_confidence": sentiment_confidence,
+                            "sentiment_summary": sentiment.get("summary", ""),
+                            "pattern": pattern_name,
+                            "strategy": pattern_name,  # tag strategy by pattern
+                            "narrative": narrative,
+                            "ml_prob": ml_prob,
+                            "status": {"tp1": False, "tp2": False, "tp3": False, "sl": False},
+                            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "news_summary": decision_obj.get("news_summary", ""),
+                        }
+                        logger.info("Narrative:\n%s\n", narrative)
+                        logger.info(
+                            "Trade Opened %s @ %s | Size=%s | TP1 %s / TP2 %s / TP3 %s",
+                            symbol,
+                            entry_price,
+                            position_size,
+                            tp1,
+                            tp2,
+                            tp3,
+                        )
+                        # Add to active trades and persist
+                        active_trades.append(new_trade)
+                        create_new_trade(new_trade)
+                        # Do NOT log the open trade as a completed trade.  It will be logged upon exit by trade_manager.py.
+                        save_active_trades(active_trades)
+                        send_email(
+                            f"New Trade Opened: {symbol}",
+                            f"{new_trade}\n\n Narrative:\n{narrative}\n\nNews Summary:\n{decision_obj.get('news_summary', '')}",
+                        )
+                        opened_count += 1
+                    except Exception as e:
+                        logger.error("Error opening trade for %s: %s", symbol, e, exc_info=True)
             # Manage existing trades after opening new ones
-            manage_trades()
+            try:
+                manage_trades()
+            except Exception as e:
+                logger.error("Error managing trades: %s", e, exc_info=True)
             # Persist symbol scores to disk
             try:
                 with open("symbol_scores.json", "r") as f:
                     old_data = json.load(f)
             except FileNotFoundError:
                 old_data = {}
-            old_data.update(symbol_scores)
-            with open("symbol_scores.json", "w") as f:
-                json.dump(old_data, f, indent=4)
-            logger.info("Saved symbol scores (persistent memory updated).")
+            except Exception as e:
+                logger.error("Error reading symbol_scores.json: %s", e, exc_info=True)
+                old_data = {}
+            try:
+                old_data.update(symbol_scores)
+                with open("symbol_scores.json", "w") as f:
+                    json.dump(old_data, f, indent=4)
+                logger.info("Saved symbol scores (persistent memory updated).")
+            except Exception as e:
+                logger.error("Error saving symbol scores: %s", e, exc_info=True)
             time.sleep(SCAN_INTERVAL)
         except Exception as e:
             logger.error("Main Loop Error: %s", e, exc_info=True)

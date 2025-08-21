@@ -1,15 +1,10 @@
 import os
 from news_scraper import get_combined_headlines
 from groq import Groq
-from dotenv import load_dotenv
-import os
 from log_utils import setup_logger
 
-load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-
-# === Load Groq API Key from Environment ===
+# Centralised configuration loader
+import config
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
