@@ -519,6 +519,8 @@ def run_agent_loop() -> None:
                             "tp3": tp3,
                             "position_size": position_size,
                             "size": position_size,  # duplicate for dashboard convenience
+                            "rl_state": state,
+                            "rl_multiplier": mult,
                             "leverage": 1,  # default leverage (spot)
                             "confidence": final_conf,
                             "score": score,

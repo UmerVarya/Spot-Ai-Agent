@@ -26,7 +26,7 @@ Usage::
     position_size = base_size * multiplier
     ...
     # after trade exits
-    rl_sizer.update(state, reward)  # reward = trade profit in percent
+    rl_sizer.update(state, multiplier, reward)  # reward = trade profit in percent
 
 The learned Q‑table is stored in ``rl_policy.json`` in the module
 directory, ensuring persistence across sessions.
@@ -98,24 +98,23 @@ class RLPositionSizer:
         action_values = self.q_table[state]
         return max(action_values, key=action_values.get)
 
-    def update(self, state: str, reward: float) -> None:
-        """
-        Update the Q‑table after observing the reward from the last action.
+    def update(self, state: str, action: float, reward: float) -> None:
+        """Update the Q‑table for the action actually taken.
 
         Parameters
         ----------
         state : str
-            The state used when selecting the multiplier (e.g. 'win', 'loss', 'neutral').
+            The state used when the multiplier was chosen.
+        action : float
+            The position size multiplier applied to the trade.
         reward : float
-            The realised reward (e.g. PnL percentage) from the trade.
+            The realised reward (e.g. PnL percentage).
         """
         self._init_state(state)
-        action = self.select_multiplier(state)
-        # Compute Q‑update: Q(s,a) <- Q(s,a) + alpha * (r + gamma * max_a' Q(s', a') - Q(s,a))
+        if action not in self.q_table[state]:
+            self.q_table[state][action] = 0.0
         current_q = self.q_table[state][action]
-        # In this simple setting we treat next state as the same as current (no transitions)
         next_max = max(self.q_table[state].values())
         updated_q = current_q + self.alpha * (reward + self.gamma * next_max - current_q)
         self.q_table[state][action] = updated_q
-        # Persist policy
         self._save_policy()
