@@ -154,6 +154,14 @@ logger.info(
 st.title(" Spot AI Super Agent – Live Trade Dashboard")
 
 
+def load_completed_df(path: str) -> pd.DataFrame:
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return pd.DataFrame(
+            columns=["timestamp", "symbol", "side", "qty", "price", "pnl"]
+        )
+    return pd.read_csv(path, encoding="utf-8")
+
+
 def get_live_price(symbol: str) -> float:
     """Fetch the current price for a symbol from Binance.  Returns None on failure."""
     try:
@@ -310,10 +318,7 @@ def render_live_tab() -> None:
     else:
         st.info("No active trades found.")
     # Load trade history and compute summary statistics
-    if os.path.exists(COMPLETED_TRADES_FILE):
-        hist_df = pd.read_csv(COMPLETED_TRADES_FILE, encoding="utf-8")
-    else:
-        hist_df = pd.DataFrame()
+    hist_df = load_completed_df(COMPLETED_TRADES_FILE)
     st.subheader("📊 Historical Performance – Completed Trades")
     if not hist_df.empty:
         # Ensure date columns are parsed

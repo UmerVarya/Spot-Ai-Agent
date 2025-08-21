@@ -17,6 +17,7 @@ ensures consistent file locations across different processes.
 
 import csv
 import os
+import logging
 from datetime import datetime
 
 
@@ -36,8 +37,10 @@ def _ensure_symlink(target: str, link: str) -> None:
         if os.path.exists(link):
             return
         os.symlink(target, link)
-    except OSError:
-        pass
+    except OSError as exc:
+        logging.getLogger(__name__).debug(
+            "Failed to create symlink %s -> %s: %s", link, target, exc
+        )
 
 
 def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:

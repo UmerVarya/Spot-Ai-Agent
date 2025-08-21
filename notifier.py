@@ -34,8 +34,8 @@ def _ensure_symlink(target: str, link: str) -> None:
         if os.path.exists(link):
             return
         os.symlink(target, link)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.debug("Failed to create symlink %s -> %s: %s", link, target, exc)
 
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -43,28 +43,33 @@ _ensure_symlink(REJECTED_TRADES_FILE, os.path.join(_REPO_ROOT, "rejected_trades.
 
 def send_email(subject, trade_details):
     try:
+        if isinstance(trade_details, str) or trade_details is None:
+            details = {"message": trade_details or ""}
+        else:
+            details = dict(trade_details)
+
         msg = MIMEMultipart()
         msg['From'] = EMAIL_ADDRESS
         msg['To'] = EMAIL_RECEIVER
         msg['Subject'] = subject
 
-        # ✅ Get reasoning explanation from trade details (provided by LLM earlier)
-        reasoning = trade_details.get("reasoning", "No reasoning provided.")
+        reasoning = details.get("reasoning", "No reasoning provided.")
 
         body = f"""
         <h2>🧠 New Trade Triggered</h2>
-        <p><strong>Symbol:</strong> {trade_details.get('symbol')}</p>
-        <p><strong>Direction:</strong> {trade_details.get('direction')}</p>
-        <p><strong>Score:</strong> {trade_details.get('confidence')}</p>
-        <p><strong>Position Size:</strong> ${trade_details.get('position_size')}</p>
-        <p><strong>Entry:</strong> {trade_details.get('entry')}</p>
-        <p><strong>SL:</strong> {trade_details.get('sl')}</p>
-        <p><strong>TP1:</strong> {trade_details.get('tp1')}</p>
-        <p><strong>TP2:</strong> {trade_details.get('tp2')}</p>
-        <p><strong>TP3:</strong> {trade_details.get('tp3')}</p>
+        <p><strong>Symbol:</strong> {details.get('symbol')}</p>
+        <p><strong>Direction:</strong> {details.get('direction')}</p>
+        <p><strong>Score:</strong> {details.get('confidence')}</p>
+        <p><strong>Position Size:</strong> ${details.get('position_size')}</p>
+        <p><strong>Entry:</strong> {details.get('entry')}</p>
+        <p><strong>SL:</strong> {details.get('sl')}</p>
+        <p><strong>TP1:</strong> {details.get('tp1')}</p>
+        <p><strong>TP2:</strong> {details.get('tp2')}</p>
+        <p><strong>TP3:</strong> {details.get('tp3')}</p>
         <hr>
         <h3>🤖 LLM Reasoning:</h3>
         <p>{reasoning}</p>
+        <p>{details.get('message', '')}</p>
         """
 
         msg.attach(MIMEText(body, "html"))

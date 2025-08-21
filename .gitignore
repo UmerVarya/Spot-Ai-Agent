@@ -4,6 +4,7 @@
 /rejected_trades.csv
 /trade_learning_log.csv
 /trade_logs.csv
+.env
 
 symbol_scores.json
 __pycache__/

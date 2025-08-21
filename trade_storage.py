@@ -114,8 +114,8 @@ def _ensure_symlink(target: str, link: str) -> None:
         if os.path.exists(link):
             return
         os.symlink(target, link)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.debug("Failed to create symlink %s -> %s: %s", link, target, exc)
 
 
 # Symlinks in the repository root allow read-only access for legacy code
@@ -332,11 +332,24 @@ def load_trade_history_df() -> pd.DataFrame:
         except Exception as exc:
             logger.exception("Failed to load trade history from database: %s", exc)
     else:
-        if os.path.exists(TRADE_LOG_FILE):
+        if os.path.exists(TRADE_LOG_FILE) and os.path.getsize(TRADE_LOG_FILE) > 0:
             try:
                 df = pd.read_csv(TRADE_LOG_FILE, encoding="utf-8")
             except Exception as exc:
                 logger.exception("Failed to read trade log file: %s", exc)
+        else:
+            df = pd.DataFrame(
+                columns=[
+                    "timestamp",
+                    "symbol",
+                    "entry",
+                    "exit",
+                    "size",
+                    "direction",
+                    "outcome",
+                    "pnl",
+                ]
+            )
     # Filter out rows with outcome recorded as "open"
     if not df.empty and "outcome" in df.columns:
         df = df[df["outcome"].astype(str).str.lower() != "open"]
