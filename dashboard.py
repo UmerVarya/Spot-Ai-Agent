@@ -27,6 +27,9 @@ import os
 from datetime import datetime, timezone
 from log_utils import setup_logger, LOG_FILE
 
+# Ensure environment variables are loaded once
+import config
+
 # Optional Binance client for live prices
 try:
     from binance.client import Client  # type: ignore
@@ -36,13 +39,6 @@ except Exception:
             raise ImportError(
                 "python-binance library not installed; cannot fetch live prices."
             )
-
-# Optional dotenv support
-try:
-    from dotenv import load_dotenv  # type: ignore
-except Exception:
-    def load_dotenv(*args, **kwargs):  # type: ignore
-        return None
 
 from streamlit_autorefresh import st_autorefresh
 
@@ -106,8 +102,7 @@ except Exception:
             return float("nan")
         return float(tail.mean())
 
-# Load environment variables early so API keys are available
-load_dotenv()
+# Load API keys from environment
 api_key = os.getenv("BINANCE_API_KEY")
 api_secret = os.getenv("BINANCE_API_SECRET")
 try:
