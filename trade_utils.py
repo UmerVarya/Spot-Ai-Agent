@@ -421,7 +421,7 @@ def compute_performance_metrics(log_file: str = TRADE_LOG_FILE, lookback: int = 
             "timestamp", "symbol", "direction", "entry", "exit", "outcome",
             "btc_d", "fg", "sent_conf", "sent_bias", "score",
         ]
-        df = pd.read_csv(log_file, names=cols)
+        df = pd.read_csv(log_file, names=cols, encoding="utf-8")
         df = df.tail(lookback)
         df["entry"] = pd.to_numeric(df["entry"], errors="coerce")
         df["exit"] = pd.to_numeric(df["exit"], errors="coerce")
@@ -454,7 +454,7 @@ def get_last_trade_outcome(log_file: str = TRADE_LOG_FILE) -> str | None:
         df = pd.read_csv(log_file, names=[
             "timestamp", "symbol", "direction", "entry", "exit", "outcome",
             "btc_d", "fg", "sent_conf", "sent_bias", "score",
-        ])
+        ], encoding="utf-8")
         if df.empty:
             return None
         last = df.tail(1)
@@ -493,9 +493,9 @@ def log_signal(symbol: str, session: str, score: float, direction: Optional[str]
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     if os.path.exists(log_path):
-        df_entry.to_csv(log_path, mode='a', header=False, index=False)
+        df_entry.to_csv(log_path, mode='a', header=False, index=False, encoding="utf-8")
     else:
-        df_entry.to_csv(log_path, index=False)
+        df_entry.to_csv(log_path, index=False, encoding="utf-8")
 
 def get_position_size(confidence: float) -> int:
     """Return an integer position size based on the model confidence."""

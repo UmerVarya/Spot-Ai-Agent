@@ -40,7 +40,7 @@ def get_adaptive_conf_threshold() -> float:
 
     try:
         # Use python engine and skip bad lines to handle inconsistent log entries
-        df = pd.read_csv(LEARNING_LOG, engine="python", on_bad_lines="skip")
+        df = pd.read_csv(LEARNING_LOG, engine="python", on_bad_lines="skip", encoding="utf-8")
     except Exception:
         return 5.5
 

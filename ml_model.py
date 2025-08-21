@@ -186,7 +186,7 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
         logger.warning("No trade learning log found. Cannot train ML model.")
         return
     try:
-        df = pd.read_csv(LOG_FILE, engine="python", on_bad_lines="skip")
+        df = pd.read_csv(LOG_FILE, engine="python", on_bad_lines="skip", encoding="utf-8")
     except Exception as e:
         logger.warning("Failed to read learning log: %s", e, exc_info=True)
         return

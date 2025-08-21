@@ -46,7 +46,7 @@ def calculate_historical_confidence(symbol, score, direction, session="Unknown",
             return {"confidence": 50, "reasoning": "No historical data yet."}
 
         # Use python engine and skip bad lines to handle inconsistent logs
-        df = pd.read_csv(LOG_FILE, engine="python", on_bad_lines="skip")
+        df = pd.read_csv(LOG_FILE, engine="python", on_bad_lines="skip", encoding="utf-8")
 
         if df.empty or 'score' not in df.columns or 'direction' not in df.columns or 'outcome' not in df.columns:
             return {"confidence": 50, "reasoning": "Incomplete or invalid learning log."}
