@@ -8,7 +8,12 @@ import os
 LOG_FILE = "/home/ubuntu/spot_data/logs/spot_ai.log"
 
 
-def _ensure_symlink(target: str, link: str) -> None:
+def ensure_symlink(target: str, link: str) -> None:
+    """Create a symlink pointing ``link`` to ``target`` if possible.
+
+    Any failures are logged as warnings so they are visible in production
+    environments without requiring debug logging.
+    """
     try:
         if os.path.islink(link):
             if os.readlink(link) != target:
@@ -19,13 +24,13 @@ def _ensure_symlink(target: str, link: str) -> None:
             return
         os.symlink(target, link)
     except OSError as exc:
-        logging.getLogger(__name__).debug(
+        logging.getLogger(__name__).warning(
             "Failed to create symlink %s -> %s: %s", link, target, exc
         )
 
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-_ensure_symlink(LOG_FILE, os.path.join(_REPO_ROOT, "spot_ai.log"))
+ensure_symlink(LOG_FILE, os.path.join(_REPO_ROOT, "spot_ai.log"))
 
 
 def setup_logger(name: str) -> logging.Logger:

@@ -25,6 +25,7 @@ import csv
 import logging
 from datetime import datetime
 from typing import Optional
+from log_utils import ensure_symlink
 
 import pandas as pd
 
@@ -103,26 +104,11 @@ COMPLETED_TRADES_FILE = os.environ.get(
 TRADE_LOG_FILE = os.environ.get("TRADE_LOG_FILE", COMPLETED_TRADES_FILE)
 
 
-def _ensure_symlink(target: str, link: str) -> None:
-    """Create a compatibility symlink if one does not already exist."""
-    try:
-        if os.path.islink(link):
-            if os.readlink(link) != target:
-                os.remove(link)
-                os.symlink(target, link)
-            return
-        if os.path.exists(link):
-            return
-        os.symlink(target, link)
-    except OSError as exc:
-        logger.debug("Failed to create symlink %s -> %s: %s", link, target, exc)
-
-
 # Symlinks in the repository root allow read-only access for legacy code
 # that still expects files beside the source tree.
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-_ensure_symlink(ACTIVE_TRADES_FILE, os.path.join(_REPO_ROOT, "active_trades.json"))
-_ensure_symlink(COMPLETED_TRADES_FILE, os.path.join(_REPO_ROOT, "completed_trades.csv"))
+ensure_symlink(ACTIVE_TRADES_FILE, os.path.join(_REPO_ROOT, "active_trades.json"))
+ensure_symlink(COMPLETED_TRADES_FILE, os.path.join(_REPO_ROOT, "completed_trades.csv"))
 
 
 def load_active_trades() -> list:
