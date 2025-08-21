@@ -13,8 +13,32 @@ pip install -r requirements.txt
 Set the following environment variables as needed:
 
 - `BINANCE_API_KEY` / `BINANCE_API_SECRET`
-- `DATA_DIR` – directory for persistent trade logs
+- `DATA_DIR` – optional override for trade storage. Defaults to
+  `/home/ubuntu/spot_data/trades`.
 - `RUN_DASHBOARD` – set to `1` to launch the Streamlit dashboard from the agent
+
+### Persistent data
+
+All runtime data is written to real directories under
+`/home/ubuntu/spot_data` so nothing relies on writable symlinks.  The key
+files are:
+
+```
+/home/ubuntu/spot_data/logs/spot_ai.log          # agent log output
+/home/ubuntu/spot_data/trades/active_trades.json # open positions
+/home/ubuntu/spot_data/trades/completed_trades.csv
+/home/ubuntu/spot_data/trades/rejected_trades.csv
+/home/ubuntu/spot_data/trades/trade_logs.csv
+```
+
+Symlinks back into the repository are created only for read-only
+compatibility with existing tools, but all writes happen directly in the
+`spot_data` tree.
+
+Systemd unit files for the agent and dashboard are provided in the
+`systemd/` directory.  Both services explicitly grant write access to
+`/home/ubuntu/spot_data` via `ReadWritePaths` so historical trade data
+persists across restarts.
 
 ## Running
 

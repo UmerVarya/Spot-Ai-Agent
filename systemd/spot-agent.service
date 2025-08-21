@@ -1,0 +1,15 @@
+[Unit]
+Description=Spot AI trading agent
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Spot-Ai-Agent
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/ubuntu/Spot-Ai-Agent/agent.py
+Restart=on-failure
+ReadWritePaths=/home/ubuntu/spot_data /home/ubuntu/spot_data/logs /home/ubuntu/spot_data/trades
+
+[Install]
+WantedBy=multi-user.target
