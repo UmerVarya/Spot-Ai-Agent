@@ -59,6 +59,7 @@ from drawdown_guard import is_trading_blocked
 import numpy as np
 from rl_policy import RLPositionSizer
 from trade_utils import get_last_trade_outcome
+from volatility_regime import atr_percentile
 
 
 def handle_exception(exc_type, exc_value, exc_traceback):
@@ -138,6 +139,31 @@ def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: floa
             reasons.append("bearish sentiment")
 
     return skip_all, skip_alt, reasons
+
+
+def dynamic_max_active_trades(fear_greed: int, bias: str, volatility: float | None) -> int:
+    """Determine allowable concurrent trades based on macro conditions.
+
+    The baseline is ``MAX_ACTIVE_TRADES``.  During fearful or bearish
+    environments, the cap is reduced to 1.  When conditions are both
+    bullish and confident, one extra slot is granted.  Volatility acts as
+    a secondary modifier: very high volatility removes a slot while very
+    low volatility can add one, within bounds.
+    """
+
+    max_trades = MAX_ACTIVE_TRADES
+    if fear_greed < 25 or bias == "bearish":
+        max_trades = 1
+    elif fear_greed > 70 and bias == "bullish":
+        max_trades = MAX_ACTIVE_TRADES + 1
+
+    if volatility is not None and not np.isnan(volatility):
+        if volatility > 0.75:
+            max_trades = max(1, max_trades - 1)
+        elif volatility < 0.25:
+            max_trades = min(max_trades + 1, MAX_ACTIVE_TRADES + 1)
+
+    return max_trades
 
 
 def auto_run_news() -> None:
@@ -230,6 +256,23 @@ def run_agent_loop() -> None:
                 logger.warning("Market unfavorable (%s). Skipping scan.", reason_text)
                 time.sleep(SCAN_INTERVAL)
                 continue
+            btc_vol = float("nan")
+            try:
+                btc_df = asyncio.run(get_price_data_async("BTCUSDT"))
+                if btc_df is not None:
+                    btc_vol = atr_percentile(
+                        btc_df["high"], btc_df["low"], btc_df["close"]
+                    )
+            except Exception as e:
+                logger.warning("Could not compute BTC volatility: %s", e)
+            max_active_trades = dynamic_max_active_trades(
+                fg, sentiment_bias, btc_vol
+            )
+            logger.info(
+                "Max active trades dynamically set to %d (BTC vol=%.2f)",
+                max_active_trades,
+                btc_vol,
+            )
             # If we are only skipping altcoins, filter top_symbols down to BTCUSDT
             if skip_alt:
                 # We will filter top_symbols later after fetching them
@@ -355,7 +398,7 @@ def run_agent_loop() -> None:
                     continue
             # Sort by score and select diversified signals
             potential_trades.sort(key=lambda x: x['score'], reverse=True)
-            allowed_new = MAX_ACTIVE_TRADES - len(active_trades)
+            allowed_new = max_active_trades - len(active_trades)
             opened_count = 0
             # Pass allowed_new as max_trades to avoid misassigning correlation threshold
             selected = select_diversified_signals(potential_trades, max_trades=allowed_new)
