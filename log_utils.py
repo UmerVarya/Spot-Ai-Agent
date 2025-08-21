@@ -2,29 +2,10 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 
-# Write logs directly to the canonical data path.  Historically a symlink
-# was created in the repository root for compatibility, but the service now
-# references this absolute path so no symlink is required.
+# Canonical location for persistent log storage.  Services write directly to
+# this path, which lives under ``/home/ubuntu/spot_data`` and is writable by the
+# ``ubuntu`` user.  No repository-root symlinks are created automatically.
 LOG_FILE = "/home/ubuntu/spot_data/logs/spot_ai.log"
-
-
-def _ensure_symlink(target: str, link: str) -> None:
-    """Create a compatibility symlink without clobbering real files."""
-    try:
-        if os.path.islink(link):
-            if os.readlink(link) != target:
-                os.remove(link)
-                os.symlink(target, link)
-            return
-        if os.path.exists(link):
-            return
-        os.symlink(target, link)
-    except OSError:
-        pass
-
-
-_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-_ensure_symlink(LOG_FILE, os.path.join(_REPO_ROOT, "spot_ai.log"))
 
 
 def setup_logger(name: str) -> logging.Logger:

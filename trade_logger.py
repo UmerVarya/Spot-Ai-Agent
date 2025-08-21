@@ -24,21 +24,6 @@ from trade_storage import TRADE_LEARNING_LOG_FILE, TRADE_LOG_FILE
 __all__ = ["log_trade_result", "TRADE_LEARNING_LOG_FILE", "TRADE_LOG_FILE"]
 
 
-def _ensure_symlink(target: str, link: str) -> None:
-    """Create a compatibility symlink without clobbering real files."""
-    try:
-        if os.path.islink(link):
-            if os.readlink(link) != target:
-                os.remove(link)
-                os.symlink(target, link)
-            return
-        if os.path.exists(link):
-            return
-        os.symlink(target, link)
-    except OSError:
-        pass
-
-
 def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
     """
     Append the result of a completed trade to the learning log.
@@ -58,14 +43,6 @@ def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
         ``exit_price``) but are ignored by the logger.
     """
     log_file = TRADE_LEARNING_LOG_FILE
-    _ensure_symlink(
-        log_file,
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_learning_log.csv"),
-    )
-    _ensure_symlink(
-        log_file,
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_logs.csv"),
-    )
     fields = [
         "timestamp",
         "symbol",
