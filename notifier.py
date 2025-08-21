@@ -20,6 +20,7 @@ __all__ = ["send_email", "log_rejection", "REJECTED_TRADES_FILE"]
 
 logger = setup_logger(__name__)
 
+
 def send_email(subject, trade_details):
     try:
         msg = MIMEMultipart()
@@ -61,15 +62,7 @@ def send_email(subject, trade_details):
 
 
 def log_rejection(symbol: str, reason: str) -> None:
-    """Append a rejected trade and reason to ``rejected_trades.csv``.
-
-    Parameters
-    ----------
-    symbol : str
-        The trading symbol that was rejected.
-    reason : str
-        Explanation for why the trade was rejected.
-    """
+    """Append a rejected trade and reason to ``rejected_trades.csv``."""
 
     log_file = REJECTED_TRADES_FILE
     headers = ["timestamp", "symbol", "reason"]
