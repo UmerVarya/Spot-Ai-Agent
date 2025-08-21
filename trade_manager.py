@@ -36,19 +36,24 @@ from rl_policy import RLPositionSizer
 
 # Exit thresholds
 EARLY_EXIT_THRESHOLD = 0.015  # 1.5% move against entry
-MACRO_CONFIDENCE_EXIT_THRESHOLD = 4
+# Require fairly high confidence before exiting on bearish macro signals
+MACRO_CONFIDENCE_EXIT_THRESHOLD = 7
 
 logger = setup_logger(__name__)
 rl_sizer = RLPositionSizer()
 
-def _update_rl(entry: float, exit_price: float) -> None:
+def _update_rl(trade: dict, exit_price: float) -> None:
     """Update RL position sizer based on trade outcome."""
     try:
+        entry = trade.get('entry')
+        state = trade.get('rl_state', 'neutral')
+        action = trade.get('rl_multiplier')
+        if entry is None or action is None:
+            return
         reward = (exit_price - entry) / entry
         if reward < -0.25:
             reward -= 1.0
-        state = "win" if reward > 0 else "loss"
-        rl_sizer.update(state, reward)
+        rl_sizer.update(state, action, reward)
     except Exception:
         pass
 
@@ -81,7 +86,7 @@ def should_exit_early(trade: dict, current_price: float, price_data) -> Tuple[bo
         return True, f"MACD histogram reversed: {macd_hist:.4f}"
     # 3. Macro shift
     macro = analyze_macro_sentiment()
-    if macro.get('bias') == "bearish" and macro.get('confidence', 0) < MACRO_CONFIDENCE_EXIT_THRESHOLD:
+    if macro.get('bias') == "bearish" and macro.get('confidence', 0) >= MACRO_CONFIDENCE_EXIT_THRESHOLD:
         return True, f"Macro sentiment shifted to bearish (Confidence: {macro.get('confidence')})"
     return False, None
 
@@ -126,7 +131,7 @@ def manage_trades() -> None:
                 fees=fees,
                 slippage=slippage,
             )
-            _update_rl(entry, current_price)
+            _update_rl(trade, current_price)
             send_email(f" Early Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
             continue
         # Compute updated indicators for trailing stops and TP
@@ -176,7 +181,7 @@ def manage_trades() -> None:
                     fees=fees,
                     slippage=slippage_amt,
                 )
-                _update_rl(entry, sl)
+                _update_rl(trade, sl)
                 send_email(f" Stop Loss Hit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                 continue
             # Tighten stop-loss after TP1 if momentum fades (no TP4 mode)
@@ -211,7 +216,7 @@ def manage_trades() -> None:
                         fees=fees,
                         slippage=slippage_amt,
                     )
-                    _update_rl(entry, current_price)
+                    _update_rl(trade, current_price)
                     send_email(f"✅ TP4 Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                     continue
         # Add the trade back to the updated list if still active
