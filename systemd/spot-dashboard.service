@@ -1,0 +1,15 @@
+[Unit]
+Description=Spot AI dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Spot-Ai-Agent
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m streamlit run /home/ubuntu/Spot-Ai-Agent/dashboard.py --server.port 8501 --server.headless true
+Restart=on-failure
+ReadWritePaths=/home/ubuntu/spot_data /home/ubuntu/spot_data/logs /home/ubuntu/spot_data/trades
+
+[Install]
+WantedBy=multi-user.target
