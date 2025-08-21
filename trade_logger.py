@@ -17,30 +17,14 @@ ensures consistent file locations across different processes.
 
 import csv
 import os
-import logging
 from datetime import datetime
+from log_utils import ensure_symlink
 
 
 TRADE_LEARNING_LOG_FILE = os.environ.get(
     "TRADE_LEARNING_LOG_FILE", "/home/ubuntu/spot_data/trades/trade_logs.csv"
 )
 TRADE_LOG_FILE = os.environ.get("TRADE_LOG_FILE", TRADE_LEARNING_LOG_FILE)
-
-
-def _ensure_symlink(target: str, link: str) -> None:
-    try:
-        if os.path.islink(link):
-            if os.readlink(link) != target:
-                os.remove(link)
-                os.symlink(target, link)
-            return
-        if os.path.exists(link):
-            return
-        os.symlink(target, link)
-    except OSError as exc:
-        logging.getLogger(__name__).debug(
-            "Failed to create symlink %s -> %s: %s", link, target, exc
-        )
 
 
 def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
@@ -64,8 +48,8 @@ def log_trade_result(trade: dict, outcome: str, **kwargs) -> None:
     log_file = TRADE_LEARNING_LOG_FILE
 
     module_dir = os.path.dirname(os.path.abspath(__file__))
-    _ensure_symlink(log_file, os.path.join(module_dir, "trade_learning_log.csv"))
-    _ensure_symlink(log_file, os.path.join(module_dir, "trade_logs.csv"))
+    ensure_symlink(log_file, os.path.join(module_dir, "trade_learning_log.csv"))
+    ensure_symlink(log_file, os.path.join(module_dir, "trade_logs.csv"))
     fields = [
         "timestamp",
         "symbol",

@@ -5,7 +5,7 @@ from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
-from log_utils import setup_logger
+from log_utils import setup_logger, ensure_symlink
 
 load_dotenv()
 
@@ -23,28 +23,15 @@ REJECTED_TRADES_FILE = os.environ.get(
     "REJECTED_TRADES_FILE", "/home/ubuntu/spot_data/trades/rejected_trades.csv"
 )
 
-
-def _ensure_symlink(target: str, link: str) -> None:
-    try:
-        if os.path.islink(link):
-            if os.readlink(link) != target:
-                os.remove(link)
-                os.symlink(target, link)
-            return
-        if os.path.exists(link):
-            return
-        os.symlink(target, link)
-    except OSError as exc:
-        logger.debug("Failed to create symlink %s -> %s: %s", link, target, exc)
-
-
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-_ensure_symlink(REJECTED_TRADES_FILE, os.path.join(_REPO_ROOT, "rejected_trades.csv"))
+ensure_symlink(REJECTED_TRADES_FILE, os.path.join(_REPO_ROOT, "rejected_trades.csv"))
 
 def send_email(subject, trade_details):
     try:
-        if isinstance(trade_details, str) or trade_details is None:
-            details = {"message": trade_details or ""}
+        if not trade_details:
+            return
+        if isinstance(trade_details, str):
+            details = {"message": trade_details}
         else:
             details = dict(trade_details)
 
