@@ -54,7 +54,7 @@ from fear_greed import get_fear_greed_index
 from orderflow import detect_aggression
 from diversify import select_diversified_signals
 from ml_model import predict_success_probability
-from sequence_model import predict_next_return
+from sequence_model import predict_next_return, train_sequence_model, SEQ_PKL
 from drawdown_guard import is_trading_blocked
 import numpy as np
 from rl_policy import RLPositionSizer
@@ -420,10 +420,13 @@ def run_agent_loop() -> None:
                         "adx": float(indicators_df['adx'].iloc[-1] if 'adx' in indicators_df else 20.0),
                     }
                 except Exception:
+                    indicators_df = price_data
                     indicators = {"rsi": 50.0, "macd": 0.0, "adx": 20.0}
                 next_ret = 0.0
                 try:
-                    next_ret = predict_next_return(price_data.tail(10))
+                    if not os.path.exists(SEQ_PKL):
+                        train_sequence_model(indicators_df)
+                    next_ret = predict_next_return(indicators_df.tail(10))
                 except Exception:
                     pass
                 indicators['next_return'] = next_ret
