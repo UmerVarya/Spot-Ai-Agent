@@ -159,32 +159,49 @@ def is_trade_active(symbol: str) -> bool:
     return any(t.get("symbol") == symbol for t in trades)
 
 
-def store_trade(trade: dict) -> None:
-    """Store ``trade`` in the active trades list, replacing duplicates."""
+def store_trade(trade: dict) -> bool:
+    """Store ``trade`` in the active trades list if not already present.
+
+    Returns
+    -------
+    bool
+        ``True`` if the trade was stored, ``False`` if a duplicate was
+        detected and the trade was ignored.
+    """
     # Ensure entry_time is set
     if "entry_time" not in trade:
         trade["entry_time"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     # Remove leverage field (spot only)
     trade.pop("leverage", None)
+    symbol = trade.get("symbol")
+    if symbol is None:
+        logger.warning("Cannot store trade without symbol: %s", trade)
+        return False
+    # Database-backed storage
     if DB_CURSOR:
         try:
+            if is_trade_active(symbol):
+                logger.warning("Duplicate trade for %s detected; skipping store.", symbol)
+                return False
             DB_CURSOR.execute(
                 """
                 INSERT INTO active_trades (symbol, data)
                 VALUES (%s, %s)
-                ON CONFLICT (symbol) DO UPDATE SET data = EXCLUDED.data
                 """,
-                (trade.get("symbol"), Json(trade)),
+                (symbol, Json(trade)),
             )
-            return
+            return True
         except Exception as exc:
             logger.exception("Failed to store trade in database: %s", exc)
+            return False
+    # File-based storage
     trades = load_active_trades()
-    symbol = trade.get("symbol")
-    # Remove any existing trade with the same symbol
-    trades = [t for t in trades if t.get("symbol") != symbol]
+    if any(t.get("symbol") == symbol for t in trades):
+        logger.warning("Duplicate trade for %s detected; skipping store.", symbol)
+        return False
     trades.append(trade)
     save_active_trades(trades)
+    return True
 
 
 def remove_trade(symbol: str) -> None:

@@ -72,8 +72,7 @@ def create_new_trade(trade: dict) -> bool:
     if symbol and is_trade_active(symbol):
         logger.info("Trade for %s already active; skipping new entry.", symbol)
         return False
-    store_trade(trade)
-    return True
+    return store_trade(trade)
 
 
 def should_exit_early(trade: dict, current_price: float, price_data) -> Tuple[bool, Optional[str]]:

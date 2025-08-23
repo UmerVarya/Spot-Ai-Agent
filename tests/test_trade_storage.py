@@ -50,13 +50,13 @@ def test_duplicate_trade_guard(tmp_path, monkeypatch):
     assert len(trades) == 1
 
 
-def test_store_trade_replaces_existing(tmp_path, monkeypatch):
+def test_store_trade_skips_duplicates(tmp_path, monkeypatch):
     path = tmp_path / "active.json"
     monkeypatch.setattr(trade_storage, "ACTIVE_TRADES_FILE", str(path))
     first = {"symbol": "ETHUSDT", "entry": 100}
     second = {"symbol": "ETHUSDT", "entry": 200}
-    trade_storage.store_trade(first)
-    trade_storage.store_trade(second)
+    assert trade_storage.store_trade(first) is True
+    assert trade_storage.store_trade(second) is False
     trades = trade_storage.load_active_trades()
     assert len(trades) == 1
-    assert trades[0]["entry"] == 200
+    assert trades[0]["entry"] == 100
