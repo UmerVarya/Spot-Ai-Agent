@@ -27,6 +27,11 @@ import os
 from datetime import datetime, timezone
 from log_utils import setup_logger, LOG_FILE
 
+try:
+    import altair as alt  # type: ignore
+except Exception:  # pragma: no cover
+    alt = None
+
 # Ensure environment variables are loaded once
 import config
 
@@ -165,6 +170,39 @@ def get_live_price(symbol: str) -> float:
     except Exception:
         return None
 
+
+def get_price_history(
+    symbol: str, interval: str = "15m", limit: int = 50
+) -> pd.DataFrame | None:
+    """Fetch recent price history for a symbol.
+
+    Returns a dataframe with ``time`` and ``close`` columns or ``None`` if
+    data cannot be retrieved.  Requires the Binance client to be available.
+    """
+    if client is None:
+        return None
+    try:
+        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+    except Exception:
+        return None
+    cols = [
+        "open_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+        "quote_asset_volume",
+        "number_of_trades",
+        "taker_buy_base",
+        "taker_buy_quote",
+        "ignore",
+    ]
+    df = pd.DataFrame(klines, columns=cols)
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    return df[["open_time", "close"]].rename(columns={"open_time": "time"})
 
 def format_active_row(symbol: str, data: dict) -> dict | None:
     """
@@ -310,6 +348,46 @@ def render_live_tab() -> None:
             lambda x: f" ${x:.2f}"
         )
         st.dataframe(df_display, use_container_width=True)
+
+        # Optional price chart for a selected trade
+        selected_symbol = st.selectbox(
+            "Select trade for price chart", df_active["Symbol"]
+        )
+        price_hist = get_price_history(selected_symbol)
+        if price_hist is not None:
+            trade_info = next(
+                (t for t in trades if t.get("symbol") == selected_symbol), {}
+            )
+            entry_val = float(trade_info.get("entry", 0))
+            levels = {
+                "Entry": entry_val,
+                "SL": trade_info.get("sl"),
+                "TP1": trade_info.get("tp1"),
+                "TP2": trade_info.get("tp2"),
+                "TP3": trade_info.get("tp3"),
+            }
+            if alt is not None:
+                base = (
+                    alt.Chart(price_hist)
+                    .mark_line(color="white")
+                    .encode(x="time:T", y="close:Q")
+                )
+                rules = []
+                for name, val in levels.items():
+                    if val is not None:
+                        rules.append(
+                            alt.Chart(pd.DataFrame({"y": [float(val)], "lbl": [name]}))
+                            .mark_rule()
+                            .encode(y="y", color=alt.value("red"), tooltip=["lbl", "y"])
+                        )
+                chart = alt.layer(base, *rules)
+                st.altair_chart(chart, use_container_width=True)
+            else:
+                st.line_chart(price_hist.set_index("time")["close"], use_container_width=True)
+            tv_url = f"https://www.tradingview.com/chart?symbol={selected_symbol}"
+            st.markdown(f"[Open {selected_symbol} on TradingView]({tv_url})")
+        else:
+            st.info("Price history unavailable.")
     else:
         st.info("No active trades found.")
     # Load trade history and compute summary statistics
@@ -386,6 +464,8 @@ def render_live_tab() -> None:
         win_loss_ratio = wins / losses if losses > 0 else float("inf")
         total_gross = pnl_abs.sum()
         total_net = pnl_net.sum()
+        win_rate = wins / total_trades * 100 if total_trades else 0.0
+        avg_trade_pnl = total_net / total_trades if total_trades else 0.0
         largest_win = pnl_net.max() if not hist_df.empty else 0
         largest_loss = pnl_net.min() if not hist_df.empty else 0
         # Profit factor: gross profit / gross loss
@@ -407,6 +487,11 @@ def render_live_tab() -> None:
             "Profit Factor",
             f"{profit_factor:.2f}" if np.isfinite(profit_factor) else "∞",
         )
+
+        # Additional performance metrics
+        wcol1, wcol2 = st.columns(2)
+        wcol1.metric("Win Rate", f"{win_rate:.2f}%")
+        wcol2.metric("Avg Trade PnL", f"${avg_trade_pnl:.2f}")
 
         # ------------------------------------------------------------------
         # Risk metrics
@@ -501,6 +586,11 @@ def render_live_tab() -> None:
                 curve_df.set_index("exit_time")["Cumulative PnL"],
                 use_container_width=True,
             )
+        # Distribution of trade returns
+        if "PnL (%)" in hist_df.columns:
+            hist_vals, bins = np.histogram(hist_df["PnL (%)"].astype(float), bins=20)
+            hist_chart_df = pd.DataFrame({"Return": bins[:-1], "Count": hist_vals})
+            st.bar_chart(hist_chart_df.set_index("Return"), use_container_width=True)
         # Strategy breakdown
         if "strategy" in hist_df.columns:
             strat_perf = (
