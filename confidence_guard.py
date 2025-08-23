@@ -1,8 +1,8 @@
 """
 Adaptive confidence threshold guard based on recent trade outcomes.
 
-This module reads ``trade_learning_log.csv`` to compute a dynamic confidence
-threshold that adapts to your strategy's performance.  If the log file is
+This module reads the unified completed trades log to compute a dynamic
+confidence threshold that adapts to your strategy's performance.  If the log file is
 missing, contains too few entries, or has malformed lines, a conservative
 default threshold is returned.  You can use the returned value in your
 brain/decision logic to calibrate how strict the bot should be.
@@ -11,18 +11,17 @@ brain/decision logic to calibrate how strict the bot should be.
 import pandas as pd
 import os
 
-import os
+from trade_storage import COMPLETED_TRADES_FILE
 
-# Path to the learning log CSV.  Use a fixed path relative to this module
-# so it is consistent regardless of the current working directory.
-LEARNING_LOG = os.path.join(os.path.dirname(__file__), "trade_learning_log.csv")
+# Path to the completed trades log used for adaptive thresholding
+LEARNING_LOG = COMPLETED_TRADES_FILE
 
 
 def get_adaptive_conf_threshold() -> float:
     """
     Calculate an adaptive confidence threshold based on recent performance.
 
-    The function reads the last 25 entries of ``trade_learning_log.csv`` and
+    The function reads the last 25 entries of the completed trades log and
     computes the win rate and average confidence.  If the win rate is
     exceptionally high (>=70%), the threshold is lowered slightly; if the
     win rate is low (<=40%), the threshold is raised slightly.  Otherwise,
