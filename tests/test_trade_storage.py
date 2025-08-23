@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import trade_storage
+import trade_manager
 import csv
 
 
@@ -37,3 +38,13 @@ def test_log_trade_result_extended_fields(tmp_path, monkeypatch):
     assert rows[0]["sentiment_confidence"] == "8.0"
     assert "volatility" in rows[0]
     assert "macro_indicator" in rows[0]
+
+
+def test_duplicate_trade_guard(tmp_path, monkeypatch):
+    path = tmp_path / "active.json"
+    monkeypatch.setattr(trade_storage, "ACTIVE_TRADES_FILE", str(path))
+    trade = {"symbol": "BTCUSDT", "entry": 100, "direction": "long"}
+    assert trade_manager.create_new_trade(trade) is True
+    assert trade_manager.create_new_trade(trade) is False
+    trades = trade_storage.load_active_trades()
+    assert len(trades) == 1

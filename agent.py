@@ -586,16 +586,18 @@ def run_agent_loop() -> None:
                             tp2,
                             tp3,
                         )
-                        # Add to active trades and persist
-                        active_trades.append(new_trade)
-                        create_new_trade(new_trade)
-                        # Do NOT log the open trade as a completed trade.  It will be logged upon exit by trade_manager.py.
-                        save_active_trades(active_trades)
-                        send_email(
-                            f"New Trade Opened: {symbol}",
-                            f"{new_trade}\n\n Narrative:\n{narrative}\n\nNews Summary:\n{decision_obj.get('news_summary', '')}",
-                        )
-                        opened_count += 1
+                        # Add to active trades and persist if not a duplicate
+                        if create_new_trade(new_trade):
+                            active_trades.append(new_trade)
+                            # Do NOT log the open trade as a completed trade.  It will be logged upon exit by trade_manager.py.
+                            save_active_trades(active_trades)
+                            send_email(
+                                f"New Trade Opened: {symbol}",
+                                f"{new_trade}\n\n Narrative:\n{narrative}\n\nNews Summary:\n{decision_obj.get('news_summary', '')}",
+                            )
+                            opened_count += 1
+                        else:
+                            logger.info("Trade for %s already active; skipping new entry", symbol)
                     except Exception as e:
                         logger.error("Error opening trade for %s: %s", symbol, e, exc_info=True)
             # Manage existing trades after opening new ones
