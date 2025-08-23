@@ -26,9 +26,8 @@ files are:
 ```
 /home/ubuntu/spot_data/logs/spot_ai.log          # agent log output
 /home/ubuntu/spot_data/trades/active_trades.json # open positions
-/home/ubuntu/spot_data/trades/completed_trades.csv
+/home/ubuntu/spot_data/trades/completed_trades.csv # unified trade log
 /home/ubuntu/spot_data/trades/rejected_trades.csv
-/home/ubuntu/spot_data/trades/trade_logs.csv
 ```
 
 Symlinks back into the repository are created only for read-only

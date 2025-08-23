@@ -44,6 +44,7 @@ from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 import pandas as pd
 from log_utils import setup_logger
+from trade_storage import COMPLETED_TRADES_FILE
 
 try:
     # Core sklearn components used for modelling and preprocessing
@@ -88,7 +89,7 @@ logger = setup_logger(__name__)
 # ---------------------------------------------------------------------------
 
 ROOT_DIR = os.path.dirname(__file__)
-LOG_FILE = os.path.join(ROOT_DIR, "trade_learning_log.csv")
+LOG_FILE = COMPLETED_TRADES_FILE
 MODEL_JSON = os.path.join(ROOT_DIR, "ml_model.json")
 MODEL_PKL = os.path.join(ROOT_DIR, "ml_model.pkl")
 
@@ -165,7 +166,8 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
     Train and select the best classification model on the trade learning log.
 
     If scikit‑learn is available, this function performs the following:
-    1. Extracts features and labels from ``trade_learning_log.csv``.
+    1. Extracts features and labels from the completed trades log
+       (``COMPLETED_TRADES_FILE``).
     2. Scales the features using ``StandardScaler``.
     3. Defines a grid of candidate models (logistic regression,
        random forest and gradient boosting) along with hyper‑parameter
