@@ -247,9 +247,15 @@ def log_trade_result(
         "confidence",
         "btc_dominance",
         "fear_greed",
+        "sentiment_bias",
+        "sentiment_confidence",
         "score",
         "pattern",
         "narrative",
+        "volatility",
+        "htf_trend",
+        "order_imbalance",
+        "macro_indicator",
     ]
     # Compose row
     entry_price = trade.get("entry")
@@ -283,9 +289,17 @@ def log_trade_result(
         "confidence": trade.get("confidence", 0),
         "btc_dominance": trade.get("btc_dominance", 0),
         "fear_greed": trade.get("fear_greed", 0),
+        "sentiment_bias": trade.get("sentiment_bias", "neutral"),
+        "sentiment_confidence": trade.get(
+            "sentiment_confidence", trade.get("confidence", 0)
+        ),
         "score": trade.get("score", trade.get("strength", 0)),
         "pattern": trade.get("pattern", "None"),
         "narrative": trade.get("narrative", "No explanation"),
+        "volatility": trade.get("volatility", 0),
+        "htf_trend": trade.get("htf_trend", 0),
+        "order_imbalance": trade.get("order_imbalance", 0),
+        "macro_indicator": trade.get("macro_indicator", 0),
     }
     if DB_CURSOR:
         try:

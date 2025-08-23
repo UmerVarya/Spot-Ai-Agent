@@ -427,6 +427,20 @@ def run_agent_loop() -> None:
                 except Exception:
                     pass
                 indicators['next_return'] = next_ret
+                # Precompute order flow once for reuse
+                of_state = detect_aggression(price_data)
+                orderflow = (
+                    "buyers" if of_state == "buyers in control" else
+                    "sellers" if of_state == "sellers in control" else
+                    "neutral"
+                )
+                # Symbol-specific volatility
+                try:
+                    sym_vol = atr_percentile(
+                        price_data["high"], price_data["low"], price_data["close"]
+                    ) * 100.0
+                except Exception:
+                    sym_vol = 0.0
                 # Ask the brain whether to take the trade
                 # Call the brain with error handling.  If the brain throws an
                 # exception, record it as the reason for skipping so users
@@ -439,7 +453,7 @@ def run_agent_loop() -> None:
                         indicators=indicators,
                         session=session,
                         pattern_name=pattern_name,
-                        orderflow="buyers" if detect_aggression(price_data) == "buyers in control" else "sellers" if detect_aggression(price_data) == "sellers in control" else "neutral",
+                        orderflow=orderflow,
                         sentiment=sentiment,
                         macro_news={"safe": True, "reason": ""},
                     )
@@ -507,6 +521,23 @@ def run_agent_loop() -> None:
                         tp1 = round(entry_price + atr_val * 2.0, 6)
                         tp2 = round(entry_price + atr_val * 3.0, 6)
                         tp3 = round(entry_price + atr_val * 4.0, 6)
+                        try:
+                            ema20 = indicators_df['ema_20'].iloc[-1]
+                            ema50 = indicators_df['ema_50'].iloc[-1]
+                            htf_trend = ((ema20 - ema50) / entry_price) * 100.0
+                        except Exception:
+                            htf_trend = 0.0
+                        if of_state == "buyers in control":
+                            order_imb = 100.0
+                        elif of_state == "sellers in control":
+                            order_imb = -100.0
+                        else:
+                            order_imb = 0.0
+                        macro_ind = (
+                            100.0
+                            if sentiment_bias == "bullish"
+                            else -100.0 if sentiment_bias == "bearish" else 0.0
+                        )
                         # Compose the new trade dictionary with extra metadata
                         new_trade = {
                             "symbol": symbol,
@@ -530,6 +561,10 @@ def run_agent_loop() -> None:
                             "sentiment_bias": sentiment_bias,
                             "sentiment_confidence": sentiment_confidence,
                             "sentiment_summary": sentiment.get("summary", ""),
+                            "volatility": sym_vol,
+                            "htf_trend": htf_trend,
+                            "order_imbalance": order_imb,
+                            "macro_indicator": macro_ind,
                             "pattern": pattern_name,
                             "strategy": pattern_name,  # tag strategy by pattern
                             "narrative": narrative,

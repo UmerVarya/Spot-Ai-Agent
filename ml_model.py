@@ -107,11 +107,16 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
             session = row.get("session", "unknown")
             btc_dom = float(row.get("btc_dominance", 0))
             fg = float(row.get("fear_greed", 0))
-            sent_conf = row.get("sentiment_confidence", row.get("sentiment", 5))
+            sent_conf = row.get("sentiment_confidence", row.get("confidence", 5))
             try:
                 sent_conf_val = float(sent_conf)
             except Exception:
                 sent_conf_val = 5.0
+            sent_bias = row.get("sentiment_bias", "neutral")
+            sent_bias_val = {
+                "bullish": 1.0,
+                "bearish": -1.0,
+            }.get(str(sent_bias).lower(), 0.0)
             pattern = row.get("pattern", "none")
             pattern_len = len(str(pattern))
             session_id = session_map.get(str(session), 3)
@@ -135,6 +140,7 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
                 btc_dom / 100.0,
                 fg / 100.0,
                 sent_conf_val / 10.0,
+                sent_bias_val,
                 pattern_len / 10.0,
                 volatility,
                 htf_trend,
