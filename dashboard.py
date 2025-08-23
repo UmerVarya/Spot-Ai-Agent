@@ -325,27 +325,30 @@ def render_live_tab() -> None:
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("Active Trades", len(df_active))
         avg_pnl_pct = df_active["PnL (%)"].mean() if not df_active.empty else 0.0
+        prev_avg = st.session_state.get("prev_avg_pnl", avg_pnl_pct)
+        delta_avg = avg_pnl_pct - prev_avg
         col2.metric(
             "Average PnL (%)",
             f"{avg_pnl_pct:.2f}%",
-            delta=f"{avg_pnl_pct:.2f}%",
+            delta=f"{delta_avg:+.2f}%",
         )
+        st.session_state["prev_avg_pnl"] = avg_pnl_pct
         total_unrealised = df_active["PnL ($)"].sum() if not df_active.empty else 0.0
-        col3.metric("Total Unrealised PnL", f"${total_unrealised:.2f}")
+        col3.metric("Total Unrealised PnL", f"${total_unrealised:,.2f}")
         wins_active = (df_active["PnL ($)"] > 0).sum()
         col4.metric("Winning Trades", wins_active)
         total_notional = df_active["Notional ($)"].sum() if not df_active.empty else 0.0
-        col5.metric("Total Notional", f"${total_notional:.2f}")
+        col5.metric("Total Notional", f"${total_notional:,.2f}")
         # Display active trades table with formatted PnL columns
         df_display = df_active.copy()
         df_display["PnL (%)"] = df_display["PnL (%)"].apply(
-            lambda x: f" {x:.2f}%"
+            lambda x: f"{x:.2f}%"
         )
         df_display["PnL ($)"] = df_display["PnL ($)"].apply(
-            lambda x: f" ${x:.2f}"
+            lambda x: f"${x:,.2f}"
         )
         df_display["Notional ($)"] = df_display["Notional ($)"].apply(
-            lambda x: f" ${x:.2f}"
+            lambda x: f"${x:,.2f}"
         )
         st.dataframe(df_display, use_container_width=True)
 
@@ -607,8 +610,14 @@ def render_live_tab() -> None:
                 ).sort_values("Total PnL", ascending=False)
                 for col in ["Total PnL", "Avg PnL", "Win Rate (%)"]:
                     sym_stats[col] = sym_stats[col].round(2)
+                sym_stats["Total PnL"] = sym_stats["Total PnL"].map(
+                    lambda x: f"${x:,.2f}"
+                )
+                sym_stats["Avg PnL"] = sym_stats["Avg PnL"].map(
+                    lambda x: f"${x:,.2f}"
+                )
                 st.subheader("Performance by Symbol")
-                st.dataframe(sym_stats, use_container_width=True)
+                st.table(sym_stats)
             if "strategy" in hist_df.columns:
                 strat_group = hist_df.groupby("strategy")
                 strat_stats = pd.DataFrame(
@@ -623,8 +632,14 @@ def render_live_tab() -> None:
                 ).sort_values("Total PnL", ascending=False)
                 for col in ["Total PnL", "Avg PnL", "Win Rate (%)"]:
                     strat_stats[col] = strat_stats[col].round(2)
+                strat_stats["Total PnL"] = strat_stats["Total PnL"].map(
+                    lambda x: f"${x:,.2f}"
+                )
+                strat_stats["Avg PnL"] = strat_stats["Avg PnL"].map(
+                    lambda x: f"${x:,.2f}"
+                )
                 st.subheader("Performance by Strategy")
-                st.dataframe(strat_stats, use_container_width=True)
+                st.table(strat_stats)
         # Session breakdown
         if "session" in hist_df.columns:
             session_perf = (
