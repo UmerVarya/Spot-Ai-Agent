@@ -160,7 +160,7 @@ def is_trade_active(symbol: str) -> bool:
 
 
 def store_trade(trade: dict) -> None:
-    """Append a new trade to the active trades list."""
+    """Store ``trade`` in the active trades list, replacing duplicates."""
     # Ensure entry_time is set
     if "entry_time" not in trade:
         trade["entry_time"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -180,6 +180,9 @@ def store_trade(trade: dict) -> None:
         except Exception as exc:
             logger.exception("Failed to store trade in database: %s", exc)
     trades = load_active_trades()
+    symbol = trade.get("symbol")
+    # Remove any existing trade with the same symbol
+    trades = [t for t in trades if t.get("symbol") != symbol]
     trades.append(trade)
     save_active_trades(trades)
 
