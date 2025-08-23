@@ -29,6 +29,7 @@ from trade_storage import (
     remove_trade,
     load_active_trades,
     save_active_trades,
+    is_trade_active,
 )
 from rl_policy import RLPositionSizer
 
@@ -58,9 +59,21 @@ def _update_rl(trade: dict, exit_price: float) -> None:
         pass
 
 
-def create_new_trade(trade: dict) -> None:
-    """Add a new trade to persistent storage."""
+def create_new_trade(trade: dict) -> bool:
+    """Add a new trade to persistent storage if not already active.
+
+    Returns
+    -------
+    bool
+        ``True`` if the trade was stored, ``False`` if a trade with the
+        same symbol was already active.
+    """
+    symbol = trade.get("symbol")
+    if symbol and is_trade_active(symbol):
+        logger.info("Trade for %s already active; skipping new entry.", symbol)
+        return False
     store_trade(trade)
+    return True
 
 
 def should_exit_early(trade: dict, current_price: float, price_data) -> Tuple[bool, Optional[str]]:
