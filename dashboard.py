@@ -591,14 +591,40 @@ def render_live_tab() -> None:
             hist_vals, bins = np.histogram(hist_df["PnL (%)"].astype(float), bins=20)
             hist_chart_df = pd.DataFrame({"Return": bins[:-1], "Count": hist_vals})
             st.bar_chart(hist_chart_df.set_index("Return"), use_container_width=True)
-        # Strategy breakdown
-        if "strategy" in hist_df.columns:
-            strat_perf = (
-                hist_df.groupby("strategy")["PnL (net $)"].sum().reset_index()
-            )
-            st.bar_chart(
-                strat_perf.set_index("strategy"), use_container_width=True
-            )
+        # Performance analytics by symbol and strategy
+        if "PnL (net $)" in hist_df.columns:
+            if "symbol" in hist_df.columns:
+                sym_group = hist_df.groupby("symbol")
+                sym_stats = pd.DataFrame(
+                    {
+                        "Trades": sym_group.size(),
+                        "Total PnL": sym_group["PnL (net $)"].sum(),
+                        "Avg PnL": sym_group["PnL (net $)"].mean(),
+                        "Win Rate (%)": sym_group["PnL (net $)"].apply(
+                            lambda x: (x > 0).mean() * 100
+                        ),
+                    }
+                ).sort_values("Total PnL", ascending=False)
+                for col in ["Total PnL", "Avg PnL", "Win Rate (%)"]:
+                    sym_stats[col] = sym_stats[col].round(2)
+                st.subheader("Performance by Symbol")
+                st.dataframe(sym_stats, use_container_width=True)
+            if "strategy" in hist_df.columns:
+                strat_group = hist_df.groupby("strategy")
+                strat_stats = pd.DataFrame(
+                    {
+                        "Trades": strat_group.size(),
+                        "Total PnL": strat_group["PnL (net $)"].sum(),
+                        "Avg PnL": strat_group["PnL (net $)"].mean(),
+                        "Win Rate (%)": strat_group["PnL (net $)"].apply(
+                            lambda x: (x > 0).mean() * 100
+                        ),
+                    }
+                ).sort_values("Total PnL", ascending=False)
+                for col in ["Total PnL", "Avg PnL", "Win Rate (%)"]:
+                    strat_stats[col] = strat_stats[col].round(2)
+                st.subheader("Performance by Strategy")
+                st.dataframe(strat_stats, use_container_width=True)
         # Session breakdown
         if "session" in hist_df.columns:
             session_perf = (
