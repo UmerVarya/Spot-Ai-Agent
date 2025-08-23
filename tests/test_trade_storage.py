@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import trade_storage
+import csv
 
 
 def test_save_and_load_active_trades(tmp_path, monkeypatch):
@@ -10,3 +11,29 @@ def test_save_and_load_active_trades(tmp_path, monkeypatch):
     trade_storage.save_active_trades(trades)
     loaded = trade_storage.load_active_trades()
     assert loaded == trades
+
+
+def test_log_trade_result_extended_fields(tmp_path, monkeypatch):
+    csv_path = tmp_path / "log.csv"
+    monkeypatch.setattr(trade_storage, "TRADE_LOG_FILE", str(csv_path))
+    trade = {
+        "symbol": "ETHUSDT",
+        "direction": "long",
+        "entry": 1000,
+        "size": 1,
+        "strategy": "test",
+        "session": "Asia",
+        "sentiment_bias": "bullish",
+        "sentiment_confidence": 8.0,
+        "volatility": 50.0,
+        "htf_trend": 10.0,
+        "order_imbalance": 5.0,
+        "macro_indicator": 20.0,
+    }
+    trade_storage.log_trade_result(trade, outcome="tp1", exit_price=1100)
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["sentiment_bias"] == "bullish"
+    assert rows[0]["sentiment_confidence"] == "8.0"
+    assert "volatility" in rows[0]
+    assert "macro_indicator" in rows[0]
