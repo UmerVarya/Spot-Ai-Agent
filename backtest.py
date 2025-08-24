@@ -187,3 +187,34 @@ def grid_search(backtester: Backtester, param_grid: Dict[str, List[Any]]) -> Dic
             best_perf = perf
             best_params = params
     return {'best_params': best_params, 'performance': best_perf}
+
+
+def compute_buy_and_hold_pnl(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute buy-and-hold returns from a Binance OHLCV dataframe.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing at least a ``close`` column with price data.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of ``df`` augmented with ``pnl`` (period returns) and
+        ``equity`` (cumulative equity) columns.
+
+    Notes
+    -----
+    The function assumes consecutive rows represent equally spaced time
+    periods.  Returns are computed as percentage change of the close
+    price and a starting equity of 1.0 is assumed.
+    """
+
+    if "close" not in df.columns:
+        raise ValueError("DataFrame must contain a 'close' column")
+
+    out = df.copy()
+    close = out["close"].astype(float)
+    out["pnl"] = close.pct_change().fillna(0.0)
+    out["equity"] = (1 + out["pnl"]).cumprod()
+    return out
