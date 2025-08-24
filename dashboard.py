@@ -26,6 +26,7 @@ import numpy as np
 import os
 from datetime import datetime, timezone
 from log_utils import setup_logger, LOG_FILE
+from backtest import compute_buy_and_hold_pnl
 
 try:
     import altair as alt  # type: ignore
@@ -698,21 +699,33 @@ def render_live_tab() -> None:
 
 
 def render_backtest_tab() -> None:
-    """Upload a CSV of trade logs and visualise backtest results."""
+    """Upload a CSV and visualise backtest or price-based results."""
     st.subheader("Backtest Trade Log")
-    uploaded = st.file_uploader("Upload trade log CSV", type="csv")
+    uploaded = st.file_uploader("Upload trade log or price CSV", type="csv")
     if uploaded:
         df = pd.read_csv(uploaded, encoding="utf-8")
-        if "pnl" in df.columns and "equity" not in df.columns:
-            df["equity"] = (1 + df["pnl"].astype(float)).cumprod()
-        if "equity" in df.columns:
-            st.line_chart(df["equity"], use_container_width=True)
-        if "pnl" in df.columns:
-            st.bar_chart(df["pnl"], use_container_width=True)
-            # Display distribution of returns as a histogram
-            hist, bins = np.histogram(df["pnl"].astype(float), bins=20)
-            hist_df = pd.DataFrame({"Return": bins[:-1], "Count": hist})
-            st.bar_chart(hist_df.set_index("Return"), use_container_width=True)
+        cols = {c.lower(): c for c in df.columns}
+        if "pnl" in cols:
+            pnl_col = cols["pnl"]
+            if "equity" not in cols:
+                df["equity"] = (1 + df[pnl_col].astype(float)).cumprod()
+            equity_col = "equity"
+        elif "close" in cols:
+            # Assume Binance OHLCV download; compute simple buy-and-hold PnL
+            df = df.rename(columns={cols["close"]: "close"})
+            df = compute_buy_and_hold_pnl(df)
+            pnl_col = "pnl"
+            equity_col = "equity"
+            st.info("PnL computed from close prices using buy-and-hold assumption")
+        else:
+            st.error("CSV must contain either a 'pnl' or 'close' column")
+            return
+        st.line_chart(df[equity_col], use_container_width=True)
+        st.bar_chart(df[pnl_col], use_container_width=True)
+        # Display distribution of returns as a histogram
+        hist, bins = np.histogram(df[pnl_col].astype(float), bins=20)
+        hist_df = pd.DataFrame({"Return": bins[:-1], "Count": hist})
+        st.bar_chart(hist_df.set_index("Return"), use_container_width=True)
         st.dataframe(df, use_container_width=True)
 
 
