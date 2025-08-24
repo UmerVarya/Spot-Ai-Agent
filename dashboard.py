@@ -705,6 +705,29 @@ def render_backtest_tab() -> None:
     if uploaded:
         df = pd.read_csv(uploaded, encoding="utf-8")
         cols = {c.lower(): c for c in df.columns}
+
+        # If neither 'pnl' nor 'close' columns are found, attempt to
+        # interpret the file as a headerless Binance OHLCV export.  Such
+        # files contain twelve columns in a fixed order but no header row.
+        if "pnl" not in cols and "close" not in cols:
+            uploaded.seek(0)
+            binance_cols = [
+                "open_time",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "close_time",
+                "quote_asset_volume",
+                "number_of_trades",
+                "taker_buy_base_asset_volume",
+                "taker_buy_quote_asset_volume",
+                "ignore",
+            ]
+            df = pd.read_csv(uploaded, names=binance_cols)
+            cols = {c.lower(): c for c in df.columns}
+
         if "pnl" in cols:
             pnl_col = cols["pnl"]
             if "equity" not in cols:
