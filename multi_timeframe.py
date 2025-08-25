@@ -12,6 +12,7 @@ to agree with an intraday setup).
 
 from __future__ import annotations
 
+from datetime import datetime
 import pandas as pd
 from typing import Callable, Dict, List
 
@@ -31,7 +32,8 @@ def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     Returns
     -------
     pandas.DataFrame
-        Resampled DataFrame with OHLCV columns.
+        Resampled DataFrame with OHLCV columns. Bars are labelled by their
+        closing timestamp and only include intervals that have fully closed.
     """
     ohlc = {
         'open': 'first',
@@ -40,7 +42,7 @@ def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         'close': 'last',
         'volume': 'sum',
     }
-    return df.resample(timeframe).apply(ohlc).dropna()
+    return df.resample(timeframe, label="right", closed="right").apply(ohlc).dropna()
 
 
 def multi_timeframe_confluence(df: pd.DataFrame, timeframes: List[str], indicator_func: Callable[[pd.Series], float]) -> Dict[str, float]:
@@ -75,6 +77,8 @@ def multi_timeframe_confluence(df: pd.DataFrame, timeframes: List[str], indicato
         # the other OHLCV columns.  Passing the entire dataframe
         # ensures the resampler has the correct inputs.
         resampled = resample_ohlcv(df.copy(), tf)
+        now = datetime.now(resampled.index.tz) if resampled.index.tz else datetime.now()
+        resampled = resampled[resampled.index <= now]
         if len(resampled) < 2:
             continue
         results[tf] = float(indicator_func(resampled['close']))
@@ -117,6 +121,8 @@ def multi_timeframe_indicator_alignment(
     results: Dict[str, Dict[str, float]] = {}
     for tf in timeframes:
         resampled = resample_ohlcv(df.copy(), tf)
+        now = datetime.now(resampled.index.tz) if resampled.index.tz else datetime.now()
+        resampled = resampled[resampled.index <= now]
         if len(resampled) < 2:
             continue
         tf_vals: Dict[str, float] = {}
