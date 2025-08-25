@@ -5,7 +5,9 @@ Trading strategies often benefit from confirming signals across
 multiple timeframes.  This module provides simple helpers to
 resample OHLCV data into higher intervals and to aggregate indicator
 values across those intervals.  It can be used to ensure that a
-short‑term signal aligns with the trend on a longer timeframe.
+short‑term signal aligns with the trend on a longer timeframe,
+or to apply higher‑timeframe filters (e.g. requiring the daily trend
+to agree with an intraday setup).
 """
 
 from __future__ import annotations

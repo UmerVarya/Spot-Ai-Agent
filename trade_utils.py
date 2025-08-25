@@ -573,21 +573,26 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             return float(m)
         confluence = multi_timeframe_confluence(
             price_data[['open', 'high', 'low', 'close', 'volume']],
-            ['5T', '15T', '1H'],
+            ['5T', '15T', '1H', '4H', '1D'],
             lambda s: _slope(s)
         )
+        # Align key indicators across intraday and higher timeframes so we don't
+        # trade against a larger downtrend.  Daily/4H EMA slope acts as a simple
+        # higher‑timeframe trend filter.
         indicator_alignment = multi_timeframe_indicator_alignment(
             price_data[['open', 'high', 'low', 'close', 'volume']],
-            ['1H'],
+            ['1H', '4H', '1D'],
             {
                 'ema_trend': lambda df: EMAIndicator(df['close'], window=50).ema_indicator().iloc[-1]
                 - EMAIndicator(df['close'], window=200).ema_indicator().iloc[-1],
                 'rsi': lambda df: RSIIndicator(df['close'], window=14).rsi().iloc[-1],
             },
         )
-        higher_tf = indicator_alignment.get('1H', {})
-        ema_trend_1h = higher_tf.get('ema_trend')
-        rsi_1h = higher_tf.get('rsi')
+        higher_tf_1h = indicator_alignment.get('1H', {})
+        ema_trend_1h = higher_tf_1h.get('ema_trend')
+        rsi_1h = higher_tf_1h.get('rsi')
+        ema_trend_4h = indicator_alignment.get('4H', {}).get('ema_trend')
+        ema_trend_1d = indicator_alignment.get('1D', {}).get('ema_trend')
         order_book = get_order_book(symbol)
         if order_book:
             spread = compute_spread(order_book)
@@ -643,9 +648,9 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         reinforcement = 1.0
         score = 0.0
         ema_condition = (
-            ema_trend_1h is None
-            or ema_trend_1h != ema_trend_1h
-            or ema_trend_1h > 0
+            (ema_trend_1h is None or ema_trend_1h != ema_trend_1h or ema_trend_1h > 0)
+            and (ema_trend_4h is None or ema_trend_4h != ema_trend_4h or ema_trend_4h > 0)
+            and (ema_trend_1d is None or ema_trend_1d != ema_trend_1d or ema_trend_1d > 0)
         )
         if ema_short.iloc[-1] > ema_long.iloc[-1] and ema_condition:
             score += w["ema"]
