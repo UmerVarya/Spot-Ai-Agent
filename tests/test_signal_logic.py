@@ -47,3 +47,35 @@ def test_should_trade_auto_approves_on_llm_error():
     )
     assert result["decision"] is True
     assert "auto-approval" in result["reason"].lower()
+
+
+def test_should_trade_rejects_in_extreme_fear():
+    result = should_trade(
+        symbol="BTCUSDT",
+        score=6.0,
+        direction="long",
+        indicators={},
+        session="US",
+        pattern_name="",
+        orderflow="neutral",
+        sentiment={"bias": "neutral"},
+        macro_news={"safe": True, "reason": ""},
+        fear_greed=10,
+    )
+    assert result["decision"] is False
+
+
+def test_should_trade_demands_more_in_low_vol():
+    result = should_trade(
+        symbol="BTCUSDT",
+        score=5.6,
+        direction="long",
+        indicators={},
+        session="US",
+        pattern_name="",
+        orderflow="neutral",
+        sentiment={"bias": "neutral"},
+        macro_news={"safe": True, "reason": ""},
+        volatility=0.1,
+    )
+    assert result["decision"] is False
