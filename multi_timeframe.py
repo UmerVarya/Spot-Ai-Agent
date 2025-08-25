@@ -12,6 +12,7 @@ to agree with an intraday setup).
 
 from __future__ import annotations
 
+import datetime as dt
 import pandas as pd
 from typing import Callable, Dict, List
 
@@ -40,7 +41,11 @@ def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         'close': 'last',
         'volume': 'sum',
     }
-    return df.resample(timeframe).apply(ohlc).dropna()
+    # Label and close each resampled bar on its right edge so the
+    # resulting timestamp represents the bar's close time.  This makes it
+    # possible for downstream logic to compare the last index against
+    # ``datetime.now`` to determine whether the bar has fully completed.
+    return df.resample(timeframe, label="right", closed="right").apply(ohlc).dropna()
 
 
 def multi_timeframe_confluence(df: pd.DataFrame, timeframes: List[str], indicator_func: Callable[[pd.Series], float]) -> Dict[str, float]:
@@ -75,6 +80,16 @@ def multi_timeframe_confluence(df: pd.DataFrame, timeframes: List[str], indicato
         # the other OHLCV columns.  Passing the entire dataframe
         # ensures the resampler has the correct inputs.
         resampled = resample_ohlcv(df.copy(), tf)
+
+        # Ensure we only work with bars that have definitively
+        # closed.  ``resample`` labels bars at the right edge so if the
+        # most recent timestamp is in the future it means the higher
+        # timeframe bar has not yet finished forming.  Compare against
+        # ``datetime.now`` to drop any such partial bar.
+        tz = resampled.index.tz
+        now = dt.datetime.now(tz) if tz else dt.datetime.now()
+        resampled = resampled[resampled.index <= pd.Timestamp(now)]
+
         if len(resampled) < 2:
             continue
         results[tf] = float(indicator_func(resampled['close']))
@@ -117,6 +132,13 @@ def multi_timeframe_indicator_alignment(
     results: Dict[str, Dict[str, float]] = {}
     for tf in timeframes:
         resampled = resample_ohlcv(df.copy(), tf)
+
+        # Drop any bar whose closing timestamp lies in the future to
+        # ensure indicators only use fully closed candles.
+        tz = resampled.index.tz
+        now = dt.datetime.now(tz) if tz else dt.datetime.now()
+        resampled = resampled[resampled.index <= pd.Timestamp(now)]
+
         if len(resampled) < 2:
             continue
         tf_vals: Dict[str, float] = {}
