@@ -12,13 +12,18 @@ to agree with an intraday setup).
 
 from __future__ import annotations
 
-import pandas as pd
+from datetime import datetime
 from typing import Callable, Dict, List
+
+import pandas as pd
 
 
 def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     """
     Resample a lower‑frequency OHLCV DataFrame to a higher timeframe.
+
+    Bars are labeled and closed on the **right** edge of each interval,
+    so a 1H candle covering 09:00‑10:00 will be timestamped ``10:00``.
 
     Parameters
     ----------
@@ -40,7 +45,7 @@ def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         'close': 'last',
         'volume': 'sum',
     }
-    return df.resample(timeframe).apply(ohlc).dropna()
+    return df.resample(timeframe, label="right", closed="right").apply(ohlc).dropna()
 
 
 def multi_timeframe_confluence(df: pd.DataFrame, timeframes: List[str], indicator_func: Callable[[pd.Series], float]) -> Dict[str, float]:
@@ -51,7 +56,8 @@ def multi_timeframe_confluence(df: pd.DataFrame, timeframes: List[str], indicato
     return a numeric indicator (e.g. moving average slope, RSI value).
     The function returns a mapping from timeframe to the indicator
     value.  Users can then decide whether short‑term signals align
-    with longer‑term indicators.
+    with longer‑term indicators.  Partially formed bars are excluded by
+    comparing the resampled timestamps against ``datetime.now``.
 
     Example::
 
@@ -73,9 +79,15 @@ def multi_timeframe_confluence(df: pd.DataFrame, timeframes: List[str], indicato
         # function attempted to resample only the ``close`` column,
         # which raised ``KeyError`` when ``resample_ohlcv`` expected
         # the other OHLCV columns.  Passing the entire dataframe
-        # ensures the resampler has the correct inputs.
+        # ensures the resampler has the correct inputs.  The resampled
+        # data's final timestamp is compared against ``datetime.now`` to
+        # ensure we only work with fully closed higher‑timeframe bars.
         resampled = resample_ohlcv(df.copy(), tf)
-        if len(resampled) < 2:
+        now = datetime.now(resampled.index.tz)
+        expected_close = pd.Timestamp(now).floor(tf)
+        if resampled.index[-1] > expected_close:
+            resampled = resampled.iloc[:-1]
+        if len(resampled) < 2 or resampled.index[-1] != expected_close:
             continue
         results[tf] = float(indicator_func(resampled['close']))
     return results
@@ -92,6 +104,9 @@ def multi_timeframe_indicator_alignment(
     agree on different charts.  ``indicator_funcs`` is a mapping of
     indicator name to a callable that accepts an OHLCV DataFrame and
     returns a numeric value (e.g. RSI value, moving‑average difference).
+    Each timeframe is only evaluated once its final timestamp matches
+    ``datetime.now`` rounded down to that interval, ensuring partially
+    formed bars are ignored.
 
     The return value is a nested dictionary of the form::
 
@@ -117,7 +132,11 @@ def multi_timeframe_indicator_alignment(
     results: Dict[str, Dict[str, float]] = {}
     for tf in timeframes:
         resampled = resample_ohlcv(df.copy(), tf)
-        if len(resampled) < 2:
+        now = datetime.now(resampled.index.tz)
+        expected_close = pd.Timestamp(now).floor(tf)
+        if resampled.index[-1] > expected_close:
+            resampled = resampled.iloc[:-1]
+        if len(resampled) < 2 or resampled.index[-1] != expected_close:
             continue
         tf_vals: Dict[str, float] = {}
         for name, func in indicator_funcs.items():
