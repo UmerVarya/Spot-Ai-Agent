@@ -30,6 +30,12 @@ SIGNAL_LOG_FILE = os.getenv("SIGNAL_LOG_FILE",
 
 logger = setup_logger(__name__)
 
+# Maximum allowed lag for higher‑timeframe (e.g. 1H) updates.
+# If the latest bar is older than this threshold relative to the
+# expected close time, the strategy will skip trading to avoid
+# acting on stale data.
+HOURLY_BAR_MAX_LAG = timedelta(minutes=1)
+
 # Optional TA-Lib imports (with pandas fallbacks if unavailable)
 try:
     from ta.trend import (
@@ -584,7 +590,8 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         if isinstance(hourly_bar, pd.DataFrame) and not hourly_bar.empty:
             expected_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
             last_hour = hourly_bar.index[-1]
-            if expected_hour - last_hour > timedelta(minutes=3):
+            # Ensure the 1H bar is fresh – it should print shortly after the hour.
+            if expected_hour - last_hour > HOURLY_BAR_MAX_LAG:
                 logger.warning(
                     "Skipping %s: latest 1H bar (%s) is stale.",
                     symbol,

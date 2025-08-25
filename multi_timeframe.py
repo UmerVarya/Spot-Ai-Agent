@@ -1,5 +1,4 @@
-"""
-Multi‑timeframe analysis utilities for the Spot‑AI Agent.
+"""Multi‑timeframe analysis utilities for the Spot‑AI Agent.
 
 Trading strategies often benefit from confirming signals across
 multiple timeframes.  This module provides simple helpers to
@@ -8,6 +7,12 @@ values across those intervals.  It can be used to ensure that a
 short‑term signal aligns with the trend on a longer timeframe,
 or to apply higher‑timeframe filters (e.g. requiring the daily trend
 to agree with an intraday setup).
+
+Data quality and timeliness are critical when working across
+timeframes.  When sourcing candles from an external API, ensure that
+higher‑timeframe bars (such as ``1H``) update promptly on the hour so
+that resampled data stays synchronized.  The trading logic elsewhere
+will skip signals if the required data is stale or incomplete.
 """
 
 from __future__ import annotations
