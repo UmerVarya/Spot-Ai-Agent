@@ -43,7 +43,12 @@ def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     return df.resample(timeframe).apply(ohlc).dropna()
 
 
-def multi_timeframe_confluence(df: pd.DataFrame, timeframes: List[str], indicator_func: Callable[[pd.Series], float]) -> Dict[str, float]:
+def multi_timeframe_confluence(
+    df: pd.DataFrame,
+    timeframes: List[str],
+    indicator_func: Callable[[pd.Series], float],
+    hourly_override: pd.DataFrame | None = None,
+) -> Dict[str, float]:
     """
     Compute a simple indicator across multiple timeframes.
 
@@ -75,6 +80,9 @@ def multi_timeframe_confluence(df: pd.DataFrame, timeframes: List[str], indicato
         # the other OHLCV columns.  Passing the entire dataframe
         # ensures the resampler has the correct inputs.
         resampled = resample_ohlcv(df.copy(), tf)
+        if tf == '1H' and hourly_override is not None and not hourly_override.empty:
+            resampled = resampled[resampled.index != hourly_override.index[0]]
+            resampled = pd.concat([resampled, hourly_override]).sort_index()
         if len(resampled) < 2:
             continue
         results[tf] = float(indicator_func(resampled['close']))
@@ -85,6 +93,7 @@ def multi_timeframe_indicator_alignment(
     df: pd.DataFrame,
     timeframes: List[str],
     indicator_funcs: Dict[str, Callable[[pd.DataFrame], float]],
+    hourly_override: pd.DataFrame | None = None,
 ) -> Dict[str, Dict[str, float]]:
     """Compute multiple indicators across several timeframes.
 
@@ -117,6 +126,9 @@ def multi_timeframe_indicator_alignment(
     results: Dict[str, Dict[str, float]] = {}
     for tf in timeframes:
         resampled = resample_ohlcv(df.copy(), tf)
+        if tf == '1H' and hourly_override is not None and not hourly_override.empty:
+            resampled = resampled[resampled.index != hourly_override.index[0]]
+            resampled = pd.concat([resampled, hourly_override]).sort_index()
         if len(resampled) < 2:
             continue
         tf_vals: Dict[str, float] = {}

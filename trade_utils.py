@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 import traceback
 import asyncio
@@ -359,6 +359,22 @@ def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
         df = df.set_index("timestamp")
         df["quote_volume"] = df["quote_asset_volume"]
+
+        # Fetch the most recent 1‑hour kline and store it for higher timeframe checks
+        h_klines = client.get_klines(symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=2)
+        if h_klines:
+            h_df = pd.DataFrame([h_klines[-1]], columns=[
+                "timestamp", "open", "high", "low", "close", "volume", "close_time",
+                "quote_asset_volume", "number_of_trades", "taker_buy_base", "taker_buy_quote", "ignore",
+            ])
+            h_df[["open", "high", "low", "close", "volume", "quote_asset_volume"]] = h_df[
+                ["open", "high", "low", "close", "volume", "quote_asset_volume"]
+            ].astype(float)
+            h_df["timestamp"] = pd.to_datetime(h_df["timestamp"], unit="ms", errors="coerce").dt.floor("H")
+            h_df = h_df.set_index("timestamp")
+            h_df["quote_volume"] = h_df["quote_asset_volume"]
+            df.attrs["hourly_bar"] = h_df[["open", "high", "low", "close", "volume", "quote_volume"]]
+
         return df[["open", "high", "low", "close", "volume", "quote_volume"]]
     except Exception as e:
         logger.warning("Failed to fetch data for %s: %s", symbol, e, exc_info=True)
@@ -563,6 +579,19 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
 
         price_data = price_data.replace([np.inf, -np.inf], np.nan)
         price_data = price_data.dropna(subset=['high', 'low', 'close'])
+
+        hourly_bar = price_data.attrs.get("hourly_bar")
+        if isinstance(hourly_bar, pd.DataFrame) and not hourly_bar.empty:
+            expected_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+            last_hour = hourly_bar.index[-1]
+            if expected_hour - last_hour > timedelta(minutes=3):
+                logger.warning(
+                    "Skipping %s: latest 1H bar (%s) is stale.",
+                    symbol,
+                    last_hour,
+                )
+                return 0, None, 0, None
+
         close = price_data['close']
         high = price_data['high']
         low = price_data['low']
@@ -591,10 +620,14 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             x = np.arange(len(series))
             m, _ = np.polyfit(x, series, 1)
             return float(m)
+        hourly_override = None
+        if isinstance(hourly_bar, pd.DataFrame) and not hourly_bar.empty:
+            hourly_override = hourly_bar[['open', 'high', 'low', 'close', 'volume']]
         confluence = multi_timeframe_confluence(
             price_data[['open', 'high', 'low', 'close', 'volume']],
             ['5T', '15T', '1H', '4H', '1D'],
-            lambda s: _slope(s)
+            lambda s: _slope(s),
+            hourly_override=hourly_override,
         )
         # Align key indicators across intraday and higher timeframes so we don't
         # trade against a larger downtrend.  Daily/4H EMA slope acts as a simple
@@ -607,6 +640,7 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
                 - EMAIndicator(df['close'], window=200).ema_indicator().iloc[-1],
                 'rsi': lambda df: RSIIndicator(df['close'], window=14).rsi().iloc[-1],
             },
+            hourly_override=hourly_override,
         )
         higher_tf_1h = indicator_alignment.get('1H', {})
         ema_trend_1h = higher_tf_1h.get('ema_trend')
