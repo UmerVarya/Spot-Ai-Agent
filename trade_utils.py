@@ -8,6 +8,8 @@ import traceback
 import asyncio
 from log_utils import setup_logger
 
+from weight_optimizer import optimize_indicator_weights
+
 from trade_storage import TRADE_LOG_FILE  # shared trade log path
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
@@ -512,7 +514,8 @@ def get_last_trade_outcome(log_file: str = TRADE_LOG_FILE) -> str | None:
         return None
 
 def log_signal(symbol: str, session: str, score: float, direction: Optional[str], weights: dict,
-               candle_patterns: list, chart_pattern: Optional[str]) -> None:
+               candle_patterns: list, chart_pattern: Optional[str],
+               indicators: Optional[dict] = None) -> None:
     """Append a signal entry to the trades log."""
     log_entry = {
         "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
@@ -532,6 +535,9 @@ def log_signal(symbol: str, session: str, score: float, direction: Optional[str]
         "candle_patterns": ", ".join(candle_patterns),
         "chart_pattern": chart_pattern if chart_pattern else "None",
     }
+    if indicators:
+        for name, val in indicators.items():
+            log_entry[f"{name}_trigger"] = val
     df_entry = pd.DataFrame([log_entry])
     log_path = SIGNAL_LOG_FILE
     # ensure directory exists
@@ -705,7 +711,7 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         if session_name == "US":
             base_weights["macd"] += 0.2
             base_weights["stoch"] += 0.2
-        w = base_weights
+        w = optimize_indicator_weights(base_weights)
         reinforcement = 1.0
         score = 0.0
         ema_condition = (
@@ -713,9 +719,11 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             and (ema_trend_4h is None or ema_trend_4h != ema_trend_4h or ema_trend_4h > 0)
             and (ema_trend_1d is None or ema_trend_1d != ema_trend_1d or ema_trend_1d > 0)
         )
-        if ema_short.iloc[-1] > ema_long.iloc[-1] and ema_condition:
+        ema_flag = int(ema_short.iloc[-1] > ema_long.iloc[-1] and ema_condition)
+        if ema_flag:
             score += w["ema"]
-        if macd_line.iloc[-1] > 0:
+        macd_flag = int(macd_line.iloc[-1] > 0)
+        if macd_flag:
             score += w["macd"]
         rsi_val = rsi.iloc[-1]
         rsi_condition = (
@@ -723,35 +731,49 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             or rsi_1h != rsi_1h
             or rsi_1h > 40
         )
-        if rsi_val > 50 and rsi_condition:
+        rsi_flag = int(rsi_val > 50 and rsi_condition)
+        if rsi_flag:
             score += w["rsi"]
-        if adx.iloc[-1] > 20:
+        adx_flag = int(adx.iloc[-1] > 20)
+        if adx_flag:
             score += w["adx"]
         vwma_value = vwma.iloc[-1]
         vwma_dev = abs(price_now - vwma_value) / price_now if price_now != 0 else 0.0
+        vwma_flag = 0
         if price_now > vwma_value:
             if vwma_dev <= 0.05:
+                vwma_flag = 1
                 score += w["vwma"]
             elif vwma_dev < 0.10:
-                fraction = (0.10 - vwma_dev) / 0.05
-                score += w["vwma"] * fraction
-        if bb_lower.iloc[-1] and bb_lower.iloc[-1] < price_now < bb_upper.iloc[-1]:
+                vwma_flag = (0.10 - vwma_dev) / 0.05
+                score += w["vwma"] * vwma_flag
+        bb_flag = int(bb_lower.iloc[-1] and bb_lower.iloc[-1] < price_now < bb_upper.iloc[-1])
+        if bb_flag:
             score += w["bb"]
-        if dema_short.iloc[-1] > dema_long.iloc[-1]:
+        dema_flag = int(dema_short.iloc[-1] > dema_long.iloc[-1])
+        if dema_flag:
             score += w["dema"]
-        if stoch_k.iloc[-1] > stoch_d.iloc[-1] and stoch_k.iloc[-1] < 80:
+        stoch_flag = int(stoch_k.iloc[-1] > stoch_d.iloc[-1] and stoch_k.iloc[-1] < 80)
+        if stoch_flag:
             score += w["stoch"]
-        if cci.iloc[-1] > 0:
+        cci_flag = int(cci.iloc[-1] > 0)
+        if cci_flag:
             score += w["cci"]
+        atr_flag = 0
         if atr_p == atr_p:
             if atr_p > 0.75:
+                atr_flag = 1
                 score += w["atr"]
             elif atr_p < 0.25:
+                atr_flag = -1
                 score -= w["atr"]
+        hurst_flag = 0
         if hurst == hurst:
             if hurst > 0.55:
+                hurst_flag = 1
                 score += w["hurst"]
             elif hurst < 0.45:
+                hurst_flag = -1
                 score -= w["hurst"]
         candle_patterns = detect_candlestick_patterns(price_data)
         # Normalize candlestick pattern output to a list
@@ -759,18 +781,23 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             triggered_patterns = [p for p, v in candle_patterns.items() if v]
         else:
             triggered_patterns = candle_patterns or []
+        candle_flag = int(bool(triggered_patterns))
         chart_pattern = detect_triangle_wedge(price_data)
-        flag = detect_flag_pattern(price_data)
+        chart_flag = int(bool(chart_pattern))
+        flag_pattern = detect_flag_pattern(price_data)
+        flag_flag = int(bool(flag_pattern))
         head_shoulders = detect_head_and_shoulders(price_data)
-        if triggered_patterns:
+        hs_flag = -1 if head_shoulders else 0
+        if candle_flag:
             score += w["candle"]
-        if chart_pattern:
+        if chart_flag:
             score += w["chart"]
-        if flag:
+        if flag_flag:
             score += w["flag"]
-        if head_shoulders:
+        if hs_flag:
             score -= w["hs"]
-        if all(v > 0 for v in confluence.values() if v == v):
+        confluence_flag = int(all(v > 0 for v in confluence.values() if v == v))
+        if confluence_flag:
             score += w["confluence"]
         if spread == spread and price_now > 0 and spread / price_now > 0.001:
             logger.warning("Skipping %s: spread %.6f is >0.1%% of price.", symbol, spread)
@@ -779,9 +806,12 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             logger.warning("Skipping %s: order book imbalance %.2f exceeds threshold.", symbol, imbalance)
             return 0, None, 0, None
         aggression = detect_aggression(price_data)
+        flow_flag = 0
         if aggression == "buyers in control":
+            flow_flag = 1
             score += w["flow"]
         elif aggression == "sellers in control":
+            flow_flag = -1
             score -= w["flow"]
         max_possible = sum(w.values())
         normalized_score = round((score / max_possible) * 10 * reinforcement, 2)
@@ -821,6 +851,26 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
                 json.dump(scores, f, indent=2)
         except Exception as e:
             logger.warning("[SYMBOL SCORES] Failed to update symbol_scores.json: %s", e, exc_info=True)
+        indicator_flags = {
+            "ema": ema_flag,
+            "macd": macd_flag,
+            "rsi": rsi_flag,
+            "adx": adx_flag,
+            "vwma": vwma_flag,
+            "bb": bb_flag,
+            "dema": dema_flag,
+            "stoch": stoch_flag,
+            "cci": cci_flag,
+            "atr": atr_flag,
+            "hurst": hurst_flag,
+            "confluence": confluence_flag,
+            "flow": flow_flag,
+            "candle": candle_flag,
+            "chart": chart_flag,
+            "flag": flag_flag,
+            "hs": hs_flag,
+        }
+        log_signal(symbol, session_name, normalized_score, direction, w, triggered_patterns, chart_pattern, indicator_flags)
         return normalized_score, direction, position_size, pattern_name
     except Exception as e:
         logger.error("Signal evaluation error in %s: %s", symbol, e, exc_info=True)
