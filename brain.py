@@ -19,6 +19,7 @@ import json
 from typing import Any, Dict, Tuple
 from log_utils import setup_logger
 import logging
+import math
 
 logger = setup_logger(__name__)
 
@@ -136,6 +137,8 @@ def should_trade(
     orderflow: str,
     sentiment: Dict[str, Any],
     macro_news: Dict[str, Any],
+    volatility: float | None = None,
+    fear_greed: int | None = None,
 ) -> Dict[str, Any]:
     """Determine whether to take a trade based on quantitative metrics and LLM guidance.
 
@@ -159,6 +162,12 @@ def should_trade(
         Macro sentiment dictionary with ``bias`` and ``score`` keys.
     macro_news : dict
         Macro news analysis result with ``safe`` and ``reason`` keys.
+    volatility : float or None, optional
+        Current ATR percentile (0-1) to adjust score requirements during
+        exceptionally quiet or volatile regimes.
+    fear_greed : int or None, optional
+        Current Fear & Greed index (0-100).  Extreme fear raises the score
+        threshold while extreme greed relaxes it slightly.
 
     Returns
     -------
@@ -226,6 +235,25 @@ def should_trade(
                 base_thr = 4.5
             if score >= (base_thr - 0.5):
                 score_threshold -= 0.2
+
+        # Volatility-based adjustments
+        if volatility is not None and not math.isnan(volatility):
+            if volatility < 0.2:
+                score_threshold += 0.4
+            elif volatility > 0.8:
+                score_threshold -= 0.2
+
+        # Fear & Greed index adjustments
+        if fear_greed is not None:
+            try:
+                fg_val = float(fear_greed)
+            except Exception:
+                fg_val = None
+            if fg_val is not None:
+                if fg_val < 20:
+                    score_threshold += 0.8
+                elif fg_val > 80:
+                    score_threshold -= 0.2
 
         # Ensure threshold does not fall below 4.0
         score_threshold = round(max(score_threshold, 4.0), 2)

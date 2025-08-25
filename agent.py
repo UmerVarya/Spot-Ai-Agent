@@ -439,10 +439,12 @@ def run_agent_loop() -> None:
                 )
                 # Symbol-specific volatility
                 try:
-                    sym_vol = atr_percentile(
+                    sym_vol_pct = atr_percentile(
                         price_data["high"], price_data["low"], price_data["close"]
-                    ) * 100.0
+                    )
+                    sym_vol = sym_vol_pct * 100.0
                 except Exception:
+                    sym_vol_pct = float("nan")
                     sym_vol = 0.0
                 # Ask the brain whether to take the trade
                 # Call the brain with error handling.  If the brain throws an
@@ -459,6 +461,8 @@ def run_agent_loop() -> None:
                         orderflow=orderflow,
                         sentiment=sentiment,
                         macro_news={"safe": True, "reason": ""},
+                        volatility=sym_vol_pct,
+                        fear_greed=fg,
                     )
                 except Exception as e:
                     logger.error("Error in should_trade for %s: %s", symbol, e, exc_info=True)
