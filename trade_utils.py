@@ -11,7 +11,10 @@ from log_utils import setup_logger
 from trade_storage import TRADE_LOG_FILE  # shared trade log path
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
-from multi_timeframe import multi_timeframe_confluence  # type: ignore
+from multi_timeframe import (
+    multi_timeframe_confluence,
+    multi_timeframe_indicator_alignment,
+)  # type: ignore
 from risk_metrics import (
     sharpe_ratio,
     calmar_ratio,
@@ -573,6 +576,18 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             ['5T', '15T', '1H'],
             lambda s: _slope(s)
         )
+        indicator_alignment = multi_timeframe_indicator_alignment(
+            price_data[['open', 'high', 'low', 'close', 'volume']],
+            ['1H'],
+            {
+                'ema_trend': lambda df: EMAIndicator(df['close'], window=50).ema_indicator().iloc[-1]
+                - EMAIndicator(df['close'], window=200).ema_indicator().iloc[-1],
+                'rsi': lambda df: RSIIndicator(df['close'], window=14).rsi().iloc[-1],
+            },
+        )
+        higher_tf = indicator_alignment.get('1H', {})
+        ema_trend_1h = higher_tf.get('ema_trend')
+        rsi_1h = higher_tf.get('rsi')
         order_book = get_order_book(symbol)
         if order_book:
             spread = compute_spread(order_book)
@@ -627,12 +642,22 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         w = base_weights
         reinforcement = 1.0
         score = 0.0
-        if ema_short.iloc[-1] > ema_long.iloc[-1]:
+        ema_condition = (
+            ema_trend_1h is None
+            or ema_trend_1h != ema_trend_1h
+            or ema_trend_1h > 0
+        )
+        if ema_short.iloc[-1] > ema_long.iloc[-1] and ema_condition:
             score += w["ema"]
         if macd_line.iloc[-1] > 0:
             score += w["macd"]
         rsi_val = rsi.iloc[-1]
-        if rsi_val > 50:
+        rsi_condition = (
+            rsi_1h is None
+            or rsi_1h != rsi_1h
+            or rsi_1h > 40
+        )
+        if rsi_val > 50 and rsi_condition:
             score += w["rsi"]
         if adx.iloc[-1] > 20:
             score += w["adx"]

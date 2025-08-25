@@ -77,3 +77,48 @@ def multi_timeframe_confluence(df: pd.DataFrame, timeframes: List[str], indicato
             continue
         results[tf] = float(indicator_func(resampled['close']))
     return results
+
+
+def multi_timeframe_indicator_alignment(
+    df: pd.DataFrame,
+    timeframes: List[str],
+    indicator_funcs: Dict[str, Callable[[pd.DataFrame], float]],
+) -> Dict[str, Dict[str, float]]:
+    """Compute multiple indicators across several timeframes.
+
+    This helper allows strategies to confirm that the *same* indicators
+    agree on different charts.  ``indicator_funcs`` is a mapping of
+    indicator name to a callable that accepts an OHLCV DataFrame and
+    returns a numeric value (e.g. RSI value, moving‑average difference).
+
+    The return value is a nested dictionary of the form::
+
+        {
+            '5T': {'rsi': 55.0, 'ema_trend': 0.1},
+            '1H': {'rsi': 48.0, 'ema_trend': 0.05},
+        }
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Source OHLCV data with a datetime index.
+    timeframes : List[str]
+        Timeframes to resample to (e.g. ``['5T', '1H']``).
+    indicator_funcs : Dict[str, Callable[[pandas.DataFrame], float]]
+        Mapping of indicator names to callables.
+
+    Returns
+    -------
+    Dict[str, Dict[str, float]]
+        Mapping of timeframe to indicator/value pairs.
+    """
+    results: Dict[str, Dict[str, float]] = {}
+    for tf in timeframes:
+        resampled = resample_ohlcv(df.copy(), tf)
+        if len(resampled) < 2:
+            continue
+        tf_vals: Dict[str, float] = {}
+        for name, func in indicator_funcs.items():
+            tf_vals[name] = float(func(resampled))
+        results[tf] = tf_vals
+    return results
