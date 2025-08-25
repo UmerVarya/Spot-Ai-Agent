@@ -49,7 +49,10 @@ try:
         AverageTrueRange as _TA_AverageTrueRange,
         KeltnerChannel as _TA_KeltnerChannel,
     )
-    from ta.volume import VolumeWeightedAveragePrice as _TA_VolumeWeightedAveragePrice
+    from ta.volume import (
+        VolumeWeightedAveragePrice as _TA_VolumeWeightedAveragePrice,
+        OnBalanceVolumeIndicator as _TA_OnBalanceVolumeIndicator,
+    )
     EMAIndicator = _TA_EMAIndicator
     MACD = _TA_MACD
     ADXIndicator = _TA_ADXIndicator
@@ -62,6 +65,7 @@ try:
     AverageTrueRange = _TA_AverageTrueRange
     KeltnerChannel = _TA_KeltnerChannel
     VolumeWeightedAveragePrice = _TA_VolumeWeightedAveragePrice
+    OnBalanceVolumeIndicator = _TA_OnBalanceVolumeIndicator
 except Exception:
     # Fallback implementations
     def _ema(series: pd.Series, span: int) -> pd.Series:
@@ -142,6 +146,20 @@ except Exception:
             cum_pv = pv.rolling(self.window).sum()
             cum_vol = self.volume.rolling(self.window).sum()
             return cum_pv / (cum_vol + 1e-9)
+    class OnBalanceVolumeIndicator:
+        def __init__(self, close: pd.Series, volume: pd.Series):
+            self.close = close
+            self.volume = volume
+        def on_balance_volume(self) -> pd.Series:
+            obv = [0]
+            for i in range(1, len(self.close)):
+                if self.close.iloc[i] > self.close.iloc[i - 1]:
+                    obv.append(obv[-1] + self.volume.iloc[i])
+                elif self.close.iloc[i] < self.close.iloc[i - 1]:
+                    obv.append(obv[-1] - self.volume.iloc[i])
+                else:
+                    obv.append(obv[-1])
+            return pd.Series(obv, index=self.close.index)
     class DEMAIndicator:
         def __init__(self, series: pd.Series, window: int = 20):
             self.series = series
@@ -390,6 +408,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df['bb_middle'] = bb.bollinger_mavg()
         vwma_calc = VolumeWeightedAveragePrice(df['high'], df['low'], df['close'], df['volume'], window=20)
         df['vwma'] = vwma_calc.volume_weighted_average_price()
+        obv_calc = OnBalanceVolumeIndicator(df['close'], df['volume'])
+        df['obv'] = obv_calc.on_balance_volume()
         df['dema_20'] = DEMAIndicator(df['close'], window=20).dema_indicator()
         df['tema_20'] = TEMAIndicator(df['close'], window=20).tema_indicator()
         stoch = StochasticOscillator(df['high'], df['low'], df['close'], window=14, smooth_window=3)
