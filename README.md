@@ -17,6 +17,21 @@ Set the following environment variables as needed:
   `/home/ubuntu/spot_data/trades`.
 - `RUN_DASHBOARD` – set to `1` to launch the Streamlit dashboard from the agent
 
+## Sentiment Fusion
+
+Headline sentiment is computed using a two-model stack:
+
+* **FinBERT** quickly converts individual headlines into class probabilities
+  (positive/neutral/negative).  The expected value of these probabilities is
+  mapped to ``s_fb \in [-1, 1]`` with confidence ``c_fb``.
+* **FinLlama** aggregates the headlines into a discrete signal ``s_fl \in
+  \{-1,0,1\}`` (bearish/neutral/bullish) with confidence ``c_fl`` and a short
+  rationale.
+
+The fused score ``0.55*s_fb + 0.45*s_fl`` is considered bullish above ``+0.15``
+and bearish below ``-0.15``; otherwise the outlook is neutral.  This fused
+sentiment is passed to the Groq LLM for macro context and final arbitration.
+
 ### Persistent data
 
 All runtime data is written to real directories under
