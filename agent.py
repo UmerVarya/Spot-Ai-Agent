@@ -90,6 +90,47 @@ logger.info(
 )
 
 
+def calculate_dynamic_risk(confidence: float, ml_prob: float, score: float) -> float:
+    """Return dollar risk based on confidence, ML probability and TA score.
+
+    The agent expresses confidence on a 0-10 scale, the ML model supplies a
+    success probability in ``[0, 1]`` and the technical analysis module
+    outputs a normalized score on a 0-10 scale.  We map these inputs to a
+    dollar risk amount between 100 and 200 USDT.  Values above the upper
+    thresholds saturate at 200 and values below the lower bounds default to
+    100.
+
+    Parameters
+    ----------
+    confidence : float
+        Final blended confidence score on a 0-10 scale.
+    ml_prob : float
+        Predicted success probability from the ML model.
+    score : float
+        Technical analysis score on a 0-10 scale.
+
+    Returns
+    -------
+    float
+        Dollar amount to risk on the trade.
+    """
+
+    # Define the ranges over which risk scales
+    min_conf, max_conf = 4.5, 8.0
+    min_prob, max_prob = 0.5, 0.7
+    min_score, max_score = 4.5, 8.0
+
+    conf_norm = (confidence - min_conf) / (max_conf - min_conf)
+    prob_norm = (ml_prob - min_prob) / (max_prob - min_prob)
+    score_norm = (score - min_score) / (max_score - min_score)
+    conf_norm = max(0.0, min(1.0, conf_norm))
+    prob_norm = max(0.0, min(1.0, prob_norm))
+    score_norm = max(0.0, min(1.0, score_norm))
+
+    edge = (conf_norm + prob_norm + score_norm) / 3.0
+    return 100.0 + edge * 100.0
+
+
 def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: float):
     """Return macro gating decision.
 
@@ -515,9 +556,7 @@ def run_agent_loop() -> None:
                             atr_val = indicators_df['atr'].iloc[-1] if 'atr' in indicators_df else None
                         except Exception:
                             atr_val = None
-                        equity = float(os.getenv("ACCOUNT_EQUITY", "10000"))
-                        risk_pct = float(os.getenv("RISK_PCT", "0.01"))
-                        risk_amt = equity * risk_pct
+                        risk_amt = calculate_dynamic_risk(final_conf, ml_prob, score)
                         if atr_val is not None and not np.isnan(atr_val) and atr_val > 0:
                             base_size = risk_amt / (atr_val * 2.0)
                         else:
@@ -559,6 +598,7 @@ def run_agent_loop() -> None:
                             "tp3": tp3,
                             "position_size": position_size,
                             "size": position_size,  # duplicate for dashboard convenience
+                            "risk_amount": risk_amt,
                             "rl_state": state,
                             "rl_multiplier": mult,
                             "leverage": 1,  # default leverage (spot)
