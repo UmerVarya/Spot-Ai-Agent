@@ -494,6 +494,8 @@ def run_agent_loop() -> None:
                     fg=fg,
                     sentiment_conf=sentiment_confidence,
                     pattern=pattern_name,
+                    llm_decision=decision_obj.get("llm_decision", True),
+                    llm_confidence=decision_obj.get("llm_confidence", 5.0),
                 )
                 if ml_prob < 0.5:
                     logger.info(
@@ -576,6 +578,8 @@ def run_agent_loop() -> None:
                             "strategy": pattern_name,  # tag strategy by pattern
                             "narrative": narrative,
                             "ml_prob": ml_prob,
+                            "llm_decision": decision_obj.get("llm_decision"),
+                            "llm_confidence": decision_obj.get("llm_confidence"),
                             "status": {"tp1": False, "tp2": False, "tp3": False, "sl": False},
                             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "news_summary": decision_obj.get("news_summary", ""),
