@@ -4,12 +4,13 @@ Safe wrapper around the Groq LLM API.
 This module extends the basic LLM helper by sanitising user inputs to
 mitigate prompt injection and requesting structured JSON output from
 the model.  The ``get_llm_judgment`` function now instructs the model
-to produce a JSON object with three fields:
+to produce a JSON object with four fields:
 
 * ``decision``: "Yes" or "No" indicating whether to take the trade.
 * ``confidence``: a number between 0 and 10 representing the model's
   confidence in that decision.
 * ``reason``: a brief explanation supporting the decision.
+* ``thesis``: a 2–3 sentence trading thesis summarising the setup.
 
 Downstream callers should attempt to parse the JSON; if parsing fails,
 the raw response is returned for backward compatibility.
@@ -58,14 +59,15 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
 
     The prompt is sanitised before being sent to mitigate injection risks.
     The model is instructed to respond with a JSON object containing the
-    decision (Yes/No), confidence (0–10) and reason.
+    decision (Yes/No), confidence (0–10), reason and a 2–3 sentence thesis.
     """
     try:
         safe_prompt = _sanitize_prompt(prompt)
         user_prompt = (
             safe_prompt
             + "\n\nPlease respond in JSON format with the following keys:"
-            + " decision (Yes or No), confidence (0 to 10 as a number) and reason (a short explanation)."
+            + " decision (Yes or No), confidence (0 to 10 as a number), reason (a short explanation),"
+            + " and thesis (2-3 sentence summary)."
         )
         data = {
             "model": MODEL,
@@ -95,7 +97,8 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
         user_prompt = (
             safe_prompt
             + "\n\nPlease respond in JSON format with the following keys:"
-            + " decision (Yes or No), confidence (0 to 10 as a number) and reason (a short explanation)."
+            + " decision (Yes or No), confidence (0 to 10 as a number), reason (a short explanation),"
+            + " and thesis (2-3 sentence summary)."
         )
         data = {
             "model": MODEL,
