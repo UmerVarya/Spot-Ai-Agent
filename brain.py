@@ -104,17 +104,18 @@ def summarize_recent_news() -> str:
         return ""
 
 
-def _parse_llm_response(resp: str) -> Tuple[bool | None, float | None, str]:
+def _parse_llm_response(resp: str) -> Tuple[bool | None, float | None, str, str]:
     """Attempt to parse a JSON response from the LLM.
 
-    Returns a tuple ``(decision_bool, advisor_rating, reason)``.  If parsing
-    fails, returns ``(None, None, raw_response)``.
+    Returns a tuple ``(decision_bool, advisor_rating, reason, thesis)``.  If
+    parsing fails, returns ``(None, None, raw_response, "")``.
     """
     try:
         data = json.loads(resp)
         decision = data.get("decision", "No")
         rating = data.get("confidence", None)
         reason = data.get("reason", "")
+        thesis = data.get("thesis", "")
         decision_bool = str(decision).strip().lower().startswith("y")
         rating_val: float | None = None
         if isinstance(rating, (int, float, str)):
@@ -122,9 +123,9 @@ def _parse_llm_response(resp: str) -> Tuple[bool | None, float | None, str]:
                 rating_val = float(rating)  # type: ignore[arg-type]
             except Exception:
                 rating_val = None
-        return decision_bool, rating_val, reason
+        return decision_bool, rating_val, reason, thesis
     except Exception:
-        return None, None, resp
+        return None, None, resp, ""
 
 
 def should_trade(
@@ -373,15 +374,21 @@ def should_trade(
             f"Symbol: {symbol}\n"
             f"Direction: {direction}\n"
             f"Technical Score: {score:.2f}\n"
-            f"Current Confidence (pre‑LLM): {final_confidence:.2f}\n"
-            f"Macro Sentiment: {sentiment_bias} (Confidence: {sentiment_confidence})\n"
+            f"Pre-LLM Confidence: {final_confidence:.2f}/10\n"
+            f"Macro Sentiment: {sentiment_bias} (confidence {sentiment_confidence})\n"
+            f"Order Flow: {orderflow}\n"
             f"Pattern: {pattern_name}\n"
             f"Indicators: RSI {indicators.get('rsi', 0):.1f}, MACD {indicators.get('macd', 0):.4f}, ADX {indicators.get('adx', 0):.1f}\n"
-            f"Recent similar trades: {recent_summary}\n\n"
-            "Please perform the following analysis:\n"
-            "1. Summarise the macro sentiment and any relevant macro news (if provided).\n"
-            "2. Discuss any conflicting technical indicators or signals.\n"
-            "3. Provide your overall trading thesis for this setup."
+            f"Volatility (ATR pct): {volatility if volatility is not None and not math.isnan(volatility) else 'N/A'}\n"
+            f"Fear & Greed Index: {fear_greed if fear_greed is not None else 'N/A'}\n"
+            f"Recent News: {news_summary}\n"
+            f"Historical Context: {recent_summary}\n\n"
+            "You are an experienced crypto-trading advisor. Using the information above:\n"
+            "1. Summarize the macro environment and any relevant news.\n"
+            "2. Highlight conflicting signals among technical indicators, sentiment, order flow or history.\n"
+            "3. Incorporate the historical context (e.g., 'Similar setups produced X wins and Y losses') and discuss its implications.\n"
+            "4. Provide a balanced trading thesis that weighs pros and cons and states whether the setup is attractive now.\n"
+            "5. Return your final recommendation as JSON with keys decision, confidence, reason and thesis."
         )
 
         # Query the LLM advisor
@@ -421,7 +428,7 @@ def should_trade(
             }
 
         # Parse the LLM response (JSON or fallback)
-        parsed_decision, advisor_rating, advisor_reason = _parse_llm_response(str(llm_response))
+        parsed_decision, advisor_rating, advisor_reason, advisor_thesis = _parse_llm_response(str(llm_response))
         if parsed_decision is None:
             # Fallback: use regex to extract a number and yes/no at start
             match = re.search(r"(\d+(?:\.\d+)?)", str(llm_response))
@@ -432,6 +439,7 @@ def should_trade(
                     advisor_rating = None
             parsed_decision = str(llm_response).strip().lower().startswith("yes")
             advisor_reason = str(llm_response).strip()
+            advisor_thesis = ""
 
         # Blend advisor rating into final confidence
         if advisor_rating is not None:
@@ -444,13 +452,14 @@ def should_trade(
                 "decision": False,
                 "confidence": final_confidence,
                 "reason": f"LLM advisor vetoed trade: {advisor_reason}",
+                "narrative": advisor_thesis,
                 "news_summary": news_summary,
                 "llm_decision": parsed_decision,
                 "llm_confidence": advisor_rating,
             }
 
         # Generate narrative
-        narrative = generate_trade_narrative(
+        narrative = advisor_thesis or generate_trade_narrative(
             symbol=symbol,
             direction=direction,
             score=score,
