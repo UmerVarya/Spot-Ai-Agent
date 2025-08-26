@@ -43,8 +43,9 @@ from typing import List, Tuple, Dict, Any, Optional
 
 import numpy as np
 import pandas as pd
+from datetime import datetime
 from log_utils import setup_logger
-from trade_storage import COMPLETED_TRADES_FILE
+from trade_storage import COMPLETED_TRADES_FILE, load_trade_history_df
 
 try:
     # Core sklearn components used for modelling and preprocessing
@@ -100,6 +101,13 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
     success_outcomes = {"tp1", "tp2", "tp3", "tp4", "tp4_sl", "win"}
     feature_list: List[List[float]] = []
     labels: List[int] = []
+    if "entry_time" in df.columns:
+        df = df.sort_values(by="entry_time")
+    elif "timestamp" in df.columns:
+        df = df.sort_values(by="timestamp")
+    last_exit: Optional[pd.Timestamp] = None
+    recent_outcomes: List[str] = []
+    window = 5
     for _, row in df.iterrows():
         try:
             score = float(row.get("score", 0))
@@ -124,15 +132,30 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
             htf_trend = float(row.get("htf_trend", 0.0)) / 100.0
             order_imbalance = float(row.get("order_imbalance", 0.0)) / 100.0
             macro_indicator = float(row.get("macro_indicator", 0.0)) / 100.0
-            # Additional technical indicators from the learning log.  These
-            # columns may not always be present so we fall back to sensible
-            # defaults when missing.
             macd_val = float(row.get("macd", 0.0)) / 100.0
             rsi_val = float(row.get("rsi", 50.0)) / 100.0
             sma_val = float(row.get("sma", 0.0)) / 100.0
             atr_val = float(row.get("atr", 0.0)) / 100.0
             vol_val = float(row.get("volume", 0.0)) / 1_000_000.0
             macd_rsi = macd_val * rsi_val  # interaction feature to filter noise
+            llm_decision_raw = row.get("llm_decision", True)
+            llm_decision = 1.0 if str(llm_decision_raw).lower() in {"1", "true", "yes"} else 0.0
+            llm_conf_raw = row.get("llm_confidence", 5.0)
+            try:
+                llm_conf_val = float(llm_conf_raw) / 10.0
+            except Exception:
+                llm_conf_val = 0.5
+            entry_dt = pd.to_datetime(row.get("entry_time", row.get("timestamp")), errors="coerce")
+            exit_dt = pd.to_datetime(row.get("exit_time", row.get("timestamp")), errors="coerce")
+            if last_exit is not None and entry_dt is not None:
+                time_since_last = (entry_dt - last_exit).total_seconds() / 3600.0
+            else:
+                time_since_last = 0.0
+            if recent_outcomes:
+                win_count = sum(1 for o in recent_outcomes if o in success_outcomes)
+                recent_win_rate = win_count / len(recent_outcomes)
+            else:
+                recent_win_rate = 0.5
             features = [
                 score,
                 conf,
@@ -152,10 +175,19 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
                 atr_val,
                 vol_val,
                 macd_rsi,
+                llm_decision,
+                llm_conf_val,
+                time_since_last / 24.0,
+                recent_win_rate,
             ]
             feature_list.append(features)
             outcome = str(row.get("outcome", "loss")).lower()
             labels.append(1 if outcome in success_outcomes else 0)
+            recent_outcomes.append(outcome)
+            if len(recent_outcomes) > window:
+                recent_outcomes.pop(0)
+            if exit_dt is not None:
+                last_exit = exit_dt
         except Exception:
             continue
     X = np.array(feature_list, dtype=float)
@@ -308,7 +340,10 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
                 'scaler_scale': scaler.scale_.tolist(),
                 'feature_names': [
                     'score', 'confidence', 'session_id', 'btc_dom',
-                    'fear_greed', 'sent_conf', 'pattern_len'
+                    'fear_greed', 'sent_conf', 'sent_bias', 'pattern_len',
+                    'volatility', 'htf_trend', 'order_imbalance', 'macro_indicator',
+                    'macd', 'rsi', 'sma', 'atr', 'volume', 'macd_rsi',
+                    'llm_decision', 'llm_confidence', 'time_since_last', 'recent_win_rate'
                 ],
             }
             with open(MODEL_JSON, 'w') as f:
@@ -338,7 +373,10 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
             'sigma': sigma.tolist(),
             'feature_names': [
                 'score', 'confidence', 'session_id', 'btc_dom',
-                'fear_greed', 'sent_conf', 'pattern_len'
+                'fear_greed', 'sent_conf', 'sent_bias', 'pattern_len',
+                'volatility', 'htf_trend', 'order_imbalance', 'macro_indicator',
+                'macd', 'rsi', 'sma', 'atr', 'volume', 'macd_rsi',
+                'llm_decision', 'llm_confidence', 'time_since_last', 'recent_win_rate'
             ],
         }
         try:
@@ -360,7 +398,19 @@ def _load_model_metadata() -> Dict[str, Any]:
         return {}
 
 
-def _prepare_feature_vector(score: float, confidence: float, session: str, btc_d: float, fg: float, sentiment_conf: float, pattern: str) -> List[float]:
+def _prepare_feature_vector(
+    score: float,
+    confidence: float,
+    session: str,
+    btc_d: float,
+    fg: float,
+    sentiment_conf: float,
+    pattern: str,
+    llm_decision: bool,
+    llm_confidence: float,
+    time_since_last: float,
+    recent_win_rate: float,
+) -> List[float]:
     session_map = {"Asia": 0, "Europe": 1, "US": 2, "New York": 2, "unknown": 3}
     session_id = session_map.get(session, 3)
     pattern_len = len(str(pattern))
@@ -372,6 +422,10 @@ def _prepare_feature_vector(score: float, confidence: float, session: str, btc_d
         fg / 100.0,
         sentiment_conf / 10.0,
         pattern_len / 10.0,
+        1.0 if llm_decision else 0.0,
+        llm_confidence / 10.0,
+        time_since_last / 24.0,
+        recent_win_rate,
     ]
 
 
@@ -382,7 +436,9 @@ def predict_success_probability(
     btc_d: float,
     fg: float,
     sentiment_conf: float,
-    pattern: str
+    pattern: str,
+    llm_decision: bool = True,
+    llm_confidence: float = 5.0,
 ) -> float:
     """
     Predict the probability of a trade succeeding based on current features.
@@ -396,7 +452,45 @@ def predict_success_probability(
     metadata = _load_model_metadata()
     if not metadata:
         return 0.5
-    x = np.array(_prepare_feature_vector(score, confidence, session, btc_d, fg, sentiment_conf, pattern))
+    history = load_trade_history_df()
+    time_since_last = 0.0
+    recent_win_rate = 0.5
+    success_outcomes = {"tp1", "tp2", "tp3", "tp4", "tp4_sl", "win"}
+    if not history.empty:
+        try:
+            if "exit_time" in history.columns:
+                history = history.sort_values(by="exit_time")
+                last_time = pd.to_datetime(history["exit_time"].iloc[-1], errors="coerce")
+            else:
+                history = history.sort_values(by="timestamp")
+                last_time = pd.to_datetime(history["timestamp"].iloc[-1], errors="coerce")
+            if last_time is not None and not pd.isna(last_time):
+                time_since_last = (datetime.utcnow() - last_time).total_seconds() / 3600.0
+        except Exception:
+            pass
+        try:
+            recent = history.tail(5)
+            outcomes = [str(o).lower() for o in recent.get("outcome", [])]
+            wins = [o for o in outcomes if o in success_outcomes]
+            if outcomes:
+                recent_win_rate = len(wins) / len(outcomes)
+        except Exception:
+            pass
+    x = np.array(
+        _prepare_feature_vector(
+            score,
+            confidence,
+            session,
+            btc_d,
+            fg,
+            sentiment_conf,
+            pattern,
+            llm_decision,
+            llm_confidence,
+            time_since_last,
+            recent_win_rate,
+        )
+    )
     model_type = metadata.get('model_type', 'manual')
     try:
         # Use sklearn model if available
