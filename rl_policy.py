@@ -4,11 +4,12 @@ Reinforcement‑learning based position sizing for the Spot‑AI Agent.
 This module implements a simple Q‑learning policy to adjust the
 position sizing multiplier based on recent trading outcomes.  The goal
 is to allocate more capital to high‑reward states and less to
-underperforming ones.  The state is defined by the previous trade
-outcome (``win`` or ``loss``), and the action space consists of
-discrete multipliers (e.g., ``[0.5, 1.0, 1.5]``).  Each action
-represents a fraction of the default position size computed by the
-agent.
+underperforming ones.  While the basic implementation uses only the
+previous trade outcome (``win``/``loss``/``neutral``) as the state, it
+also supports richer context such as volatility regimes.  The action
+space consists of discrete multipliers (e.g., ``[0.5, 1.0, 1.5, 2.0]``),
+each representing a fraction of the default position size computed by
+the agent.
 
 This lightweight RL approach is an approximation to more sophisticated
 actor–critic methods.  It learns a Q‑table mapping states and actions
@@ -19,9 +20,10 @@ tends to favour the multiplier that yields higher returns.
 Usage::
 
     from rl_policy import RLPositionSizer
+    from trade_utils import get_rl_state
     rl_sizer = RLPositionSizer()
-    # during trade entry
-    state = 'win' if last_trade_was_profitable else 'loss'
+    # during trade entry combine last outcome with volatility percentile
+    state = get_rl_state(vol_percentile)
     multiplier = rl_sizer.select_multiplier(state)
     position_size = base_size * multiplier
     ...

@@ -58,7 +58,7 @@ from sequence_model import predict_next_return, train_sequence_model, SEQ_PKL
 from drawdown_guard import is_trading_blocked
 import numpy as np
 from rl_policy import RLPositionSizer
-from trade_utils import get_last_trade_outcome
+from trade_utils import get_rl_state
 from volatility_regime import atr_percentile
 
 
@@ -523,7 +523,7 @@ def run_agent_loop() -> None:
                         else:
                             atr_val = entry_price * 0.02
                             base_size = risk_amt / (entry_price * 0.02)
-                        state = get_last_trade_outcome() or "neutral"
+                        state = get_rl_state(sym_vol_pct)
                         mult = rl_sizer.select_multiplier(state)
                         position_size = round(max(base_size * mult, 0), 6)
                         sl = round(entry_price - atr_val * 2.0, 6)
