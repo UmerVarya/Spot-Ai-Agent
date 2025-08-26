@@ -523,6 +523,39 @@ def get_last_trade_outcome(log_file: str = TRADE_LOG_FILE) -> str | None:
     except Exception:
         return None
 
+def get_rl_state(vol_percentile: float | None, log_file: str = TRADE_LOG_FILE) -> str:
+    """Construct a compound RL state from last outcome and volatility.
+
+    The state combines the result of the most recently closed trade with a
+    simple volatility regime derived from the current ATR percentile.  This
+    provides additional context for the reinforcement-learning position sizer
+    beyond merely "win" or "loss".
+
+    Parameters
+    ----------
+    vol_percentile : float | None
+        Current ATR percentile expressed as a value between 0 and 1.  ``None`` or
+        ``NaN`` results are treated as ``unknown``.
+    log_file : str, optional
+        Path to the trade log inspected for the last trade outcome.
+
+    Returns
+    -------
+    str
+        State label in the form ``"win_high_vol"``, ``"loss_low_vol"`` or
+        ``"neutral_mid_vol"`` when no prior trade information exists.
+    """
+    outcome = get_last_trade_outcome(log_file) or "neutral"
+    if vol_percentile is None or np.isnan(vol_percentile):
+        vol_bucket = "unknown_vol"
+    elif vol_percentile > 0.75:
+        vol_bucket = "high_vol"
+    elif vol_percentile < 0.25:
+        vol_bucket = "low_vol"
+    else:
+        vol_bucket = "mid_vol"
+    return f"{outcome}_{vol_bucket}"
+
 def log_signal(symbol: str, session: str, score: float, direction: Optional[str], weights: dict,
                candle_patterns: list, chart_pattern: Optional[str],
                indicators: Optional[dict] = None) -> None:
