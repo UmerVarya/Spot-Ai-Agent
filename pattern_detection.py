@@ -147,3 +147,99 @@ def detect_head_and_shoulders(df: pd.DataFrame, lookback: int = 60, distance: in
             continue
         return True
     return False
+
+
+def detect_double_bottom(
+    df: pd.DataFrame,
+    lookback: int = 60,
+    tolerance: float = 0.02,
+    volume_lookback: int = 20,
+) -> Tuple[bool, bool]:
+    """Detect a double bottom pattern and whether volume confirms the breakout.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        OHLCV data.
+    lookback : int
+        Number of bars to inspect from the end of ``df``.
+    tolerance : float
+        Maximum fractional difference allowed between the two bottoms.
+    volume_lookback : int
+        Bars to use when computing average volume for confirmation.
+
+    Returns
+    -------
+    tuple
+        ``(pattern_detected, volume_confirmed)``
+    """
+    if df is None or len(df) < lookback or "close" not in df or "low" not in df:
+        return False, False
+    segment = df.iloc[-lookback:]
+    lows = segment["low"].to_numpy()
+    closes = segment["close"].to_numpy()
+    volumes = segment["volume"].to_numpy() if "volume" in segment else None
+
+    half = lookback // 2
+    first_low_idx = np.argmin(lows[:half])
+    second_low_idx_rel = np.argmin(lows[half:])
+    second_low_idx = half + second_low_idx_rel
+
+    first_low = lows[first_low_idx]
+    second_low = lows[second_low_idx]
+
+    if abs(first_low - second_low) / max(first_low, 1e-9) > tolerance:
+        return False, False
+
+    neckline = closes[first_low_idx:second_low_idx].max()
+    breakout = closes[-1] > neckline
+
+    vol_confirm = False
+    if breakout and volumes is not None and len(volumes) > volume_lookback:
+        avg_vol = volumes[-volume_lookback - 1 : -1].mean()
+        vol_confirm = volumes[-1] > avg_vol * 1.2
+
+    return bool(breakout), bool(vol_confirm)
+
+
+def detect_cup_and_handle(
+    df: pd.DataFrame,
+    lookback: int = 80,
+    volume_lookback: int = 20,
+) -> Tuple[bool, bool]:
+    """Detect a cup-and-handle pattern with optional volume confirmation."""
+    if df is None or len(df) < lookback or "close" not in df:
+        return False, False
+    segment = df.iloc[-lookback:]
+    closes = segment["close"].to_numpy()
+    volumes = segment["volume"].to_numpy() if "volume" in segment else None
+
+    half = lookback // 2
+    handle_window = max(5, lookback // 5)
+    right_search_end = lookback - handle_window
+    left_peak = np.argmax(closes[:half])
+    right_peak = np.argmax(closes[half:right_search_end]) + half
+    bottom_idx = np.argmin(closes[left_peak:right_peak]) + left_peak
+
+    left_price = closes[left_peak]
+    right_price = closes[right_peak]
+    bottom_price = closes[bottom_idx]
+
+    if bottom_price > min(left_price, right_price) * 0.9:
+        return False, False
+    if abs(left_price - right_price) / max(left_price, 1e-9) > 0.05:
+        return False, False
+
+    handle_low = closes[right_peak:right_search_end].min()
+    cup_height = left_price - bottom_price
+    if cup_height <= 0 or (right_price - handle_low) / cup_height > 0.5:
+        return False, False
+
+    breakout = closes[-1] > right_price
+
+    vol_confirm = False
+    if breakout and volumes is not None and len(volumes) > volume_lookback:
+        avg_vol = volumes[-volume_lookback - 1 : -1].mean()
+        vol_confirm = volumes[-1] > avg_vol * 1.2
+
+    return bool(breakout), bool(vol_confirm)
