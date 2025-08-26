@@ -160,9 +160,31 @@ def manage_trades() -> None:
             # Take profit logic
             if not trade['status'].get('tp1') and current_price >= tp1:
                 trade['status']['tp1'] = True
-                # Move stop loss to entry on TP1 hit
-                trade['sl'] = entry
-                logger.info("%s hit TP1 — SL moved to Entry", symbol)
+                # Only trail if momentum confirms strength
+                if adx > 25 and macd_hist > 0:
+                    trade['sl'] = entry
+                    logger.info("%s hit TP1 with strong momentum — SL moved to Entry", symbol)
+                else:
+                    logger.info("%s hit TP1 but momentum weak — exiting at TP1", symbol)
+                    qty = float(trade.get('size', trade.get('position_size', 1)))
+                    commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
+                    fees = current_price * qty * commission_rate
+                    slip_price = simulate_slippage(current_price, direction=direction)
+                    slippage_amt = abs(slip_price - current_price)
+                    trade['exit_price'] = current_price
+                    trade['exit_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    trade['outcome'] = "tp1_exit"
+                    log_trade_result(
+                        trade,
+                        outcome="tp1_exit",
+                        exit_price=current_price,
+                        exit_time=trade['exit_time'],
+                        fees=fees,
+                        slippage=slippage_amt,
+                    )
+                    _update_rl(trade, current_price)
+                    send_email(f"✅ TP1 Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
+                    continue
             elif trade['status'].get('tp1') and not trade['status'].get('tp2') and current_price >= tp2:
                 trade['status']['tp2'] = True
                 trade['sl'] = tp1
@@ -196,9 +218,14 @@ def manage_trades() -> None:
                 _update_rl(trade, sl)
                 send_email(f" Stop Loss Hit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                 continue
-            # Tighten stop-loss after TP1 if momentum fades (no TP4 mode)
+            # Trailing logic after TP1 before entering TP4 mode
             if trade['status'].get('tp1') and not trade.get('profit_riding'):
-                if adx < 15 or macd_hist < 0:
+                if adx > 25 and macd_hist > 0:
+                    trail_sl = round(max(entry, current_price - atr), 6)
+                    if trail_sl > trade['sl']:
+                        trade['sl'] = trail_sl
+                        logger.info("%s TP1 trail: SL moved to %s", symbol, trail_sl)
+                elif adx < 15 or macd_hist < 0:
                     tightened_sl = round(current_price - atr, 6)
                     if tightened_sl > trade['sl']:
                         trade['sl'] = tightened_sl
