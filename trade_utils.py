@@ -296,6 +296,8 @@ try:
         detect_triangle_wedge,
         detect_flag_pattern,
         detect_head_and_shoulders,
+        detect_double_bottom,
+        detect_cup_and_handle,
     )  # type: ignore
     from candlestick_patterns import detect_candlestick_patterns  # type: ignore
 except Exception:
@@ -307,6 +309,10 @@ except Exception:
         )  # type: ignore
         def detect_head_and_shoulders(df):
             return False
+        def detect_double_bottom(df):
+            return (False, False)
+        def detect_cup_and_handle(df):
+            return (False, False)
     except Exception:
         def detect_candlestick_patterns(df):
             return []
@@ -316,6 +322,10 @@ except Exception:
             return False
         def detect_head_and_shoulders(df):
             return False
+        def detect_double_bottom(df):
+            return (False, False)
+        def detect_cup_and_handle(df):
+            return (False, False)
 
 # Path to stored symbol scores
 SYMBOL_SCORES_FILE = os.path.join(os.path.dirname(__file__), "symbol_scores.json")
@@ -700,6 +710,8 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             "chart": 1.2,
             "flag": 1.0,
             "hs": 1.2,
+            "double_bottom": 0.6,
+            "cup_handle": 0.6,
             "atr": 0.8,
             "hurst": 0.8,
             "confluence": 1.0,
@@ -788,6 +800,10 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         flag_flag = int(bool(flag_pattern))
         head_shoulders = detect_head_and_shoulders(price_data)
         hs_flag = -1 if head_shoulders else 0
+        double_bottom, db_vol = detect_double_bottom(price_data)
+        double_flag = int(bool(double_bottom))
+        cup_handle, cup_vol = detect_cup_and_handle(price_data)
+        cup_flag = int(bool(cup_handle))
         if candle_flag:
             score += w["candle"]
         if chart_flag:
@@ -796,6 +812,10 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             score += w["flag"]
         if hs_flag:
             score -= w["hs"]
+        if double_flag:
+            score += w["double_bottom"] * (1.2 if db_vol else 1.0)
+        if cup_flag:
+            score += w["cup_handle"] * (1.2 if cup_vol else 1.0)
         confluence_flag = int(all(v > 0 for v in confluence.values() if v == v))
         if confluence_flag:
             score += w["confluence"]
@@ -834,7 +854,20 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             if not near_support and normalized_score < 5.5:
                 logger.warning("Skipping %s: away from support with score %.2f < 5.5", symbol, normalized_score)
                 return 0, None, 0, None
-        pattern_name = triggered_patterns[0] if triggered_patterns else (chart_pattern if chart_pattern else "None")
+        if triggered_patterns:
+            pattern_name = triggered_patterns[0]
+        elif double_flag:
+            pattern_name = "double_bottom"
+        elif cup_flag:
+            pattern_name = "cup_handle"
+        elif chart_flag:
+            pattern_name = "triangle_wedge"
+        elif flag_flag:
+            pattern_name = "flag"
+        elif hs_flag:
+            pattern_name = "head_and_shoulders"
+        else:
+            pattern_name = "None"
         try:
             scores = {}
             if os.path.exists(SYMBOL_SCORES_FILE):
@@ -869,6 +902,8 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             "chart": chart_flag,
             "flag": flag_flag,
             "hs": hs_flag,
+            "double_bottom": double_flag,
+            "cup_handle": cup_flag,
         }
         log_signal(symbol, session_name, normalized_score, direction, w, triggered_patterns, chart_pattern, indicator_flags)
         return normalized_score, direction, position_size, pattern_name
