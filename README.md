@@ -15,7 +15,8 @@ Set the following environment variables as needed:
 - `BINANCE_API_KEY` / `BINANCE_API_SECRET`
 - `DATA_DIR` – optional override for trade storage. Defaults to
   `/home/ubuntu/spot_data/trades`.
-- `RUN_DASHBOARD` – set to `1` to launch the Streamlit dashboard from the agent
+- `RUN_DASHBOARD` – set to `1` to launch the Streamlit dashboard from the agent,
+  or `0` to rely on the separate `spot-ai-dashboard` service
 
 ## Sentiment Fusion
 
