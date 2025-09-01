@@ -359,13 +359,22 @@ def get_market_session() -> str:
         return "US"
 
 def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
-    """Fetch recent OHLCV data for a symbol from Binance."""
+    """Fetch recent OHLCV data for a symbol from Binance.
+
+    The bot previously relied on 5‑minute candles which could miss
+    intra‑candle spikes.  To improve reactivity this now pulls 1‑minute
+    klines so that trade management logic can see the high and low of
+    the most recent minute instead of only the 5‑minute close.
+    """
     if client is None:
         logger.warning("Binance client unavailable; cannot fetch data for %s.", symbol)
         return None
     try:
         mapped_symbol = map_symbol_for_binance(symbol)
-        klines = client.get_klines(symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_5MINUTE, limit=500)
+        # Use 1‑minute klines for higher‑resolution price checks
+        klines = client.get_klines(
+            symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_1MINUTE, limit=500
+        )
         df = pd.DataFrame(klines, columns=[
             "timestamp", "open", "high", "low", "close", "volume", "close_time",
             "quote_asset_volume", "number_of_trades", "taker_buy_base", "taker_buy_quote", "ignore",

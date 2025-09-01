@@ -75,14 +75,19 @@ def create_new_trade(trade: dict) -> bool:
     return store_trade(trade)
 
 
-def should_exit_early(trade: dict, current_price: float, price_data) -> Tuple[bool, Optional[str]]:
-    """Determine if a trade should exit early based on price and indicators."""
+def should_exit_early(trade: dict, observed_price: float, price_data) -> Tuple[bool, Optional[str]]:
+    """Determine if a trade should exit early based on price and indicators.
+
+    ``observed_price`` represents the most adverse price seen during the
+    polling interval (e.g., the candle low for long trades) so that sharp
+    wicks can still trigger an exit.
+    """
     entry = trade.get('entry')
     direction = trade.get('direction')
     if entry is None or direction is None:
         return False, None
     # 1. Price reversed significantly
-    if direction == "long" and current_price < entry * (1 - EARLY_EXIT_THRESHOLD):
+    if direction == "long" and observed_price < entry * (1 - EARLY_EXIT_THRESHOLD):
         return True, "Price dropped beyond early exit threshold"
     # 2. Indicator weakness
     indicators = calculate_indicators(price_data)
@@ -112,15 +117,21 @@ def manage_trades() -> None:
         price_data = get_price_data(symbol)
         if price_data is None or price_data.empty:
             continue
+        # Use the latest candle's high/low in addition to the close so that
+        # intrabar moves that touch TP/SL levels are not missed if price
+        # reverses before the next polling cycle.
         current_price = price_data['close'].iloc[-1]
+        recent_high = price_data['high'].iloc[-1]
+        recent_low = price_data['low'].iloc[-1]
         direction = trade.get('direction')
         entry = trade.get('entry')
         sl = trade.get('sl')
         tp1 = trade.get('tp1')
         tp2 = trade.get('tp2')
         tp3 = trade.get('tp3')
-        # Evaluate early exit conditions
-        exit_now, reason = should_exit_early(trade, current_price, price_data)
+        # Evaluate early exit conditions using the candle low to capture
+        # sharp drops within the interval
+        exit_now, reason = should_exit_early(trade, recent_low, price_data)
         if exit_now:
             logger.info("Early exit triggered for %s: %s", symbol, reason)
             # Compute fees and slippage on exit
@@ -158,7 +169,7 @@ def manage_trades() -> None:
         # Only long trades are supported in spot mode
         if direction == "long":
             # Take profit logic
-            if not trade['status'].get('tp1') and current_price >= tp1:
+            if not trade['status'].get('tp1') and recent_high >= tp1:
                 trade['status']['tp1'] = True
                 # Only trail if momentum confirms strength
                 if adx > 25 and macd_hist > 0:
@@ -168,36 +179,36 @@ def manage_trades() -> None:
                     logger.info("%s hit TP1 but momentum weak — exiting at TP1", symbol)
                     qty = float(trade.get('size', trade.get('position_size', 1)))
                     commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
-                    fees = current_price * qty * commission_rate
-                    slip_price = simulate_slippage(current_price, direction=direction)
-                    slippage_amt = abs(slip_price - current_price)
-                    trade['exit_price'] = current_price
+                    fees = tp1 * qty * commission_rate
+                    slip_price = simulate_slippage(tp1, direction=direction)
+                    slippage_amt = abs(slip_price - tp1)
+                    trade['exit_price'] = tp1
                     trade['exit_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                     trade['outcome'] = "tp1_exit"
                     log_trade_result(
                         trade,
                         outcome="tp1_exit",
-                        exit_price=current_price,
+                        exit_price=tp1,
                         exit_time=trade['exit_time'],
                         fees=fees,
                         slippage=slippage_amt,
                     )
-                    _update_rl(trade, current_price)
+                    _update_rl(trade, tp1)
                     send_email(f"✅ TP1 Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                     continue
-            elif trade['status'].get('tp1') and not trade['status'].get('tp2') and current_price >= tp2:
+            elif trade['status'].get('tp1') and not trade['status'].get('tp2') and recent_high >= tp2:
                 trade['status']['tp2'] = True
                 trade['sl'] = tp1
                 logger.info("%s hit TP2 — SL moved to TP1", symbol)
-            elif trade['status'].get('tp2') and not trade['status'].get('tp3') and current_price >= tp3:
+            elif trade['status'].get('tp2') and not trade['status'].get('tp3') and recent_high >= tp3:
                 trade['status']['tp3'] = True
                 trade['profit_riding'] = True  # enable TP4 mode
                 trade['sl'] = tp2
                 logger.info("%s hit TP3 — Entering TP4 Profit Riding Mode", symbol)
                 updated_trades.append(trade)
                 continue
-            elif current_price <= sl:
-                # Stop loss hit
+            elif recent_low <= sl:
+                # Stop loss hit (use intrabar low so quick wicks trigger)
                 logger.info("%s hit Stop Loss!", symbol)
                 qty = float(trade.get('size', trade.get('position_size', 1)))
                 commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
