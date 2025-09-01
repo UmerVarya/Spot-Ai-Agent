@@ -300,6 +300,39 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     }
 
 
+def compute_llm_decision_stats() -> tuple[int, int, int]:
+    """Return counts of LLM-approved, vetoed and error trades."""
+    approved = vetoed = errors = 0
+    # Active trades
+    for t in load_active_trades():
+        if t.get("llm_error"):
+            errors += 1
+        elif t.get("llm_decision") is False:
+            vetoed += 1
+        else:
+            approved += 1
+    # Completed trades
+    df = load_completed_df(COMPLETED_TRADES_FILE)
+    if not df.empty:
+        for _, row in df.iterrows():
+            if str(row.get("llm_error")).lower() in {"true", "1"}:
+                errors += 1
+            elif str(row.get("llm_decision")).lower() in {"false", "0", "no"}:
+                vetoed += 1
+            else:
+                approved += 1
+    # Rejected trades (LLM veto or error)
+    if os.path.exists(REJECTED_TRADES_FILE) and os.path.getsize(REJECTED_TRADES_FILE) > 0:
+        rej_df = pd.read_csv(REJECTED_TRADES_FILE)
+        for reason in rej_df.get("reason", []):
+            r = str(reason).lower()
+            if "llm advisor vetoed trade" in r:
+                vetoed += 1
+            elif "llm" in r and "error" in r:
+                errors += 1
+    return approved, vetoed, errors
+
+
 def render_live_tab() -> None:
     """Render the live trade dashboard tab."""
     # Sidebar controls
@@ -318,6 +351,15 @@ def render_live_tab() -> None:
         row = format_active_row(sym, data)
         if row:
             active_rows.append(row)
+    # LLM decision statistics
+    approved, vetoed, errors = compute_llm_decision_stats()
+    total_decisions = approved + vetoed + errors
+    if total_decisions:
+        st.subheader("🤖 LLM Decision Outcomes")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Approved", f"{approved} ({approved / total_decisions:.0%})")
+        c2.metric("Vetoed", f"{vetoed} ({vetoed / total_decisions:.0%})")
+        c3.metric("Errors", f"{errors} ({errors / total_decisions:.0%})")
     # Display live PnL section
     st.subheader("📈 Live PnL – Active Trades")
     if active_rows:

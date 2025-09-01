@@ -621,6 +621,7 @@ def run_agent_loop() -> None:
                             "ml_prob": ml_prob,
                             "llm_decision": decision_obj.get("llm_decision"),
                             "llm_confidence": decision_obj.get("llm_confidence"),
+                            "llm_error": decision_obj.get("llm_error"),
                             "status": {"tp1": False, "tp2": False, "tp3": False, "sl": False},
                             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "news_summary": decision_obj.get("news_summary", ""),

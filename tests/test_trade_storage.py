@@ -38,6 +38,7 @@ def test_log_trade_result_extended_fields(tmp_path, monkeypatch):
     assert rows[0]["sentiment_confidence"] == "8.0"
     assert "volatility" in rows[0]
     assert "macro_indicator" in rows[0]
+    assert "llm_error" in rows[0]
 
 
 def test_duplicate_trade_guard(tmp_path, monkeypatch):

@@ -22,6 +22,7 @@ import re
 import json
 import aiohttp
 import asyncio
+import time
 from log_utils import setup_logger
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -78,15 +79,29 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
             "temperature": temperature,
             "max_tokens": max_tokens
         }
+        start = time.perf_counter()
         response = requests.post(GROQ_API_URL, headers=HEADERS, json=data)
+        latency = time.perf_counter() - start
         if response.status_code == 200:
-            content = response.json().get("choices", [])[0].get("message", {}).get("content", "").strip()
+            content = (
+                response.json()
+                .get("choices", [])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
+            logger.info("LLM call succeeded in %.2fs", latency)
             return content
-        else:
-            logger.error("LLM request failed: %s, %s", response.status_code, response.text)
-            return "LLM error: Unable to generate response."
+        logger.error(
+            "LLM request failed in %.2fs: %s, %s",
+            latency,
+            response.status_code,
+            response.text,
+        )
+        return "LLM error: Unable to generate response."
     except Exception as e:
-        logger.error("LLM Exception: %s", e, exc_info=True)
+        latency = time.perf_counter() - start if 'start' in locals() else 0.0
+        logger.error("LLM Exception after %.2fs: %s", latency, e, exc_info=True)
         return "LLM error: Exception occurred."
 
 
@@ -109,13 +124,27 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
             "temperature": temperature,
             "max_tokens": max_tokens
         }
+        start = time.perf_counter()
         async with aiohttp.ClientSession() as session:
             async with session.post(GROQ_API_URL, headers=HEADERS, json=data) as resp:
+                latency = time.perf_counter() - start
                 if resp.status == 200:
                     result = await resp.json()
-                    return result.get("choices", [])[0].get("message", {}).get("content", "").strip()
-                logger.error("LLM request failed: %s, %s", resp.status, await resp.text())
+                    logger.info("Async LLM call succeeded in %.2fs", latency)
+                    return (
+                        result.get("choices", [])[0]
+                        .get("message", {})
+                        .get("content", "")
+                        .strip()
+                    )
+                logger.error(
+                    "LLM request failed in %.2fs: %s, %s",
+                    latency,
+                    resp.status,
+                    await resp.text(),
+                )
                 return "LLM error: Unable to generate response."
     except Exception as e:
-        logger.error("Async LLM Exception: %s", e, exc_info=True)
+        latency = time.perf_counter() - start if 'start' in locals() else 0.0
+        logger.error("Async LLM Exception after %.2fs: %s", latency, e, exc_info=True)
         return "LLM error: Exception occurred."
