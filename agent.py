@@ -598,6 +598,7 @@ def run_agent_loop() -> None:
                             "tp3": tp3,
                             "position_size": position_size,
                             "size": position_size,  # duplicate for dashboard convenience
+                            "initial_size": position_size,  # track original size for partial exits
                             "risk_amount": risk_amt,
                             "rl_state": state,
                             "rl_multiplier": mult,
