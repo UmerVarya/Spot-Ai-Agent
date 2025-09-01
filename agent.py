@@ -566,9 +566,9 @@ def run_agent_loop() -> None:
                         mult = rl_sizer.select_multiplier(state)
                         position_size = round(max(base_size * mult, 0), 6)
                         sl = round(entry_price - atr_val * 2.0, 6)
-                        tp1 = round(entry_price + atr_val * 2.0, 6)
-                        tp2 = round(entry_price + atr_val * 3.0, 6)
-                        tp3 = round(entry_price + atr_val * 4.0, 6)
+                        tp1 = round(entry_price + atr_val * 1.0, 6)
+                        tp2 = round(entry_price + atr_val * 2.0, 6)
+                        tp3 = round(entry_price + atr_val * 3.0, 6)
                         try:
                             ema20 = indicators_df['ema_20'].iloc[-1]
                             ema50 = indicators_df['ema_50'].iloc[-1]
