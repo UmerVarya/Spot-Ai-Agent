@@ -4,17 +4,24 @@ import trade_utils
 
 def test_update_stop_loss_calls_util(monkeypatch):
     calls = {}
+    emails = {}
 
     def fake_update(symbol, qty, price, existing, tp):
         calls['args'] = (symbol, qty, price, existing, tp)
         return '123'
 
+    def fake_email(subject, details):
+        emails['args'] = (subject, details)
+
     monkeypatch.setattr(trade_manager, 'update_stop_loss_order', fake_update)
+    monkeypatch.setattr(trade_manager, 'send_email', fake_email)
     trade = {'symbol': 'BTCUSDT', 'size': 1, 'sl': 100, 'tp1': 110, 'status': {'tp1': False}}
     trade_manager._update_stop_loss(trade, 90)
     assert trade['sl'] == 90
     assert trade['sl_order_id'] == '123'
     assert calls['args'] == ('BTCUSDT', 1.0, 90, None, 110)
+    assert emails['args'][0] == 'SL Updated: BTCUSDT'
+    assert emails['args'][1]['new_sl'] == 90
 
 
 def test_update_stop_loss_order_places_and_cancels(monkeypatch):
