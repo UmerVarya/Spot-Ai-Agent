@@ -679,11 +679,19 @@ def render_live_tab() -> None:
             if c in hist_df.columns
         ]
         hist_display = hist_df[display_cols].copy()
-        # Format numeric columns
-        for col in ["PnL (net $)", "PnL (%)", "Duration (min)", "fees", "slippage", "notional"]:
+        # Format numeric columns safely by coercing to numbers before rounding
+        for col in [
+            "PnL (net $)",
+            "PnL (%)",
+            "Duration (min)",
+            "fees",
+            "slippage",
+            "notional",
+            "Notional",
+        ]:
             if col in hist_display.columns:
-                hist_display[col] = hist_display[col].apply(
-                    lambda x: round(x, 2) if pd.notnull(x) else x
+                hist_display[col] = (
+                    pd.to_numeric(hist_display[col], errors="coerce").round(2)
                 )
         st.dataframe(hist_display, use_container_width=True)
         # CSV download button
