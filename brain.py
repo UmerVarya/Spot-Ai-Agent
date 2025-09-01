@@ -343,6 +343,7 @@ def should_trade(
                 "reason": "Trade direction is not long (spot-only mode)",
                 "llm_decision": None,
                 "llm_confidence": None,
+                "llm_error": False,
             }
         if score < score_threshold:
             return {
@@ -351,6 +352,7 @@ def should_trade(
                 "reason": f"Score {score:.2f} below threshold {score_threshold:.2f}",
                 "llm_decision": None,
                 "llm_confidence": None,
+                "llm_error": False,
             }
         # Require a minimum confidence but allow more flexibility for scalping.
         # Original implementation rejected trades below 4.5; we relax this to 4.0
@@ -363,6 +365,7 @@ def should_trade(
                 "reason": "Low confidence",
                 "llm_decision": None,
                 "llm_confidence": None,
+                "llm_error": False,
             }
 
         advisor_rating: float | None = None
@@ -425,6 +428,7 @@ def should_trade(
                 "news_summary": news_summary,
                 "llm_decision": True,
                 "llm_confidence": None,
+                "llm_error": True,
             }
 
         # Parse the LLM response (JSON or fallback)
@@ -456,6 +460,7 @@ def should_trade(
                 "news_summary": news_summary,
                 "llm_decision": parsed_decision,
                 "llm_confidence": advisor_rating,
+                "llm_error": False,
             }
 
         # Generate narrative
@@ -481,6 +486,7 @@ def should_trade(
             "news_summary": news_summary,
             "llm_decision": parsed_decision,
             "llm_confidence": advisor_rating,
+            "llm_error": False,
         }
 
     except Exception as e:
@@ -490,4 +496,5 @@ def should_trade(
             "reason": f"Error in should_trade(): {e}",
             "llm_decision": None,
             "llm_confidence": None,
+            "llm_error": True,
         }

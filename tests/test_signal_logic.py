@@ -47,6 +47,7 @@ def test_should_trade_auto_approves_on_llm_error():
     )
     assert result["decision"] is True
     assert "auto-approval" in result["reason"].lower()
+    assert result.get("llm_error") is True
 
 
 def test_should_trade_rejects_in_extreme_fear():
