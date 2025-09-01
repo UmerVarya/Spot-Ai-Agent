@@ -223,8 +223,13 @@ def manage_trades() -> None:
                 remaining_qty = qty - sell_qty
                 trade['size'] = remaining_qty
                 trade['position_size'] = remaining_qty
-                _update_stop_loss(trade, entry)
-                logger.info("%s hit TP1 — sold 50% and moved SL to Entry", symbol)
+                break_even_price = max(entry, trade.get('sl', entry))
+                _update_stop_loss(trade, break_even_price)
+                logger.info(
+                    "%s hit TP1 — sold 50%% and moved SL to Break Even (%s)",
+                    symbol,
+                    break_even_price,
+                )
 
             if trade['status'].get('tp1') and not trade['status'].get('tp2') and recent_high >= tp2:
                 trade['status']['tp2'] = True
