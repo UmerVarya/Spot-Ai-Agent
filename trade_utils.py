@@ -427,6 +427,67 @@ def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
     except Exception:
         return None
 
+
+def update_stop_loss_order(
+    symbol: str,
+    quantity: float,
+    stop_price: float,
+    existing_order_id: Optional[str] = None,
+) -> Optional[str]:
+    """Place or replace a stop-loss order on Binance.
+
+    Parameters
+    ----------
+    symbol : str
+        Trading symbol, e.g. ``"BTCUSDT"``.
+    quantity : float
+        Order size in base units.
+    stop_price : float
+        Trigger price for the stop-loss order.
+    existing_order_id : Optional[str]
+        If provided, cancel this order before submitting the new one.
+
+    Returns
+    -------
+    Optional[str]
+        The Binance order ID of the newly created stop-loss order or
+        ``None`` if the client is unavailable or the request fails.
+    """
+    if client is None:
+        logger.warning(
+            "Binance client unavailable; cannot update stop-loss for %s.",
+            symbol,
+        )
+        return None
+    try:
+        mapped_symbol = map_symbol_for_binance(symbol)
+        if existing_order_id:
+            try:
+                client.cancel_order(symbol=mapped_symbol, orderId=existing_order_id)
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.warning(
+                    "Failed to cancel existing stop-loss order for %s: %s",
+                    symbol,
+                    exc,
+                )
+        order = client.create_order(
+            symbol=mapped_symbol,
+            side=getattr(Client, "SIDE_SELL", "SELL"),
+            type=getattr(Client, "ORDER_TYPE_STOP_LOSS_LIMIT", "STOP_LOSS_LIMIT"),
+            quantity=quantity,
+            stopPrice=float(stop_price),
+            price=float(stop_price),
+            timeInForce=getattr(Client, "TIME_IN_FORCE_GTC", "GTC"),
+        )
+        return order.get("orderId")
+    except Exception as exc:  # pragma: no cover - network/API errors
+        logger.warning(
+            "Failed to place stop-loss order for %s: %s",
+            symbol,
+            exc,
+        )
+        return None
+
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Compute a suite of technical indicators on a price DataFrame."""
     df = df.copy()
