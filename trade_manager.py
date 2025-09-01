@@ -292,25 +292,15 @@ def manage_trades() -> None:
                 continue
             # Trailing logic after TP1 before entering TP4 mode
             if trade['status'].get('tp1') and not trade.get('profit_riding'):
-                if adx > 25 and macd_hist > 0:
-                    trail_sl = round(max(entry, current_price - atr), 6)
-                    if trail_sl > trade['sl']:
-                        _update_stop_loss(trade, trail_sl)
-                        logger.info("%s TP1 trail: SL moved to %s", symbol, trail_sl)
-                elif adx < 15 or macd_hist < 0:
-                    tightened_sl = round(current_price - atr, 6)
-                    if tightened_sl > trade['sl']:
-                        _update_stop_loss(trade, tightened_sl)
-                        logger.info("SL tightened for %s to %s", symbol, trade['sl'])
+                trail_multiplier = 0.5 if adx < 15 or macd_hist < 0 else 1.0
+                trail_sl = round(max(entry, current_price - atr * trail_multiplier), 6)
+                if trail_sl > trade['sl']:
+                    _update_stop_loss(trade, trail_sl)
+                    logger.info("%s TP1 trail: SL moved to %s", symbol, trail_sl)
             # TP4 profit riding logic
             if trade.get('profit_riding'):
-                if adx > 25 and macd_hist > 0:
-                    trail_sl = round(current_price - atr, 6)
-                    if trail_sl > trade['sl']:
-                        _update_stop_loss(trade, trail_sl)
-                        logger.info("%s TP4 ride: SL trailed to %s", symbol, trail_sl)
-                else:
-                    logger.warning("%s momentum weakening — exiting TP4", symbol)
+                if macd_hist < 0:
+                    logger.warning("%s momentum reversal — exiting TP4", symbol)
                     qty = float(trade.get('size', trade.get('position_size', 1)))
                     commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
                     fees = current_price * qty * commission_rate
@@ -330,6 +320,11 @@ def manage_trades() -> None:
                     _update_rl(trade, current_price)
                     send_email(f"✅ TP4 Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                     continue
+                trail_multiplier = 0.7 if adx < 15 else 1.0
+                trail_sl = round(current_price - atr * trail_multiplier, 6)
+                if trail_sl > trade['sl']:
+                    _update_stop_loss(trade, trail_sl)
+                    logger.info("%s TP4 ride: SL trailed to %s", symbol, trail_sl)
         # Add the trade back to the updated list if still active
         updated_trades.append(trade)
     # Persist updated trades to storage
