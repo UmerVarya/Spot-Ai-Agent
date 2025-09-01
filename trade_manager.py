@@ -19,7 +19,13 @@ working directory.
 from datetime import datetime
 from typing import List, Tuple, Optional
 
-from trade_utils import get_price_data, calculate_indicators, estimate_commission, simulate_slippage
+from trade_utils import (
+    get_price_data,
+    calculate_indicators,
+    estimate_commission,
+    simulate_slippage,
+    update_stop_loss_order,
+)
 from macro_sentiment import analyze_macro_sentiment
 from notifier import send_email
 from log_utils import setup_logger
@@ -57,6 +63,21 @@ def _update_rl(trade: dict, exit_price: float) -> None:
         rl_sizer.update(state, action, reward)
     except Exception:
         pass
+
+
+def _update_stop_loss(trade: dict, new_sl: float) -> None:
+    """Update the trade's stop-loss and mirror the change on Binance."""
+    symbol = trade.get("symbol")
+    try:
+        qty = float(trade.get("size", trade.get("position_size", 1)))
+    except Exception:
+        qty = 1.0
+    order_id = trade.get("sl_order_id")
+    if symbol:
+        new_id = update_stop_loss_order(symbol, qty, new_sl, order_id)
+        if new_id is not None:
+            trade["sl_order_id"] = new_id
+    trade["sl"] = new_sl
 
 
 def create_new_trade(trade: dict) -> bool:
@@ -173,7 +194,7 @@ def manage_trades() -> None:
                 trade['status']['tp1'] = True
                 # Only trail if momentum confirms strength
                 if adx > 25 and macd_hist > 0:
-                    trade['sl'] = entry
+                    _update_stop_loss(trade, entry)
                     logger.info("%s hit TP1 with strong momentum — SL moved to Entry", symbol)
                 else:
                     logger.info("%s hit TP1 but momentum weak — exiting at TP1", symbol)
@@ -198,12 +219,12 @@ def manage_trades() -> None:
                     continue
             elif trade['status'].get('tp1') and not trade['status'].get('tp2') and recent_high >= tp2:
                 trade['status']['tp2'] = True
-                trade['sl'] = tp1
+                _update_stop_loss(trade, tp1)
                 logger.info("%s hit TP2 — SL moved to TP1", symbol)
             elif trade['status'].get('tp2') and not trade['status'].get('tp3') and recent_high >= tp3:
                 trade['status']['tp3'] = True
                 trade['profit_riding'] = True  # enable TP4 mode
-                trade['sl'] = tp2
+                _update_stop_loss(trade, tp2)
                 logger.info("%s hit TP3 — Entering TP4 Profit Riding Mode", symbol)
                 updated_trades.append(trade)
                 continue
@@ -234,19 +255,19 @@ def manage_trades() -> None:
                 if adx > 25 and macd_hist > 0:
                     trail_sl = round(max(entry, current_price - atr), 6)
                     if trail_sl > trade['sl']:
-                        trade['sl'] = trail_sl
+                        _update_stop_loss(trade, trail_sl)
                         logger.info("%s TP1 trail: SL moved to %s", symbol, trail_sl)
                 elif adx < 15 or macd_hist < 0:
                     tightened_sl = round(current_price - atr, 6)
                     if tightened_sl > trade['sl']:
-                        trade['sl'] = tightened_sl
+                        _update_stop_loss(trade, tightened_sl)
                         logger.info("SL tightened for %s to %s", symbol, trade['sl'])
             # TP4 profit riding logic
             if trade.get('profit_riding'):
                 if adx > 25 and macd_hist > 0:
                     trail_sl = round(current_price - atr, 6)
                     if trail_sl > trade['sl']:
-                        trade['sl'] = trail_sl
+                        _update_stop_loss(trade, trail_sl)
                         logger.info("%s TP4 ride: SL trailed to %s", symbol, trail_sl)
                 else:
                     logger.warning("%s momentum weakening — exiting TP4", symbol)
