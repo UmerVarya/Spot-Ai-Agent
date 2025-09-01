@@ -135,6 +135,12 @@ def manage_trades() -> None:
     updated_trades: List[dict] = []
     for trade in active_trades:
         symbol = trade.get("symbol")
+        # Ensure original size is tracked for partial profit-taking
+        if "initial_size" not in trade:
+            try:
+                trade["initial_size"] = float(trade.get("size", trade.get("position_size", 1)))
+            except Exception:
+                trade["initial_size"] = 1.0
         price_data = get_price_data(symbol)
         if price_data is None or price_data.empty:
             continue
@@ -189,46 +195,75 @@ def manage_trades() -> None:
             macd_hist = macd_hist.iloc[-1]
         # Only long trades are supported in spot mode
         if direction == "long":
-            # Take profit logic
+            # Take profit logic with partial exits
             if not trade['status'].get('tp1') and recent_high >= tp1:
                 trade['status']['tp1'] = True
-                # Only trail if momentum confirms strength
-                if adx > 25 and macd_hist > 0:
-                    _update_stop_loss(trade, entry)
-                    logger.info("%s hit TP1 with strong momentum — SL moved to Entry", symbol)
-                else:
-                    logger.info("%s hit TP1 but momentum weak — exiting at TP1", symbol)
-                    qty = float(trade.get('size', trade.get('position_size', 1)))
-                    commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
-                    fees = tp1 * qty * commission_rate
-                    slip_price = simulate_slippage(tp1, direction=direction)
-                    slippage_amt = abs(slip_price - tp1)
-                    trade['exit_price'] = tp1
-                    trade['exit_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                    trade['outcome'] = "tp1_exit"
-                    log_trade_result(
-                        trade,
-                        outcome="tp1_exit",
-                        exit_price=tp1,
-                        exit_time=trade['exit_time'],
-                        fees=fees,
-                        slippage=slippage_amt,
-                    )
-                    _update_rl(trade, tp1)
-                    send_email(f"✅ TP1 Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
-                    continue
-            elif trade['status'].get('tp1') and not trade['status'].get('tp2') and recent_high >= tp2:
+                initial_qty = float(trade.get('initial_size', trade.get('size', trade.get('position_size', 1))))
+                sell_qty = initial_qty * 0.5
+                qty = float(trade.get('size', trade.get('position_size', 1)))
+                sell_qty = min(sell_qty, qty)
+                commission_rate = estimate_commission(symbol, quantity=sell_qty, maker=False)
+                fees = tp1 * sell_qty * commission_rate
+                slip_price = simulate_slippage(tp1, direction=direction)
+                slippage_amt = abs(slip_price - tp1)
+                partial_trade = trade.copy()
+                partial_trade['size'] = sell_qty
+                exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                partial_trade['exit_price'] = tp1
+                partial_trade['exit_time'] = exit_time
+                log_trade_result(
+                    partial_trade,
+                    outcome="tp1_partial",
+                    exit_price=tp1,
+                    exit_time=exit_time,
+                    fees=fees,
+                    slippage=slippage_amt,
+                )
+                send_email(f"✅ TP1 Partial: {symbol}", f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
+                remaining_qty = qty - sell_qty
+                trade['size'] = remaining_qty
+                trade['position_size'] = remaining_qty
+                _update_stop_loss(trade, entry)
+                logger.info("%s hit TP1 — sold 50% and moved SL to Entry", symbol)
+
+            if trade['status'].get('tp1') and not trade['status'].get('tp2') and recent_high >= tp2:
                 trade['status']['tp2'] = True
+                initial_qty = float(trade.get('initial_size', trade.get('size', trade.get('position_size', 1))))
+                sell_qty = initial_qty * 0.3
+                qty = float(trade.get('size', trade.get('position_size', 1)))
+                sell_qty = min(sell_qty, qty)
+                commission_rate = estimate_commission(symbol, quantity=sell_qty, maker=False)
+                fees = tp2 * sell_qty * commission_rate
+                slip_price = simulate_slippage(tp2, direction=direction)
+                slippage_amt = abs(slip_price - tp2)
+                partial_trade = trade.copy()
+                partial_trade['size'] = sell_qty
+                exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                partial_trade['exit_price'] = tp2
+                partial_trade['exit_time'] = exit_time
+                log_trade_result(
+                    partial_trade,
+                    outcome="tp2_partial",
+                    exit_price=tp2,
+                    exit_time=exit_time,
+                    fees=fees,
+                    slippage=slippage_amt,
+                )
+                send_email(f"✅ TP2 Partial: {symbol}", f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
+                remaining_qty = qty - sell_qty
+                trade['size'] = remaining_qty
+                trade['position_size'] = remaining_qty
                 _update_stop_loss(trade, tp1)
-                logger.info("%s hit TP2 — SL moved to TP1", symbol)
-            elif trade['status'].get('tp2') and not trade['status'].get('tp3') and recent_high >= tp3:
+                logger.info("%s hit TP2 — sold 30% and moved SL to TP1", symbol)
+
+            if trade['status'].get('tp2') and not trade['status'].get('tp3') and recent_high >= tp3:
                 trade['status']['tp3'] = True
                 trade['profit_riding'] = True  # enable TP4 mode
                 _update_stop_loss(trade, tp2)
                 logger.info("%s hit TP3 — Entering TP4 Profit Riding Mode", symbol)
                 updated_trades.append(trade)
                 continue
-            elif recent_low <= sl:
+            if recent_low <= sl:
                 # Stop loss hit (use intrabar low so quick wicks trigger)
                 logger.info("%s hit Stop Loss!", symbol)
                 qty = float(trade.get('size', trade.get('position_size', 1)))
