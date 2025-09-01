@@ -433,8 +433,9 @@ def update_stop_loss_order(
     quantity: float,
     stop_price: float,
     existing_order_id: Optional[str] = None,
+    take_profit_price: Optional[float] = None,
 ) -> Optional[str]:
-    """Place or replace a stop-loss order on Binance.
+    """Place or replace a stop-loss or OCO order on Binance.
 
     Parameters
     ----------
@@ -446,12 +447,16 @@ def update_stop_loss_order(
         Trigger price for the stop-loss order.
     existing_order_id : Optional[str]
         If provided, cancel this order before submitting the new one.
+    take_profit_price : Optional[float]
+        If provided, submit an OCO order pairing this limit price with the
+        stop-loss.  Otherwise a simple stop-loss limit order is used.
 
     Returns
     -------
     Optional[str]
-        The Binance order ID of the newly created stop-loss order or
-        ``None`` if the client is unavailable or the request fails.
+        The Binance ``orderListId`` (for OCO) or ``orderId`` of the
+        newly created order, or ``None`` if the client is unavailable or
+        the request fails.
     """
     if client is None:
         logger.warning(
@@ -463,13 +468,27 @@ def update_stop_loss_order(
         mapped_symbol = map_symbol_for_binance(symbol)
         if existing_order_id:
             try:
-                client.cancel_order(symbol=mapped_symbol, orderId=existing_order_id)
+                if take_profit_price is not None and hasattr(client, "cancel_oco_order"):
+                    client.cancel_oco_order(symbol=mapped_symbol, orderListId=existing_order_id)
+                else:
+                    client.cancel_order(symbol=mapped_symbol, orderId=existing_order_id)
             except Exception as exc:  # pragma: no cover - best effort
                 logger.warning(
                     "Failed to cancel existing stop-loss order for %s: %s",
                     symbol,
                     exc,
                 )
+        if take_profit_price is not None and hasattr(client, "create_oco_order"):
+            order = client.create_oco_order(
+                symbol=mapped_symbol,
+                side=getattr(Client, "SIDE_SELL", "SELL"),
+                quantity=quantity,
+                price=float(take_profit_price),
+                stopPrice=float(stop_price),
+                stopLimitPrice=float(stop_price),
+                stopLimitTimeInForce=getattr(Client, "TIME_IN_FORCE_GTC", "GTC"),
+            )
+            return order.get("orderListId")
         order = client.create_order(
             symbol=mapped_symbol,
             side=getattr(Client, "SIDE_SELL", "SELL"),

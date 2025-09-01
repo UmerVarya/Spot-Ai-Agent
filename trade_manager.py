@@ -73,8 +73,16 @@ def _update_stop_loss(trade: dict, new_sl: float) -> None:
     except Exception:
         qty = 1.0
     order_id = trade.get("sl_order_id")
+    status = trade.get("status", {})
+    tp_price = None
+    if not status.get("tp1"):
+        tp_price = trade.get("tp1")
+    elif not status.get("tp2"):
+        tp_price = trade.get("tp2")
+    elif not status.get("tp3"):
+        tp_price = trade.get("tp3")
     if symbol:
-        new_id = update_stop_loss_order(symbol, qty, new_sl, order_id)
+        new_id = update_stop_loss_order(symbol, qty, new_sl, order_id, tp_price)
         if new_id is not None:
             trade["sl_order_id"] = new_id
     trade["sl"] = new_sl
