@@ -15,7 +15,7 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
-__all__ = ["send_email", "log_rejection"]
+__all__ = ["send_email", "log_rejection", "send_performance_email"]
 
 logger = setup_logger(__name__)
 
@@ -71,6 +71,34 @@ def send_email(subject, trade_details):
 
     except Exception as e:
         logger.error("Email sending failed: %s", e, exc_info=True)
+
+
+def send_performance_email(subject: str, message: str) -> None:
+    """Send a simple email containing a performance summary.
+
+    Parameters
+    ----------
+    subject : str
+        Email subject line.
+    message : str
+        HTML body to include in the email.
+    """
+    try:
+        if not message:
+            return
+        msg = MIMEMultipart()
+        msg["From"] = EMAIL_ADDRESS
+        msg["To"] = EMAIL_RECEIVER
+        msg["Subject"] = subject
+        msg.attach(MIMEText(message, "html"))
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        logger.info("Performance email sent")
+    except Exception as exc:
+        logger.error("Performance email failed: %s", exc, exc_info=True)
 
 
 def log_rejection(symbol: str, reason: str) -> None:

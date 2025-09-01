@@ -26,6 +26,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 from log_utils import ensure_symlink
+from notifier import send_performance_email
 
 import pandas as pd
 
@@ -345,6 +346,7 @@ def log_trade_result(
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+    _maybe_send_llm_performance_email()
 
 
 def load_trade_history_df() -> pd.DataFrame:
@@ -380,3 +382,57 @@ def load_trade_history_df() -> pd.DataFrame:
     if not df.empty and "outcome" in df.columns:
         df = df[df["outcome"].astype(str).str.lower() != "open"]
     return df
+
+
+def _maybe_send_llm_performance_email() -> None:
+    """Send LLM performance metrics after every 50 completed trades."""
+    df = load_trade_history_df()
+    total_trades = len(df)
+    if total_trades == 0 or total_trades % 50 != 0:
+        return
+
+    def _calc_return(row: pd.Series) -> float:
+        try:
+            entry = float(row.get("entry", 0))
+            exit_price = float(row.get("exit", 0))
+            direction = str(row.get("direction", "")).lower()
+            if entry == 0:
+                return 0.0
+            if direction == "short":
+                return (entry - exit_price) / entry
+            return (exit_price - entry) / entry
+        except Exception:
+            return 0.0
+
+    df["return"] = df.apply(_calc_return, axis=1)
+    df["win"] = df["return"] > 0
+
+    def _metrics(mask: pd.Series) -> tuple[int, float, float]:
+        subset = df[mask]
+        count = len(subset)
+        if count == 0:
+            return 0, 0.0, 0.0
+        win_rate = subset["win"].mean() * 100
+        avg_return = subset["return"].mean() * 100
+        return count, win_rate, avg_return
+
+    llm_dec = df.get("llm_decision", pd.Series(dtype=str)).astype(str).str.lower()
+    llm_err = df.get("llm_error", pd.Series(dtype=str)).astype(str).str.lower()
+
+    approved_mask = (llm_err != "true") & llm_dec.isin(["true", "1", "yes"])
+    vetoed_mask = (llm_err != "true") & llm_dec.isin(["false", "0", "no"])
+    error_mask = llm_err.isin(["true", "1", "yes"])
+
+    a_count, a_win, a_ret = _metrics(approved_mask)
+    v_count, v_win, v_ret = _metrics(vetoed_mask)
+    e_count, e_win, e_ret = _metrics(error_mask)
+
+    body = f"""
+    <h2>LLM Decision Performance ({total_trades} trades)</h2>
+    <ul>
+        <li><strong>Approved:</strong> {a_count} trades | Win rate {a_win:.2f}% | Avg return {a_ret:.2f}%</li>
+        <li><strong>Vetoed:</strong> {v_count} trades | Win rate {v_win:.2f}% | Avg return {v_ret:.2f}%</li>
+        <li><strong>Error:</strong> {e_count} trades | Win rate {e_win:.2f}% | Avg return {e_ret:.2f}%</li>
+    </ul>
+    """
+    send_performance_email("LLM Performance Summary", body)
