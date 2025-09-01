@@ -218,3 +218,70 @@ def compute_buy_and_hold_pnl(df: pd.DataFrame) -> pd.DataFrame:
     out["pnl"] = close.pct_change().fillna(0.0)
     out["equity"] = (1 + out["pnl"]).cumprod()
     return out
+
+
+def generate_trades_from_ohlcv(
+    df: pd.DataFrame,
+    symbol: str = "UNKNOWN",
+    take_profit: float = 0.01,
+    stop_loss: float = 0.01,
+) -> List[Dict[str, Any]]:
+    """Generate labelled trades from OHLCV data.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with ``open``, ``high``, ``low`` and ``close`` columns.
+    symbol : str, optional
+        Asset symbol associated with the data.
+    take_profit : float, default 0.01
+        Take‑profit threshold expressed as a fraction of the entry price.
+    stop_loss : float, default 0.01
+        Stop‑loss threshold expressed as a fraction of the entry price.
+
+    Returns
+    -------
+    list of dict
+        A list of dictionaries describing simulated trades.  Each
+        dictionary contains ``entry``, ``exit``, ``entry_time``,
+        ``exit_time`` and ``outcome`` (``"tp1"`` for wins,
+        ``"sl"`` for losses).
+    """
+
+    required = {"open", "high", "low", "close"}
+    if not required.issubset(df.columns):
+        raise ValueError("DataFrame must contain open, high, low and close columns")
+
+    trades: List[Dict[str, Any]] = []
+    # Ensure we work with datetime index for logging purposes
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df = df.copy()
+        df.index = pd.to_datetime(df.index)
+
+    for i in range(len(df) - 1):
+        entry_price = float(df.iloc[i]["open"])
+        next_high = float(df.iloc[i + 1]["high"])
+        next_low = float(df.iloc[i + 1]["low"])
+        exit_price = float(df.iloc[i + 1]["close"])
+        outcome = "sl"
+        # Determine which level was hit first.  Priority to stop‑loss if both
+        # thresholds are crossed within the same bar.
+        if next_low <= entry_price * (1 - stop_loss):
+            exit_price = entry_price * (1 - stop_loss)
+            outcome = "sl"
+        elif next_high >= entry_price * (1 + take_profit):
+            exit_price = entry_price * (1 + take_profit)
+            outcome = "tp1"
+        else:
+            outcome = "tp1" if exit_price > entry_price else "sl"
+        trades.append(
+            {
+                "symbol": symbol,
+                "entry": entry_price,
+                "exit": exit_price,
+                "entry_time": df.index[i],
+                "exit_time": df.index[i + 1],
+                "outcome": outcome,
+            }
+        )
+    return trades

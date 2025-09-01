@@ -26,7 +26,8 @@ import numpy as np
 import os
 from datetime import datetime, timezone
 from log_utils import setup_logger, LOG_FILE
-from backtest import compute_buy_and_hold_pnl
+from backtest import compute_buy_and_hold_pnl, generate_trades_from_ohlcv
+from ml_model import train_model
 
 try:
     import altair as alt  # type: ignore
@@ -119,6 +120,7 @@ except Exception:
 # Import shared paths after environment variables are loaded
 from trade_storage import (
     load_active_trades,
+    log_trade_result,
     COMPLETED_TRADES_FILE,
     ACTIVE_TRADES_FILE,
 )
@@ -800,6 +802,51 @@ def render_backtest_tab() -> None:
         hist_df = pd.DataFrame({"Return": bins[:-1], "Count": hist})
         st.bar_chart(hist_df.set_index("Return"), use_container_width=True)
         st.dataframe(df, use_container_width=True)
+
+        # If OHLCV columns are present, generate synthetic trade labels and
+        # train the ML model automatically.
+        required_cols = {"open", "high", "low", "close"}
+        if required_cols.issubset(cols):
+            df_bt = df.rename(
+                columns={
+                    cols["open"]: "open",
+                    cols["high"]: "high",
+                    cols["low"]: "low",
+                    cols["close"]: "close",
+                }
+            )
+            if "open_time" in cols:
+                df_bt["open_time"] = pd.to_datetime(
+                    df[cols["open_time"]], unit="ms", errors="coerce"
+                )
+                df_bt = df_bt.set_index("open_time")
+            symbol = df_bt["symbol"].iloc[0] if "symbol" in df_bt.columns else "UNKNOWN"
+            trades = generate_trades_from_ohlcv(df_bt, symbol=str(symbol))
+            for t in trades:
+                trade_info = {
+                    "symbol": t["symbol"],
+                    "direction": "long",
+                    "entry": t["entry"],
+                    "entry_time": t["entry_time"].strftime("%Y-%m-%d %H:%M:%S"),
+                    "size": 1.0,
+                    "strategy": "upload_backtest",
+                    "session": "unknown",
+                }
+                log_trade_result(
+                    trade_info,
+                    t["outcome"],
+                    t["exit"],
+                    exit_time=t["exit_time"].strftime("%Y-%m-%d %H:%M:%S"),
+                )
+            st.success(
+                f"Backtest generated {len(trades)} trades; results appended to {COMPLETED_TRADES_FILE}"
+            )
+            train_model()
+            st.info("Model training complete. Check logs for details.")
+        else:
+            st.warning(
+                "CSV missing OHLCV columns; skipping trade generation and training."
+            )
 
 
 # Create tabs and render contents
