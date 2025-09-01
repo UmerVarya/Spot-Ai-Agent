@@ -68,6 +68,7 @@ def _update_rl(trade: dict, exit_price: float) -> None:
 def _update_stop_loss(trade: dict, new_sl: float) -> None:
     """Update the trade's stop-loss and mirror the change on Binance."""
     symbol = trade.get("symbol")
+    old_sl = trade.get("sl")
     try:
         qty = float(trade.get("size", trade.get("position_size", 1)))
     except Exception:
@@ -86,6 +87,15 @@ def _update_stop_loss(trade: dict, new_sl: float) -> None:
         if new_id is not None:
             trade["sl_order_id"] = new_id
     trade["sl"] = new_sl
+    logger.info("%s SL updated from %s to %s", symbol, old_sl, new_sl)
+    send_email(
+        f"SL Updated: {symbol}",
+        {
+            "symbol": symbol,
+            "old_sl": old_sl,
+            "new_sl": new_sl,
+        },
+    )
 
 
 def create_new_trade(trade: dict) -> bool:
@@ -164,10 +174,26 @@ def manage_trades() -> None:
         tp1 = trade.get('tp1')
         tp2 = trade.get('tp2')
         tp3 = trade.get('tp3')
+        status_flags = trade.get('status', {})
+        logger.debug(
+            "Managing %s | Price=%s High=%s Low=%s SL=%s TP1=%s TP2=%s TP3=%s Status=%s ProfitRiding=%s",
+            symbol,
+            current_price,
+            recent_high,
+            recent_low,
+            sl,
+            tp1,
+            tp2,
+            tp3,
+            status_flags,
+            trade.get('profit_riding', False),
+        )
+        actions = []
         # Evaluate early exit conditions using the candle low to capture
         # sharp drops within the interval
         exit_now, reason = should_exit_early(trade, recent_low, price_data)
         if exit_now:
+            actions.append("early_exit")
             logger.info("Early exit triggered for %s: %s", symbol, reason)
             # Compute fees and slippage on exit
             qty = float(trade.get('size', trade.get('position_size', 1)))
@@ -191,6 +217,7 @@ def manage_trades() -> None:
             )
             _update_rl(trade, current_price)
             send_email(f" Early Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
+            logger.debug("%s actions: %s", symbol, actions)
             continue
         # Compute updated indicators for trailing stops and TP
         indicators = calculate_indicators(price_data)
@@ -238,6 +265,7 @@ def manage_trades() -> None:
                     symbol,
                     break_even_price,
                 )
+                actions.append("tp1_partial")
 
             if trade['status'].get('tp1') and not trade['status'].get('tp2') and recent_high >= tp2:
                 trade['status']['tp2'] = True
@@ -268,12 +296,16 @@ def manage_trades() -> None:
                 trade['position_size'] = remaining_qty
                 _update_stop_loss(trade, tp1)
                 logger.info("%s hit TP2 — sold 30% and moved SL to TP1", symbol)
+                actions.append("tp2_partial")
 
             if trade['status'].get('tp2') and not trade['status'].get('tp3') and recent_high >= tp3:
                 trade['status']['tp3'] = True
                 trade['profit_riding'] = True  # enable TP4 mode
                 _update_stop_loss(trade, tp2)
                 logger.info("%s hit TP3 — Entering TP4 Profit Riding Mode", symbol)
+                send_email(f"✅ TP3 Hit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
+                actions.append("tp3_hit")
+                logger.debug("%s actions: %s", symbol, actions)
                 updated_trades.append(trade)
                 continue
             if recent_low <= sl:
@@ -297,6 +329,8 @@ def manage_trades() -> None:
                 )
                 _update_rl(trade, sl)
                 send_email(f" Stop Loss Hit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
+                actions.append("stop_loss")
+                logger.debug("%s actions: %s", symbol, actions)
                 continue
             # Trailing logic after TP1 before entering TP4 mode
             if trade['status'].get('tp1') and not trade.get('profit_riding'):
@@ -305,6 +339,7 @@ def manage_trades() -> None:
                 if trail_sl > trade['sl']:
                     _update_stop_loss(trade, trail_sl)
                     logger.info("%s TP1 trail: SL moved to %s", symbol, trail_sl)
+                    actions.append("trail_sl")
             # TP4 profit riding logic
             if trade.get('profit_riding'):
                 if macd_hist < 0:
@@ -327,13 +362,17 @@ def manage_trades() -> None:
                     )
                     _update_rl(trade, current_price)
                     send_email(f"✅ TP4 Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
+                    actions.append("tp4_exit")
+                    logger.debug("%s actions: %s", symbol, actions)
                     continue
                 trail_multiplier = 0.7 if adx < 15 else 1.0
                 trail_sl = round(current_price - atr * trail_multiplier, 6)
                 if trail_sl > trade['sl']:
                     _update_stop_loss(trade, trail_sl)
                     logger.info("%s TP4 ride: SL trailed to %s", symbol, trail_sl)
+                    actions.append("tp4_trail_sl")
         # Add the trade back to the updated list if still active
+        logger.debug("%s actions: %s", symbol, actions if actions else "none")
         updated_trades.append(trade)
     # Persist updated trades to storage
     save_active_trades(updated_trades)
