@@ -16,7 +16,7 @@ guaranteed to read and write the same JSON file regardless of the
 working directory.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Tuple, Optional
 
 from trade_utils import (
@@ -45,6 +45,8 @@ from rl_policy import RLPositionSizer
 EARLY_EXIT_THRESHOLD = 0.015  # 1.5% move against entry
 # Require fairly high confidence before exiting on bearish macro signals
 MACRO_CONFIDENCE_EXIT_THRESHOLD = 7
+# Maximum duration to hold a trade before forcing exit
+MAX_HOLDING_TIME = timedelta(hours=1)
 
 logger = setup_logger(__name__)
 rl_sizer = RLPositionSizer()
@@ -189,6 +191,36 @@ def manage_trades() -> None:
             trade.get('profit_riding', False),
         )
         actions = []
+        # Time-based exit: close trades exceeding the maximum holding duration
+        entry_time_str = trade.get('entry_time')
+        try:
+            entry_dt = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S") if entry_time_str else None
+        except Exception:
+            entry_dt = None
+        if entry_dt and datetime.utcnow() - entry_dt >= MAX_HOLDING_TIME:
+            actions.append("time_exit")
+            logger.info("%s exceeded max holding time; exiting trade.", symbol)
+            qty = float(trade.get('size', trade.get('position_size', 1)))
+            commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
+            fees = current_price * qty * commission_rate
+            slip_price = simulate_slippage(current_price, direction=direction)
+            slippage = abs(slip_price - current_price)
+            trade['exit_price'] = current_price
+            trade['exit_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            trade['outcome'] = "time_exit"
+            trade['exit_reason'] = "max_holding_time"
+            log_trade_result(
+                trade,
+                outcome="time_exit",
+                exit_price=current_price,
+                exit_time=trade['exit_time'],
+                fees=fees,
+                slippage=slippage,
+            )
+            _update_rl(trade, current_price)
+            send_email(f" Time Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
+            logger.debug("%s actions: %s", symbol, actions)
+            continue
         # Evaluate early exit conditions using the candle low to capture
         # sharp drops within the interval
         exit_now, reason = should_exit_early(trade, recent_low, price_data)
