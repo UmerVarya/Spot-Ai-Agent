@@ -162,7 +162,18 @@ def load_completed_df(path: str) -> pd.DataFrame:
         return pd.DataFrame(
             columns=["timestamp", "symbol", "side", "qty", "price", "pnl"]
         )
-    return pd.read_csv(path, encoding="utf-8")
+    try:
+        return pd.read_csv(path, encoding="utf-8")
+    except pd.errors.ParserError:
+        # Some trade logs may contain malformed rows (e.g. mismatched commas).
+        # Fall back to a more tolerant parser that skips bad lines so the
+        # dashboard continues to function instead of crashing.
+        return pd.read_csv(
+            path,
+            encoding="utf-8",
+            on_bad_lines="skip",
+            engine="python",
+        )
 
 
 def get_live_price(symbol: str) -> float:
