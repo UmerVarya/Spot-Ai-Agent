@@ -121,6 +121,7 @@ except Exception:
 from trade_storage import (
     load_active_trades,
     log_trade_result,
+    load_trade_history_df,
     COMPLETED_TRADES_FILE,
     ACTIVE_TRADES_FILE,
 )
@@ -155,26 +156,6 @@ logger.info(
 )
 
 st.title(" Spot AI Super Agent – Live Trade Dashboard")
-
-
-def load_completed_df(path: str) -> pd.DataFrame:
-    if not os.path.exists(path) or os.path.getsize(path) == 0:
-        return pd.DataFrame(
-            columns=["timestamp", "symbol", "side", "qty", "price", "pnl"]
-        )
-    try:
-        return pd.read_csv(path, encoding="utf-8")
-    except pd.errors.ParserError:
-        # Some trade logs may contain malformed rows (e.g. mismatched commas).
-        # Fall back to a more tolerant parser that skips bad lines so the
-        # dashboard continues to function instead of crashing.
-        return pd.read_csv(
-            path,
-            encoding="utf-8",
-            on_bad_lines="skip",
-            engine="python",
-        )
-
 
 def get_live_price(symbol: str) -> float:
     """Fetch the current price for a symbol from Binance.  Returns None on failure."""
@@ -325,7 +306,7 @@ def compute_llm_decision_stats() -> tuple[int, int, int]:
         else:
             approved += 1
     # Completed trades
-    df = load_completed_df(COMPLETED_TRADES_FILE)
+    df = load_trade_history_df()
     if not df.empty:
         for _, row in df.iterrows():
             if str(row.get("llm_error")).lower() in {"true", "1"}:
@@ -450,7 +431,7 @@ def render_live_tab() -> None:
     else:
         st.info("No active trades found.")
     # Load trade history and compute summary statistics
-    hist_df = load_completed_df(COMPLETED_TRADES_FILE)
+    hist_df = load_trade_history_df()
     st.subheader("📊 Historical Performance – Completed Trades")
     if not hist_df.empty:
         # Ensure date columns are parsed
