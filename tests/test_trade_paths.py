@@ -16,10 +16,10 @@ def test_trade_paths(monkeypatch, tmp_path):
     dashboard = importlib.import_module("dashboard")
     assert agent.ACTIVE_TRADES_FILE == trade_storage.ACTIVE_TRADES_FILE
     assert dashboard.ACTIVE_TRADES_FILE == trade_storage.ACTIVE_TRADES_FILE
+    assert agent.TRADE_HISTORY_FILE == trade_storage.TRADE_HISTORY_FILE
+    assert dashboard.TRADE_HISTORY_FILE == trade_storage.TRADE_HISTORY_FILE
     completed_path = tmp_path / "completed.csv"
-    other_path = tmp_path / "other.csv"
-    monkeypatch.setattr(trade_storage, "COMPLETED_TRADES_FILE", str(completed_path))
-    monkeypatch.setattr(trade_storage, "TRADE_LOG_FILE", str(other_path))
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(completed_path))
     monkeypatch.setattr(trade_storage.os.path, "exists", lambda p: True)
     monkeypatch.setattr(trade_storage.os.path, "getsize", lambda p: 1)
     captured = {}

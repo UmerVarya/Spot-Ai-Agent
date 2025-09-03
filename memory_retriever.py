@@ -2,7 +2,7 @@
 Utilities for retrieving past trade memories.
 
 This module provides helper functions to summarise recent trades from the
-completed trades log (``COMPLETED_TRADES_FILE``).  The summary can be used to give the LLM context
+completed trades log (``TRADE_HISTORY_FILE``).  The summary can be used to give the LLM context
 about similar past trades, enabling it to reason based on prior
 experience (retrieval‑augmented generation).
 """
@@ -13,10 +13,10 @@ import os
 from typing import Optional
 
 import pandas as pd
-from trade_storage import COMPLETED_TRADES_FILE
+from trade_storage import TRADE_HISTORY_FILE
 
 # Path to the completed trades log used for memory retrieval
-LOG_FILE = COMPLETED_TRADES_FILE
+LOG_FILE = TRADE_HISTORY_FILE
 
 
 def get_recent_trade_summary(symbol: str, pattern: str, max_entries: int = 3) -> str:

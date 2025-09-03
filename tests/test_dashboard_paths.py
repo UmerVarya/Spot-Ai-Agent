@@ -13,4 +13,4 @@ def test_dashboard_paths(monkeypatch):
         pass
     dashboard = importlib.import_module("dashboard")
     assert dashboard.ACTIVE_TRADES_FILE == trade_storage.ACTIVE_TRADES_FILE
-    assert dashboard.COMPLETED_TRADES_FILE == trade_storage.COMPLETED_TRADES_FILE
+    assert dashboard.TRADE_HISTORY_FILE == trade_storage.TRADE_HISTORY_FILE
