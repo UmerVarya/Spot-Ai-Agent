@@ -10,7 +10,8 @@ load_dotenv()
 # Groq API configuration
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b")
+# Default to Groq's latest supported model if not specified
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
 
 # Cache for latest macro sentiment
 latest_macro_sentiment = {"bias": "neutral", "confidence": 5.0, "summary": "No analysis yet."}
