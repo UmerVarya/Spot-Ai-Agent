@@ -51,7 +51,8 @@ def analyze_news_with_llm(prompt):
     try:
         client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         response = client.chat.completions.create(
-            model="llama3-70b-8192",
+            # Updated to Groq's latest supported model
+            model="llama-3.1-70b-versatile",
             messages=[{"role": "user", "content": prompt}]
         )
         reply = response.choices[0].message.content

@@ -89,7 +89,8 @@ def analyze_news_with_llm(events: List[Dict[str, str]]) -> Dict[str, str]:
     client = Groq(api_key=GROQ_API_KEY)
     try:
         chat_completion = client.chat.completions.create(
-            model="llama3-70b-8192",
+            # Switch to Groq's supported model
+            model="llama-3.1-70b-versatile",
             messages=[
                 {"role": "system", "content": "You are a crypto macro risk analyst."},
                 {"role": "user", "content": prompt},
