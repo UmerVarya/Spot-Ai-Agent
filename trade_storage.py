@@ -340,7 +340,17 @@ def log_trade_result(
             return
         except Exception as exc:
             logger.exception("Failed to log trade result to database: %s", exc)
-    file_exists = os.path.exists(TRADE_HISTORY_FILE)
+    # Determine whether the history file already contains data.  Simply
+    # checking ``os.path.exists`` is insufficient because the file may
+    # exist yet be zero bytes long (for example after a crash or manual
+    # truncation).  In that case ``csv.DictWriter`` would append rows
+    # without a header and subsequent reads would treat the first trade
+    # as the header, effectively hiding it from the dashboard.  We treat
+    # an empty file the same as a missing file so the header is written
+    # on the next append.
+    file_exists = os.path.exists(TRADE_HISTORY_FILE) and os.path.getsize(
+        TRADE_HISTORY_FILE
+    ) > 0
     # Ensure directory exists
     os.makedirs(os.path.dirname(TRADE_HISTORY_FILE), exist_ok=True)
     # Write the row to CSV
