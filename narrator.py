@@ -49,7 +49,8 @@ Trade Details:
 """
 
         response = client.chat.completions.create(
-            model="llama3-70b-8192",
+            # Updated to the latest Groq model
+            model="llama-3.1-70b-versatile",
             messages=[
                 {"role": "system", "content": "You are a professional crypto trading strategist."},
                 {"role": "user", "content": prompt}

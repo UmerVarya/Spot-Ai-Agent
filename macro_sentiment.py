@@ -35,7 +35,8 @@ Confidence: <0-10 score>
 
     try:
         response = client.chat.completions.create(
-            model="llama3-70b-8192",
+            # Use Groq's current supported model
+            model="llama-3.1-70b-versatile",
             messages=[
                 {"role": "system", "content": "You are a crypto macro market analyst."},
                 {"role": "user", "content": prompt}

@@ -80,7 +80,8 @@ Write a short, confident explanation justifying the trade in plain English. End 
 
     try:
         response = client.chat.completions.create(
-            model="llama3-70b-8192",
+            # Updated to use Groq's current model
+            model="llama-3.1-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=500,

@@ -27,7 +27,8 @@ from log_utils import setup_logger
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL = "llama3-70b-8192"
+# Updated default Groq model to a currently supported version
+MODEL = "llama-3.1-70b-versatile"
 HEADERS = {
     "Authorization": f"Bearer {GROQ_API_KEY}",
     "Content-Type": "application/json"
