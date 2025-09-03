@@ -3,7 +3,7 @@ Historical confidence calculator for trade outcomes.
 
 This module provides a function to compute a confidence estimate for a
 potential trade based on past performance recorded in the completed
-trades log (``COMPLETED_TRADES_FILE``).
+trades log (``TRADE_HISTORY_FILE``).
 It reads the log with tolerant parsing (skipping bad lines) and filters
 similar trades by symbol, direction, score range and session.  The
 confidence is scaled between 0 and 100 and includes a small boost if
@@ -13,10 +13,10 @@ recent trades show better performance.
 import pandas as pd
 import os
 
-from trade_storage import COMPLETED_TRADES_FILE
+from trade_storage import TRADE_HISTORY_FILE
 
 # Path to the completed trades log for historical confidence calculations
-LOG_FILE = COMPLETED_TRADES_FILE
+LOG_FILE = TRADE_HISTORY_FILE
 
 
 def calculate_historical_confidence(symbol, score, direction, session="Unknown", pattern_name=None):

@@ -11,10 +11,10 @@ brain/decision logic to calibrate how strict the bot should be.
 import pandas as pd
 import os
 
-from trade_storage import COMPLETED_TRADES_FILE
+from trade_storage import TRADE_HISTORY_FILE
 
 # Path to the completed trades log used for adaptive thresholding
-LEARNING_LOG = COMPLETED_TRADES_FILE
+LEARNING_LOG = TRADE_HISTORY_FILE
 
 
 def get_adaptive_conf_threshold() -> float:

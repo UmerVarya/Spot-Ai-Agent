@@ -16,7 +16,7 @@ def test_optimize_indicator_weights(monkeypatch, tmp_path):
         "outcome": ["win", "loss", "win"],
     }).to_csv(trade_file, index=False)
     monkeypatch.setenv("SIGNAL_LOG_FILE", str(sig_file))
-    monkeypatch.setenv("TRADE_LOG_FILE", str(trade_file))
+    monkeypatch.setenv("TRADE_HISTORY_FILE", str(trade_file))
     import trade_storage
     importlib.reload(trade_storage)
     weight_optimizer = importlib.reload(importlib.import_module("weight_optimizer"))

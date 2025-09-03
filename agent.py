@@ -42,7 +42,7 @@ from trade_storage import (
     load_active_trades,
     save_active_trades,
     ACTIVE_TRADES_FILE,
-    COMPLETED_TRADES_FILE,
+    TRADE_HISTORY_FILE,
     log_trade_result,
 )
 from notifier import send_email, log_rejection, REJECTED_TRADES_FILE
@@ -81,9 +81,9 @@ RUN_DASHBOARD = os.getenv("RUN_DASHBOARD", "0") == "1"
 rl_sizer = RLPositionSizer()
 
 logger.info(
-    "Paths: LOG_FILE=%s COMPLETED_TRADES=%s ACTIVE_TRADES=%s REJECTED_TRADES=%s LEARNING_LOG=%s",
+    "Paths: LOG_FILE=%s TRADE_HISTORY=%s ACTIVE_TRADES=%s REJECTED_TRADES=%s LEARNING_LOG=%s",
     LOG_FILE,
-    COMPLETED_TRADES_FILE,
+    TRADE_HISTORY_FILE,
     ACTIVE_TRADES_FILE,
     REJECTED_TRADES_FILE,
     TRADE_LEARNING_LOG_FILE,
