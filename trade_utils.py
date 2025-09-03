@@ -10,7 +10,7 @@ from log_utils import setup_logger
 
 from weight_optimizer import optimize_indicator_weights
 
-from trade_storage import TRADE_LOG_FILE  # shared trade log path
+from trade_storage import TRADE_HISTORY_FILE  # shared trade log path
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
 from multi_timeframe import (
@@ -558,7 +558,7 @@ def get_top_symbols(limit: int = 30) -> list:
     symbols = [x['symbol'] for x in sorted_tickers if x['symbol'].endswith("USDT") and not x['symbol'].endswith("BUSD")]
     return symbols[:limit]
 
-def compute_performance_metrics(log_file: str = TRADE_LOG_FILE, lookback: int = 100) -> dict:
+def compute_performance_metrics(log_file: str = TRADE_HISTORY_FILE, lookback: int = 100) -> dict:
     """Return risk-adjusted performance metrics from the trade log."""
     if not os.path.exists(log_file):
         return {}
@@ -586,7 +586,7 @@ def compute_performance_metrics(log_file: str = TRADE_LOG_FILE, lookback: int = 
         return {}
 
 
-def get_last_trade_outcome(log_file: str = TRADE_LOG_FILE) -> str | None:
+def get_last_trade_outcome(log_file: str = TRADE_HISTORY_FILE) -> str | None:
     """Return ``'win'`` or ``'loss'`` based on the most recent closed trade.
 
     The helper is used by the RL position‑sizer to condition its action
@@ -612,7 +612,7 @@ def get_last_trade_outcome(log_file: str = TRADE_LOG_FILE) -> str | None:
     except Exception:
         return None
 
-def get_rl_state(vol_percentile: float | None, log_file: str = TRADE_LOG_FILE) -> str:
+def get_rl_state(vol_percentile: float | None, log_file: str = TRADE_HISTORY_FILE) -> str:
     """Construct a compound RL state from last outcome and volatility.
 
     The state combines the result of the most recently closed trade with a

@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 from log_utils import setup_logger
-from trade_storage import TRADE_LOG_FILE
+from trade_storage import TRADE_HISTORY_FILE
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 SIGNAL_LOG_FILE = os.getenv("SIGNAL_LOG_FILE", os.path.join(_MODULE_DIR, "signal_log.csv"))
@@ -16,11 +16,11 @@ def optimize_indicator_weights(base_weights: dict, lookback: int = 200) -> dict:
     by a factor between 0.5 and 1.0 depending on the win rate (0..1).
     If insufficient data is available, the original weights are returned.
     """
-    if not (os.path.exists(SIGNAL_LOG_FILE) and os.path.exists(TRADE_LOG_FILE)):
+    if not (os.path.exists(SIGNAL_LOG_FILE) and os.path.exists(TRADE_HISTORY_FILE)):
         return base_weights
     try:
         signals = pd.read_csv(SIGNAL_LOG_FILE).tail(lookback)
-        trades = pd.read_csv(TRADE_LOG_FILE).tail(lookback)
+        trades = pd.read_csv(TRADE_HISTORY_FILE).tail(lookback)
         merged = pd.merge(
             signals,
             trades[["timestamp", "symbol", "outcome"]],

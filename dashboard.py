@@ -122,7 +122,7 @@ from trade_storage import (
     load_active_trades,
     log_trade_result,
     load_trade_history_df,
-    COMPLETED_TRADES_FILE,
+    TRADE_HISTORY_FILE,
     ACTIVE_TRADES_FILE,
 )
 from notifier import REJECTED_TRADES_FILE
@@ -147,9 +147,9 @@ st.set_page_config(
 )
 logger = setup_logger(__name__)
 logger.info(
-    "Paths: LOG_FILE=%s COMPLETED_TRADES=%s ACTIVE_TRADES=%s REJECTED_TRADES=%s LEARNING_LOG=%s",
+    "Paths: LOG_FILE=%s TRADE_HISTORY=%s ACTIVE_TRADES=%s REJECTED_TRADES=%s LEARNING_LOG=%s",
     LOG_FILE,
-    COMPLETED_TRADES_FILE,
+    TRADE_HISTORY_FILE,
     ACTIVE_TRADES_FILE,
     REJECTED_TRADES_FILE,
     TRADE_LEARNING_LOG_FILE,
@@ -831,7 +831,7 @@ def render_backtest_tab() -> None:
                     exit_time=t["exit_time"].strftime("%Y-%m-%d %H:%M:%S"),
                 )
             st.success(
-                f"Backtest generated {len(trades)} trades; results appended to {COMPLETED_TRADES_FILE}"
+                f"Backtest generated {len(trades)} trades; results appended to {TRADE_HISTORY_FILE}"
             )
             train_model()
             st.info("Model training complete. Check logs for details.")

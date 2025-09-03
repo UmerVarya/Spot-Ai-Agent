@@ -16,7 +16,7 @@ def test_save_and_load_active_trades(tmp_path, monkeypatch):
 
 def test_log_trade_result_extended_fields(tmp_path, monkeypatch):
     csv_path = tmp_path / "log.csv"
-    monkeypatch.setattr(trade_storage, "TRADE_LOG_FILE", str(csv_path))
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
     trade = {
         "symbol": "ETHUSDT",
         "direction": "long",

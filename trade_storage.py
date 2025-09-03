@@ -90,26 +90,25 @@ except OSError:
 
 # File locations; these can be overridden individually via environment
 # variables if desired. ``ACTIVE_TRADES_FILE`` stores open trades in JSON
-# format. ``TRADE_LOG_FILE`` stores completed trades in CSV format.  Expose
-# these constants so other modules (e.g. ``trade_manager`` and ``dashboard``)
-# can import them, ensuring all components read and write the exact same files.
-# Canonical file locations within the data directory.  ``completed_trades.csv``
-# replaces the legacy ``trade_log.csv`` name; ``TRADE_LOG_FILE`` is kept as an
-# alias for backward compatibility.
+# format. ``TRADE_HISTORY_FILE`` stores completed trades in CSV format and is
+# the canonical path other modules should import.  Legacy aliases are exported
+# for backward compatibility.
 ACTIVE_TRADES_FILE = os.environ.get(
     "ACTIVE_TRADES_FILE", os.path.join(DATA_DIR, "active_trades.json")
 ).split("#", 1)[0].strip()
-COMPLETED_TRADES_FILE = os.environ.get(
-    "COMPLETED_TRADES_FILE", os.path.join(DATA_DIR, "completed_trades.csv")
+TRADE_HISTORY_FILE = os.environ.get(
+    "TRADE_HISTORY_FILE", os.path.join(DATA_DIR, "completed_trades.csv")
 ).split("#", 1)[0].strip()
-TRADE_LOG_FILE = os.environ.get("TRADE_LOG_FILE", COMPLETED_TRADES_FILE)
+# Backwards compatibility aliases
+COMPLETED_TRADES_FILE = TRADE_HISTORY_FILE
+TRADE_LOG_FILE = TRADE_HISTORY_FILE
 
 
 # Symlinks in the repository root allow read-only access for legacy code
 # that still expects files beside the source tree.
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 ensure_symlink(ACTIVE_TRADES_FILE, os.path.join(_REPO_ROOT, "active_trades.json"))
-ensure_symlink(COMPLETED_TRADES_FILE, os.path.join(_REPO_ROOT, "completed_trades.csv"))
+ensure_symlink(TRADE_HISTORY_FILE, os.path.join(_REPO_ROOT, "completed_trades.csv"))
 
 
 def load_active_trades() -> list:
@@ -337,11 +336,11 @@ def log_trade_result(
             return
         except Exception as exc:
             logger.exception("Failed to log trade result to database: %s", exc)
-    file_exists = os.path.exists(TRADE_LOG_FILE)
+    file_exists = os.path.exists(TRADE_HISTORY_FILE)
     # Ensure directory exists
-    os.makedirs(os.path.dirname(TRADE_LOG_FILE), exist_ok=True)
+    os.makedirs(os.path.dirname(TRADE_HISTORY_FILE), exist_ok=True)
     # Write the row to CSV
-    with open(TRADE_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+    with open(TRADE_HISTORY_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         if not file_exists:
             writer.writeheader()
@@ -360,9 +359,9 @@ def load_trade_history_df() -> pd.DataFrame:
         except Exception as exc:
             logger.exception("Failed to load trade history from database: %s", exc)
     else:
-        if os.path.exists(TRADE_LOG_FILE) and os.path.getsize(TRADE_LOG_FILE) > 0:
+        if os.path.exists(TRADE_HISTORY_FILE) and os.path.getsize(TRADE_HISTORY_FILE) > 0:
             try:
-                df = pd.read_csv(TRADE_LOG_FILE, encoding="utf-8")
+                df = pd.read_csv(TRADE_HISTORY_FILE, encoding="utf-8")
             except Exception as exc:
                 logger.exception("Failed to read trade log file: %s", exc)
         else:

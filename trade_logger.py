@@ -11,13 +11,13 @@ import os
 import warnings
 from log_utils import ensure_symlink
 from trade_storage import (
-    COMPLETED_TRADES_FILE,
+    TRADE_HISTORY_FILE,
     log_trade_result as _storage_log_trade_result,
 )
 
 
-TRADE_LEARNING_LOG_FILE = COMPLETED_TRADES_FILE
-TRADE_LOG_FILE = COMPLETED_TRADES_FILE
+TRADE_LEARNING_LOG_FILE = TRADE_HISTORY_FILE
+TRADE_LOG_FILE = TRADE_HISTORY_FILE
 
 module_dir = os.path.dirname(os.path.abspath(__file__))
 ensure_symlink(TRADE_LEARNING_LOG_FILE, os.path.join(module_dir, "trade_learning_log.csv"))
