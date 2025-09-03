@@ -360,9 +360,10 @@ def load_trade_history_df() -> pd.DataFrame:
         except Exception as exc:
             logger.exception("Failed to load trade history from database: %s", exc)
     else:
-        if os.path.exists(TRADE_LOG_FILE) and os.path.getsize(TRADE_LOG_FILE) > 0:
+        path = COMPLETED_TRADES_FILE
+        if os.path.exists(path) and os.path.getsize(path) > 0:
             try:
-                df = pd.read_csv(TRADE_LOG_FILE, encoding="utf-8")
+                df = pd.read_csv(path, encoding="utf-8")
             except Exception as exc:
                 logger.exception("Failed to read trade log file: %s", exc)
         else:
