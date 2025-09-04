@@ -24,7 +24,7 @@ import os
 import csv
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from log_utils import ensure_symlink
 from notifier import send_performance_email
@@ -32,6 +32,29 @@ from notifier import send_performance_email
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+def _to_utc_iso(ts: Optional[str] = None) -> str:
+    """Return an ISO-8601 UTC timestamp with ``Z`` suffix.
+
+    Parameters
+    ----------
+    ts : str, optional
+        Timestamp string to convert. If ``None`` or parsing fails, the current
+        UTC time is used.
+    """
+    if ts:
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                dt = dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                dt = datetime.now(timezone.utc)
+    else:
+        dt = datetime.now(timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 # Optional PostgreSQL support (unchanged from original)
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -173,9 +196,8 @@ def store_trade(trade: dict) -> bool:
         ``True`` if the trade was stored, ``False`` if a duplicate was
         detected and the trade was ignored.
     """
-    # Ensure entry_time is set
-    if "entry_time" not in trade:
-        trade["entry_time"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    # Ensure entry_time is set and normalised to UTC ISO string
+    trade["entry_time"] = _to_utc_iso(trade.get("entry_time"))
     # Assign unique trade ID if missing
     trade.setdefault("trade_id", str(uuid.uuid4()))
     # Remove leverage field (spot only)
@@ -269,6 +291,8 @@ def log_trade_result(
         "notional",
         "fees",
         "slippage",
+        "pnl",
+        "pnl_pct",
         "outcome",
         "strategy",
         "session",
@@ -299,22 +323,31 @@ def log_trade_result(
         entry_val = float(entry_price) if entry_price is not None else None
     except Exception:
         entry_val = None
-    notional = None
+    notional = entry_val * size_val if entry_val is not None else None
+    # Compute net PnL and percentage
+    pnl_val = 0.0
     if entry_val is not None:
-        notional = entry_val * size_val
+        pnl_val = (exit_price - entry_val) * size_val
+        if str(trade.get("direction", "")).lower() == "short":
+            pnl_val = (entry_val - exit_price) * size_val
+    pnl_val -= fees
+    pnl_val -= slippage
+    pnl_pct = (pnl_val / notional * 100) if notional else 0.0
     row = {
         "trade_id": trade.get("trade_id", str(uuid.uuid4())),
-        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": _to_utc_iso(),
         "symbol": trade.get("symbol"),
         "direction": trade.get("direction"),
-        "entry_time": trade.get("entry_time"),
-        "exit_time": exit_time or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "entry_time": _to_utc_iso(trade.get("entry_time")),
+        "exit_time": _to_utc_iso(exit_time),
         "entry": trade.get("entry"),
         "exit": exit_price,
         "size": size_val,
         "notional": notional,
         "fees": fees,
         "slippage": slippage,
+        "pnl": pnl_val,
+        "pnl_pct": pnl_pct,
         "outcome": outcome,
         "strategy": trade.get("strategy", "unknown"),
         "session": trade.get("session", "unknown"),
@@ -379,25 +412,36 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
         return df
     key_cols = [c for c in ["entry_time", "symbol", "strategy"] if c in df.columns]
     df = df.drop_duplicates()
-    if all(c in df.columns for c in ["entry", "exit", "size", "direction"]) and key_cols:
-        def _calc_pnl(row: pd.Series) -> float:
-            try:
-                entry = float(row.get("entry", 0))
-                exit_price = float(row.get("exit", 0))
-                size = float(row.get("size", 0))
-                direction = str(row.get("direction", "")).lower()
-                pnl = (exit_price - entry) * size
-                if direction == "short":
-                    pnl = (entry - exit_price) * size
-                pnl -= float(row.get("fees", 0) or 0)
-                pnl -= float(row.get("slippage", 0) or 0)
-                return pnl
-            except Exception:
-                return 0.0
+    if key_cols:
+        if "pnl" in df.columns:
+            df["_partial_pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0)
+        elif all(c in df.columns for c in ["entry", "exit", "size", "direction"]):
+            def _calc_pnl(row: pd.Series) -> float:
+                try:
+                    entry = float(row.get("entry", 0))
+                    exit_price = float(row.get("exit", 0))
+                    size = float(row.get("size", 0))
+                    direction = str(row.get("direction", "")).lower()
+                    pnl = (exit_price - entry) * size
+                    if direction == "short":
+                        pnl = (entry - exit_price) * size
+                    pnl -= float(row.get("fees", 0) or 0)
+                    pnl -= float(row.get("slippage", 0) or 0)
+                    return pnl
+                except Exception:
+                    return 0.0
 
-        df["_partial_pnl"] = df.apply(_calc_pnl, axis=1)
-        agg = df.groupby(key_cols)["_partial_pnl"].sum().rename("net_pnl")
-        df = df.drop(columns=["_partial_pnl"]).merge(agg, on=key_cols, how="left")
+            df["_partial_pnl"] = df.apply(_calc_pnl, axis=1)
+        if "_partial_pnl" in df.columns:
+            agg = df.groupby(key_cols)["_partial_pnl"].sum().rename("net_pnl")
+            df = df.drop(columns=["_partial_pnl"]).merge(agg, on=key_cols, how="left")
+            if "notional" not in df.columns and {"entry", "size"}.issubset(df.columns):
+                df["notional"] = pd.to_numeric(df["entry"], errors="coerce") * pd.to_numeric(
+                    df["size"], errors="coerce"
+                )
+            if "notional" in df.columns:
+                notional = pd.to_numeric(df["notional"], errors="coerce").replace(0, pd.NA)
+                df["pnl_pct"] = pd.to_numeric(df["net_pnl"], errors="coerce") / notional * 100
     return df
 
 
