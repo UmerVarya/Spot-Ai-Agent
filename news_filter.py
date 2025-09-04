@@ -4,9 +4,11 @@ from groq import Groq
 import os
 from dotenv import load_dotenv
 from log_utils import setup_logger
+import config
 
 load_dotenv()
 logger = setup_logger(__name__)
+GROQ_MODEL = config.get_groq_model()
 
 
 def load_events(path="news_events.json"):
@@ -51,8 +53,7 @@ def analyze_news_with_llm(prompt):
     try:
         client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         response = client.chat.completions.create(
-            # Updated to Groq's latest supported model
-            model="llama-3.1-70b-versatile",
+            model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}]
         )
         reply = response.choices[0].message.content
