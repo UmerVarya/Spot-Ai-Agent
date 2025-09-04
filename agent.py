@@ -90,13 +90,13 @@ logger.info(
 )
 
 
-def calculate_dynamic_risk(confidence: float, ml_prob: float, score: float) -> float:
-    """Return dollar risk based on confidence, ML probability and TA score.
+def calculate_dynamic_trade_size(confidence: float, ml_prob: float, score: float) -> float:
+    """Return trade notional in USDT based on confidence signals.
 
     The agent expresses confidence on a 0-10 scale, the ML model supplies a
     success probability in ``[0, 1]`` and the technical analysis module
     outputs a normalized score on a 0-10 scale.  We map these inputs to a
-    dollar risk amount between 100 and 200 USDT.  Values above the upper
+    dollar *position size* between 100 and 200 USDT.  Values above the upper
     thresholds saturate at 200 and values below the lower bounds default to
     100.
 
@@ -112,10 +112,10 @@ def calculate_dynamic_risk(confidence: float, ml_prob: float, score: float) -> f
     Returns
     -------
     float
-        Dollar amount to risk on the trade.
+        Trade size in USDT.
     """
 
-    # Define the ranges over which risk scales
+    # Define the ranges over which size scales
     min_conf, max_conf = 4.5, 8.0
     min_prob, max_prob = 0.5, 0.7
     min_score, max_score = 4.5, 8.0
@@ -556,16 +556,18 @@ def run_agent_loop() -> None:
                             atr_val = indicators_df['atr'].iloc[-1] if 'atr' in indicators_df else None
                         except Exception:
                             atr_val = None
-                        risk_amt = calculate_dynamic_risk(final_conf, ml_prob, score)
+                        trade_usd = calculate_dynamic_trade_size(final_conf, ml_prob, score)
                         if atr_val is not None and not np.isnan(atr_val) and atr_val > 0:
-                            base_size = risk_amt / (atr_val * 2.0)
+                            sl_dist = atr_val * 2.0
                         else:
                             atr_val = entry_price * 0.02
-                            base_size = risk_amt / (entry_price * 0.02)
+                            sl_dist = atr_val * 2.0
                         state = get_rl_state(sym_vol_pct)
                         mult = rl_sizer.select_multiplier(state)
-                        position_size = round(max(base_size * mult, 0), 6)
-                        sl = round(entry_price - atr_val * 2.0, 6)
+                        trade_usd *= mult
+                        trade_usd = max(100.0, min(200.0, trade_usd))
+                        position_size = round(max(trade_usd / entry_price, 0), 6)
+                        sl = round(entry_price - sl_dist, 6)
                         tp1 = round(entry_price + atr_val * 1.0, 6)
                         tp2 = round(entry_price + atr_val * 2.0, 6)
                         tp3 = round(entry_price + atr_val * 3.0, 6)
@@ -586,6 +588,7 @@ def run_agent_loop() -> None:
                             if sentiment_bias == "bullish"
                             else -100.0 if sentiment_bias == "bearish" else 0.0
                         )
+                        risk_amount = position_size * sl_dist
                         # Compose the new trade dictionary with extra metadata
                         new_trade = {
                             "symbol": symbol,
@@ -599,7 +602,8 @@ def run_agent_loop() -> None:
                             "position_size": position_size,
                             "size": position_size,  # duplicate for dashboard convenience
                             "initial_size": position_size,  # track original size for partial exits
-                            "risk_amount": risk_amt,
+                            "usd_size": trade_usd,
+                            "risk_amount": risk_amount,
                             "rl_state": state,
                             "rl_multiplier": mult,
                             "leverage": 1,  # default leverage (spot)
