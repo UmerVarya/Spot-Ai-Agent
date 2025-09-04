@@ -695,20 +695,31 @@ def render_live_tab() -> None:
             st.bar_chart(
                 session_perf.set_index("session"), use_container_width=True
             )
-        # Replace outcome codes with human-friendly labels
-        outcome_labels = {
-            "tp1": "🟢 TP1",
-            "tp1_partial": "🟢 TP1 partial",
-            "tp2": "🟢 TP2",
-            "tp3": "🟢 TP3",
-            "tp4": "🚀 TP4",
-            "tp4_sl": "🔴 TP4 SL",
-            "sl": "🔴 SL",
-            "early_exit": "⚠️ Early Exit",
+        # Map outcome codes to friendly descriptions
+        outcome_descriptions = {
+            "tp1_partial": "Exited 50% at TP1",
+            "tp2_partial": "Exited additional 30% at TP2",
+            "tp4": "Final Exit (TP4 ride)",
+            "tp4_sl": "Stopped out after TP3",
+            "sl": "Stopped Out (SL)",
+            "early_exit": "Early Exit",
+            # Fallbacks for other potential outcomes
+            "tp1": "Take Profit 1",
+            "tp2": "Take Profit 2",
+            "tp3": "Take Profit 3",
         }
+        profit_codes = {
+            "tp1",
+            "tp1_partial",
+            "tp2",
+            "tp2_partial",
+            "tp3",
+            "tp4",
+        }
+        loss_codes = {"tp4_sl", "sl", "early_exit"}
         if "outcome" in hist_df.columns:
-            hist_df["outcome"] = hist_df["outcome"].map(
-                lambda x: outcome_labels.get(str(x), str(x))
+            hist_df["Outcome Description"] = hist_df["outcome"].map(
+                lambda x: outcome_descriptions.get(str(x), str(x))
             )
         # Display historical trades table
         display_cols = [
@@ -726,7 +737,7 @@ def render_live_tab() -> None:
                 "notional",
                 "fees",
                 "slippage",
-                "outcome",
+                "Outcome Description",
             ]
             if col in hist_df.columns
         ] + [
@@ -754,7 +765,28 @@ def render_live_tab() -> None:
                 hist_display[col] = (
                     pd.to_numeric(hist_display[col], errors="coerce").round(2)
                 )
-        st.dataframe(hist_display, use_container_width=True)
+        positive_labels = {
+            outcome_descriptions[c]
+            for c in profit_codes
+            if c in outcome_descriptions
+        }
+        negative_labels = {
+            outcome_descriptions[c]
+            for c in loss_codes
+            if c in outcome_descriptions
+        }
+
+        def style_outcome(val: str) -> str:
+            if val in positive_labels:
+                return "color: green"
+            if val in negative_labels:
+                return "color: red"
+            return ""
+
+        hist_display_style = hist_display.style.applymap(
+            style_outcome, subset=["Outcome Description"]
+        )
+        st.dataframe(hist_display_style, use_container_width=True)
         # CSV download button
         csv_data = hist_df.to_csv(index=False).encode("utf-8")
         st.download_button(
