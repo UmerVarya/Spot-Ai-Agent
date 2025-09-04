@@ -1,11 +1,13 @@
 import os
 from groq import Groq
 from dotenv import load_dotenv
+import config
 
 load_dotenv()
 
-# === Load Groq API Key ===
+# === Load Groq API Key and model ===
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = config.get_groq_model()
 client = Groq(api_key=GROQ_API_KEY)
 
 
@@ -49,8 +51,7 @@ Trade Details:
 """
 
         response = client.chat.completions.create(
-            # Updated to the latest Groq model
-            model="llama-3.1-70b-versatile",
+            model=GROQ_MODEL,
             messages=[
                 {"role": "system", "content": "You are a professional crypto trading strategist."},
                 {"role": "user", "content": prompt}

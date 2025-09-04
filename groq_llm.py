@@ -23,12 +23,12 @@ import json
 import aiohttp
 import asyncio
 import time
+import config
 from log_utils import setup_logger
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-# Updated default Groq model to a currently supported version
-MODEL = "llama-3.1-70b-versatile"
+MODEL = config.get_groq_model()
 HEADERS = {
     "Authorization": f"Bearer {GROQ_API_KEY}",
     "Content-Type": "application/json"
