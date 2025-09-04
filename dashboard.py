@@ -473,20 +473,20 @@ def render_live_tab() -> None:
         # Use quantity times price difference
         pnl_abs = (exits - entries) * sizes * direction_sign
         pnl_net = pnl_abs - fees - slippage
-        # Compute percentage based on notional when available
+        # Compute percentage based on net PnL and notional when available
         if "notional" in hist_df.columns:
             notional_series = pd.to_numeric(
                 hist_df["notional"], errors="coerce"
             ).replace(0, np.nan)
             pnl_pct = np.where(
                 notional_series.notnull(),
-                pnl_abs / notional_series * 100,
+                pnl_net / notional_series * 100,
                 0.0,
             )
         else:
             pnl_pct = np.where(
-                entries > 0,
-                pnl_abs / (entries * sizes) * 100,
+                (entries * sizes) != 0,
+                pnl_net / (entries * sizes) * 100,
                 0,
             )
         hist_df["PnL ($)"] = pnl_abs

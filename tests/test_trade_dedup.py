@@ -8,8 +8,8 @@ def test_deduplicate_history(tmp_path, monkeypatch):
             "trade_id": "1",
             "symbol": "BTCUSDT",
             "direction": "long",
-            "entry_time": "2024-01-01 00:00:00",
-            "exit_time": "2024-01-01 01:00:00",
+            "entry_time": "2024-01-01T00:00:00Z",
+            "exit_time": "2024-01-01T01:00:00Z",
             "entry": 100.0,
             "exit": 110.0,
             "size": 1.0,
@@ -22,8 +22,8 @@ def test_deduplicate_history(tmp_path, monkeypatch):
             "trade_id": "1",
             "symbol": "BTCUSDT",
             "direction": "long",
-            "entry_time": "2024-01-01 00:00:00",
-            "exit_time": "2024-01-01 02:00:00",
+            "entry_time": "2024-01-01T00:00:00Z",
+            "exit_time": "2024-01-01T02:00:00Z",
             "entry": 100.0,
             "exit": 120.0,
             "size": 1.0,
@@ -36,8 +36,8 @@ def test_deduplicate_history(tmp_path, monkeypatch):
             "trade_id": "1",
             "symbol": "BTCUSDT",
             "direction": "long",
-            "entry_time": "2024-01-01 00:00:00",
-            "exit_time": "2024-01-01 02:00:00",
+            "entry_time": "2024-01-01T00:00:00Z",
+            "exit_time": "2024-01-01T02:00:00Z",
             "entry": 100.0,
             "exit": 120.0,
             "size": 1.0,
@@ -56,4 +56,5 @@ def test_deduplicate_history(tmp_path, monkeypatch):
     assert len(result) == 2
     # net_pnl aggregates all partial exits
     assert set(result["net_pnl"].dropna()) == {30.0}
+    assert set(result["pnl_pct"].dropna()) == {30.0}
 

@@ -39,6 +39,9 @@ def test_log_trade_result_extended_fields(tmp_path, monkeypatch):
     assert "volatility" in rows[0]
     assert "macro_indicator" in rows[0]
     assert "llm_error" in rows[0]
+    assert rows[0]["timestamp"].endswith("Z")
+    assert float(rows[0]["pnl"]) == 100.0
+    assert float(rows[0]["pnl_pct"]) == 10.0
 
 
 def test_log_trade_result_writes_header_if_file_empty(tmp_path, monkeypatch):
