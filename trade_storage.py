@@ -23,6 +23,7 @@ import json
 import os
 import csv
 import logging
+import uuid
 from datetime import datetime
 from typing import Optional
 from log_utils import ensure_symlink
@@ -175,6 +176,8 @@ def store_trade(trade: dict) -> bool:
     # Ensure entry_time is set
     if "entry_time" not in trade:
         trade["entry_time"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    # Assign unique trade ID if missing
+    trade.setdefault("trade_id", str(uuid.uuid4()))
     # Remove leverage field (spot only)
     trade.pop("leverage", None)
     symbol = trade.get("symbol")
@@ -254,6 +257,7 @@ def log_trade_result(
     """
     # Build headers including notional
     headers = [
+        "trade_id",
         "timestamp",
         "symbol",
         "direction",
@@ -299,6 +303,7 @@ def log_trade_result(
     if entry_val is not None:
         notional = entry_val * size_val
     row = {
+        "trade_id": trade.get("trade_id", str(uuid.uuid4())),
         "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "symbol": trade.get("symbol"),
         "direction": trade.get("direction"),
@@ -362,6 +367,40 @@ def log_trade_result(
     _maybe_send_llm_performance_email()
 
 
+def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove duplicate rows and aggregate partial exits.
+
+    Rows are grouped by ``entry_time``, ``symbol`` and ``strategy``. Exact
+    duplicates are dropped. For groups containing multiple unique rows (e.g.
+    partial exits), the function computes a ``net_pnl`` column representing the
+    sum of PnL for all rows in the group.
+    """
+    if df.empty:
+        return df
+    key_cols = [c for c in ["entry_time", "symbol", "strategy"] if c in df.columns]
+    df = df.drop_duplicates()
+    if all(c in df.columns for c in ["entry", "exit", "size", "direction"]) and key_cols:
+        def _calc_pnl(row: pd.Series) -> float:
+            try:
+                entry = float(row.get("entry", 0))
+                exit_price = float(row.get("exit", 0))
+                size = float(row.get("size", 0))
+                direction = str(row.get("direction", "")).lower()
+                pnl = (exit_price - entry) * size
+                if direction == "short":
+                    pnl = (entry - exit_price) * size
+                pnl -= float(row.get("fees", 0) or 0)
+                pnl -= float(row.get("slippage", 0) or 0)
+                return pnl
+            except Exception:
+                return 0.0
+
+        df["_partial_pnl"] = df.apply(_calc_pnl, axis=1)
+        agg = df.groupby(key_cols)["_partial_pnl"].sum().rename("net_pnl")
+        df = df.drop(columns=["_partial_pnl"]).merge(agg, on=key_cols, how="left")
+    return df
+
+
 def load_trade_history_df() -> pd.DataFrame:
     """Return historical trades as a DataFrame."""
     df = pd.DataFrame()
@@ -382,6 +421,7 @@ def load_trade_history_df() -> pd.DataFrame:
         else:
             df = pd.DataFrame(
                 columns=[
+                    "trade_id",
                     "timestamp",
                     "symbol",
                     "entry",
@@ -392,6 +432,8 @@ def load_trade_history_df() -> pd.DataFrame:
                     "pnl",
                 ]
             )
+    # De-duplicate and aggregate partial exits
+    df = _deduplicate_history(df)
     # Filter out rows with outcome recorded as "open"
     if not df.empty and "outcome" in df.columns:
         df = df[df["outcome"].astype(str).str.lower() != "open"]
