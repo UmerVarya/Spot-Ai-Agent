@@ -219,6 +219,7 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     tp3 = data.get("tp3")
     size_field = data.get("size", data.get("position_size", 0))
     status = data.get("status", {})
+    profit_riding = data.get("profit_riding", False)
     current_price = get_live_price(symbol)
     # Validate required fields
     if current_price is None or entry is None or direction is None:
@@ -263,16 +264,25 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
             time_delta_min = None
     else:
         time_delta_min = None
-    # Status flags
+    # Status flags for each take-profit level and SL
     status_flags: list[str] = []
-    if status.get("tp1"):
-        status_flags.append("TP1 hit")
-    if status.get("tp2"):
-        status_flags.append("TP2 hit")
-    if status.get("tp3"):
-        status_flags.append("TP3 hit")
+
+    def tp_flag(hit: bool | None, label: str) -> str:
+        """Return an emoji tag indicating whether a TP level was hit."""
+        return ("🟢" if hit else "🔵") + f" {label}"
+
+    for key, label in [("tp1", "TP1"), ("tp2", "TP2"), ("tp3", "TP3")]:
+        # Only show flags for targets that exist in the trade data
+        if data.get(key) is not None:
+            status_flags.append(tp_flag(status.get(key), label))
+
     if status.get("sl"):
-        status_flags.append("SL hit")
+        status_flags.append("🔴 SL")
+
+    # Indicate TP4 profit-riding mode when enabled
+    if profit_riding:
+        status_flags.append("🚀 TP4 mode (Trailing)")
+
     status_str = " | ".join(status_flags) if status_flags else "Running"
     return {
         "Symbol": symbol,
@@ -684,6 +694,21 @@ def render_live_tab() -> None:
             )
             st.bar_chart(
                 session_perf.set_index("session"), use_container_width=True
+            )
+        # Replace outcome codes with human-friendly labels
+        outcome_labels = {
+            "tp1": "🟢 TP1",
+            "tp1_partial": "🟢 TP1 partial",
+            "tp2": "🟢 TP2",
+            "tp3": "🟢 TP3",
+            "tp4": "🚀 TP4",
+            "tp4_sl": "🔴 TP4 SL",
+            "sl": "🔴 SL",
+            "early_exit": "⚠️ Early Exit",
+        }
+        if "outcome" in hist_df.columns:
+            hist_df["outcome"] = hist_df["outcome"].map(
+                lambda x: outcome_labels.get(str(x), str(x))
             )
         # Display historical trades table
         display_cols = [
