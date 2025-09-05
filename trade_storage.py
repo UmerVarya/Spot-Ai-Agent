@@ -476,6 +476,40 @@ def load_trade_history_df() -> pd.DataFrame:
                     "pnl",
                 ]
             )
+    # Normalise column names to handle legacy field names
+    if not df.empty:
+        df = df.rename(columns=lambda c: str(c).strip())
+        lower_map = {c.lower(): c for c in df.columns}
+        # Map of known legacy column names to their canonical forms
+        synonyms = {
+            "entryprice": "entry",
+            "entry_price": "entry",
+            "exitprice": "exit",
+            "exit_price": "exit",
+            "position_size": "size",
+            "positionsize": "size",
+            "quantity": "size",
+            "trade_outcome": "outcome",
+            "result": "outcome",
+            "trade_result": "outcome",
+            "entry_timestamp": "entry_time",
+            "exittimestamp": "exit_time",
+            "exit_timestamp": "exit_time",
+            "pnl_usd": "pnl",
+            "pnl$": "pnl",
+            "pnl_percent": "pnl_pct",
+            "pnl%": "pnl_pct",
+            "notional_value": "notional",
+            "notionalusd": "notional",
+        }
+        rename_dict = {}
+        for alt, canonical in synonyms.items():
+            if alt in lower_map and canonical not in df.columns:
+                rename_dict[lower_map[alt]] = canonical
+        if rename_dict:
+            df = df.rename(columns=rename_dict)
+        # standardise column names to lowercase for downstream consumers
+        df.columns = [c.lower() for c in df.columns]
     # De-duplicate and aggregate partial exits
     df = _deduplicate_history(df)
     # Filter out rows with outcome recorded as "open"
