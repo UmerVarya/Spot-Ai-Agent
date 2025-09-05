@@ -555,10 +555,12 @@ def load_trade_history_df() -> pd.DataFrame:
         # standardise column names to lowercase for downstream consumers
         df.columns = [c.lower() for c in df.columns]
         # Drop rows where symbol or direction look invalid to guard against
-        # misaligned numeric rows polluting the dashboard
+        # misaligned numeric rows polluting the dashboard.  Symbols may contain
+        # numbers (e.g., ``1000SHIBUSDT``) so we accept alphanumeric strings
+        # rather than only alphabetic ones.
         if {"symbol", "direction"}.issubset(df.columns):
             mask = (
-                df["symbol"].astype(str).str.isalpha()
+                df["symbol"].astype(str).str.match(r"^[A-Za-z0-9_]+$", na=False)
                 & df["direction"].astype(str).str.lower().isin(["long", "short"])
             )
             dropped = len(df) - int(mask.sum())
