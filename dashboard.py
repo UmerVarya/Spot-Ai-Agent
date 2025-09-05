@@ -641,9 +641,18 @@ def render_live_tab() -> None:
             )
         # Distribution of trade returns
         if "PnL (%)" in hist_df.columns:
-            hist_vals, bins = np.histogram(hist_df["PnL (%)"].astype(float), bins=20)
-            hist_chart_df = pd.DataFrame({"Return": bins[:-1], "Count": hist_vals})
-            st.bar_chart(hist_chart_df.set_index("Return"), use_container_width=True)
+            # Safely convert to numeric and drop missing/inf values before histogram
+            pnl_series = (
+                pd.to_numeric(hist_df["PnL (%)"], errors="coerce")
+                .replace([np.inf, -np.inf], np.nan)
+                .dropna()
+            )
+            if not pnl_series.empty:
+                hist_vals, bins = np.histogram(pnl_series, bins=20)
+                hist_chart_df = pd.DataFrame({"Return": bins[:-1], "Count": hist_vals})
+                st.bar_chart(
+                    hist_chart_df.set_index("Return"), use_container_width=True
+                )
         # Performance analytics by symbol and strategy
         if "PnL (net $)" in hist_df.columns:
             if "symbol" in hist_df.columns:
