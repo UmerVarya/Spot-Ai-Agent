@@ -910,9 +910,10 @@ def render_backtest_tab() -> None:
             )
 
 
-# Create tabs and render contents
-tab_live, tab_backtest = st.tabs(["Dashboard", "Backtest"])
-with tab_live:
-    render_live_tab()
-with tab_backtest:
-    render_backtest_tab()
+# Create tabs and render contents only when executed as a script
+if __name__ == "__main__":
+    tab_live, tab_backtest = st.tabs(["Dashboard", "Backtest"])
+    with tab_live:
+        render_live_tab()
+    with tab_backtest:
+        render_backtest_tab()
