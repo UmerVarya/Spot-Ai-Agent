@@ -439,10 +439,10 @@ def render_live_tab() -> None:
     hist_df = load_trade_history_df()
     st.subheader("📊 Historical Performance – Completed Trades")
     if not hist_df.empty:
-        # Ensure date columns are parsed
+        # Ensure date columns are parsed with timezone awareness
         for col in ["entry_time", "exit_time"]:
             if col in hist_df.columns:
-                hist_df[col] = pd.to_datetime(hist_df[col], errors="coerce")
+                hist_df[col] = pd.to_datetime(hist_df[col], errors="coerce", utc=True)
         # Derive size column
         if "size" not in hist_df.columns and "position_size" in hist_df.columns:
             hist_df["size"] = hist_df["position_size"].astype(float)
@@ -500,10 +500,10 @@ def render_live_tab() -> None:
         # Compute duration in minutes
         if {"entry_time", "exit_time"}.issubset(hist_df.columns):
             entry_times = pd.Series(
-                pd.to_datetime(hist_df.get("entry_time"), errors="coerce")
+                pd.to_datetime(hist_df.get("entry_time"), errors="coerce", utc=True)
             )
             exit_times = pd.Series(
-                pd.to_datetime(hist_df.get("exit_time"), errors="coerce")
+                pd.to_datetime(hist_df.get("exit_time"), errors="coerce", utc=True)
             )
             hist_df["Duration (min)"] = (
                 exit_times - entry_times
@@ -606,8 +606,10 @@ def render_live_tab() -> None:
         # Aggregated PnL over different horizons
         # Compute PnL for trades closed today, this week, last 30 days and lifetime
         try:
-            # Ensure exit_time is datetime
-            exit_times = pd.to_datetime(hist_df.get("exit_time"), errors="coerce")
+            # Ensure exit_time is datetime with UTC timezone awareness
+            exit_times = pd.to_datetime(
+                hist_df.get("exit_time"), errors="coerce", utc=True
+            )
             now_ts = pd.Timestamp.utcnow()
             # Start of day, week and month relative to current UTC time
             today_start = now_ts.normalize()
