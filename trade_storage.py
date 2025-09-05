@@ -554,6 +554,17 @@ def load_trade_history_df() -> pd.DataFrame:
             df = df.rename(columns=rename_dict)
         # standardise column names to lowercase for downstream consumers
         df.columns = [c.lower() for c in df.columns]
+        # Drop rows where symbol or direction look invalid to guard against
+        # misaligned numeric rows polluting the dashboard
+        if {"symbol", "direction"}.issubset(df.columns):
+            mask = (
+                df["symbol"].astype(str).str.isalpha()
+                & df["direction"].astype(str).str.lower().isin(["long", "short"])
+            )
+            dropped = len(df) - int(mask.sum())
+            if dropped:
+                logger.warning("Dropped %d malformed trade rows", dropped)
+            df = df[mask]
     # De-duplicate and aggregate partial exits
     df = _deduplicate_history(df)
     # Filter out rows with outcome recorded as "open"
