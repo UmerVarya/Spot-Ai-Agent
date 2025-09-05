@@ -34,6 +34,24 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+# Human-readable descriptions for outcome codes used across the system.  These
+# labels are stored alongside each logged trade so downstream CSV exports do not
+# have to map shorthand codes to friendly text.
+OUTCOME_DESCRIPTIONS = {
+    "tp1_partial": "Exited 50% at TP1",
+    "tp2_partial": "Exited additional 30% at TP2",
+    "tp4": "Final Exit (TP4 ride)",
+    "tp4_sl": "Stopped out after TP3",
+    "sl": "Stopped Out (SL)",
+    "early_exit": "Early Exit",
+    # Fallbacks for other potential outcomes
+    "tp1": "Take Profit 1",
+    "tp2": "Take Profit 2",
+    "tp3": "Take Profit 3",
+    "time_exit": "Time-based Exit",
+}
+
+
 def _to_utc_iso(ts: Optional[str] = None) -> str:
     """Return an ISO-8601 UTC timestamp with ``Z`` suffix.
 
@@ -294,6 +312,7 @@ def log_trade_result(
         "pnl",
         "pnl_pct",
         "outcome",
+        "outcome_desc",
         "strategy",
         "session",
         "confidence",
@@ -349,6 +368,7 @@ def log_trade_result(
         "pnl": pnl_val,
         "pnl_pct": pnl_pct,
         "outcome": outcome,
+        "outcome_desc": OUTCOME_DESCRIPTIONS.get(outcome, outcome),
         "strategy": trade.get("strategy", "unknown"),
         "session": trade.get("session", "unknown"),
         "confidence": trade.get("confidence", 0),
@@ -391,58 +411,82 @@ def log_trade_result(
     ) > 0
     # Ensure directory exists
     os.makedirs(os.path.dirname(TRADE_HISTORY_FILE), exist_ok=True)
-    # Write the row to CSV
-    with open(TRADE_HISTORY_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
+    # Write the row to CSV using pandas to avoid misaligned columns and ensure
+    # consistent quoting
+    df_row = pd.DataFrame([row], columns=headers)
+    df_row.to_csv(
+        TRADE_HISTORY_FILE,
+        mode="a",
+        header=not file_exists,
+        index=False,
+        quoting=csv.QUOTE_MINIMAL,
+    )
     _maybe_send_llm_performance_email()
 
 
 def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove duplicate rows and aggregate partial exits.
+    """Collapse partial exits so each trade occupies a single row.
 
-    Rows are grouped by ``entry_time``, ``symbol`` and ``strategy``. Exact
-    duplicates are dropped. For groups containing multiple unique rows (e.g.
-    partial exits), the function computes a ``net_pnl`` column representing the
-    sum of PnL for all rows in the group.
+    Trades are grouped by ``entry_time``, ``symbol`` and ``strategy``. All PnL
+    values within a group are summed and the last non-partial row is used as the
+    representative record. Boolean columns ``tp1_partial`` and ``tp2_partial``
+    flag whether those partial exits occurred.
     """
     if df.empty:
         return df
     key_cols = [c for c in ["entry_time", "symbol", "strategy"] if c in df.columns]
     df = df.drop_duplicates()
-    if key_cols:
-        if "pnl" in df.columns:
-            df["_partial_pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0)
-        elif all(c in df.columns for c in ["entry", "exit", "size", "direction"]):
-            def _calc_pnl(row: pd.Series) -> float:
-                try:
-                    entry = float(row.get("entry", 0))
-                    exit_price = float(row.get("exit", 0))
-                    size = float(row.get("size", 0))
-                    direction = str(row.get("direction", "")).lower()
-                    pnl = (exit_price - entry) * size
-                    if direction == "short":
-                        pnl = (entry - exit_price) * size
-                    pnl -= float(row.get("fees", 0) or 0)
-                    pnl -= float(row.get("slippage", 0) or 0)
-                    return pnl
-                except Exception:
-                    return 0.0
+    if not key_cols:
+        return df
 
-            df["_partial_pnl"] = df.apply(_calc_pnl, axis=1)
-        if "_partial_pnl" in df.columns:
-            agg = df.groupby(key_cols)["_partial_pnl"].sum().rename("net_pnl")
-            df = df.drop(columns=["_partial_pnl"]).merge(agg, on=key_cols, how="left")
-            if "notional" not in df.columns and {"entry", "size"}.issubset(df.columns):
-                df["notional"] = pd.to_numeric(df["entry"], errors="coerce") * pd.to_numeric(
-                    df["size"], errors="coerce"
-                )
-            if "notional" in df.columns:
-                notional = pd.to_numeric(df["notional"], errors="coerce").replace(0, pd.NA)
-                df["pnl_pct"] = pd.to_numeric(df["net_pnl"], errors="coerce") / notional * 100
-    return df
+    if "pnl" in df.columns:
+        df["_pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0)
+    elif all(c in df.columns for c in ["entry", "exit", "size", "direction"]):
+        def _calc(row: pd.Series) -> float:
+            try:
+                entry = float(row.get("entry", 0))
+                exit_price = float(row.get("exit", 0))
+                size = float(row.get("size", 0))
+                direction = str(row.get("direction", "")).lower()
+                pnl = (exit_price - entry) * size
+                if direction == "short":
+                    pnl = (entry - exit_price) * size
+                pnl -= float(row.get("fees", 0) or 0)
+                pnl -= float(row.get("slippage", 0) or 0)
+                return pnl
+            except Exception:
+                return 0.0
+
+        df["_pnl"] = df.apply(_calc, axis=1)
+    else:
+        df["_pnl"] = 0.0
+
+    def _collapse(group: pd.DataFrame) -> pd.Series:
+        pnl_total = group["_pnl"].sum()
+        final = group[~group["outcome"].astype(str).str.contains("_partial", na=False)]
+        if final.empty:
+            final = group.tail(1)
+        row = final.iloc[0].copy()
+        row["pnl"] = pnl_total
+        if "notional" not in row and {"entry", "size"}.issubset(group.columns):
+            try:
+                row["notional"] = float(row.get("entry", 0)) * float(row.get("size", 0))
+            except Exception:
+                row["notional"] = None
+        notional_val = row.get("notional")
+        if notional_val:
+            try:
+                row["pnl_pct"] = pnl_total / float(notional_val) * 100
+            except Exception:
+                row["pnl_pct"] = None
+        row["tp1_partial"] = group["outcome"].astype(str).str.contains("tp1_partial").any()
+        row["tp2_partial"] = group["outcome"].astype(str).str.contains("tp2_partial").any()
+        return row
+
+    collapsed = (
+        df.groupby(key_cols, group_keys=False).apply(_collapse).reset_index(drop=True)
+    )
+    return collapsed.drop(columns=["_pnl"], errors="ignore")
 
 
 def load_trade_history_df() -> pd.DataFrame:
@@ -515,6 +559,13 @@ def load_trade_history_df() -> pd.DataFrame:
     # Filter out rows with outcome recorded as "open"
     if not df.empty and "outcome" in df.columns:
         df = df[df["outcome"].astype(str).str.lower() != "open"]
+    # Ensure human-readable outcome descriptions
+    if "outcome_desc" in df.columns:
+        df = df.rename(columns={"outcome_desc": "Outcome Description"})
+    elif "outcome" in df.columns:
+        df["Outcome Description"] = df["outcome"].map(
+            lambda x: OUTCOME_DESCRIPTIONS.get(str(x), str(x))
+        )
     return df
 
 

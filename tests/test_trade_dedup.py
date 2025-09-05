@@ -52,9 +52,11 @@ def test_deduplicate_history(tmp_path, monkeypatch):
     df.to_csv(hist_file, index=False)
     monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(hist_file))
     result = trade_storage.load_trade_history_df()
-    # duplicate row should be removed -> only two unique partial exits remain
-    assert len(result) == 2
-    # net_pnl aggregates all partial exits
-    assert set(result["net_pnl"].dropna()) == {30.0}
-    assert set(result["pnl_pct"].dropna()) == {30.0}
+    # partial exits collapsed into a single row
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert bool(row["tp1_partial"])
+    assert bool(row["tp2_partial"])
+    assert row["pnl"] == 30.0
+    assert row["pnl_pct"] == 30.0
 
