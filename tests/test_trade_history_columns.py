@@ -3,12 +3,12 @@ import trade_storage
 
 def test_load_trade_history_df_normalises_columns(tmp_path, monkeypatch):
     data = {
-        "EntryPrice": [100.0],
-        "ExitPrice": [110.0],
-        "Position_Size": [1.0],
-        "Trade_Outcome": ["tp1"],
-        "Entry_Timestamp": ["2024-01-01T00:00:00Z"],
-        "Exit_Timestamp": ["2024-01-01T01:00:00Z"],
+        "Entry Price": [100.0],
+        "Exit Price": [110.0],
+        "Position Size": [1.0],
+        "Trade Outcome": ["tp1"],
+        "Entry Timestamp": ["2024-01-01T00:00:00Z"],
+        "Exit Timestamp": ["2024-01-01T01:00:00Z"],
     }
     df = pd.DataFrame(data)
     path = tmp_path / "history.csv"
