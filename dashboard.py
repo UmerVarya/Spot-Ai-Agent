@@ -253,15 +253,10 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
         pnl_percent = 0.0
     # Time in trade (minutes)
     entry_time_str = data.get("entry_time") or data.get("timestamp")
-    if entry_time_str:
-        try:
-            entry_dt = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S").replace(
-                tzinfo=timezone.utc
-            )
-            now = datetime.utcnow().replace(tzinfo=timezone.utc)
-            time_delta_min = (now - entry_dt).total_seconds() / 60
-        except Exception:
-            time_delta_min = None
+    entry_dt = pd.to_datetime(entry_time_str, errors="coerce", utc=True)
+    if pd.notna(entry_dt):
+        now = pd.Timestamp.utcnow()
+        time_delta_min = (now - entry_dt).total_seconds() / 60
     else:
         time_delta_min = None
     # Status flags for each take-profit level and SL
@@ -504,8 +499,14 @@ def render_live_tab() -> None:
         hist_df["PnL (%)"] = pnl_pct
         # Compute duration in minutes
         if {"entry_time", "exit_time"}.issubset(hist_df.columns):
+            entry_times = pd.Series(
+                pd.to_datetime(hist_df.get("entry_time"), errors="coerce")
+            )
+            exit_times = pd.Series(
+                pd.to_datetime(hist_df.get("exit_time"), errors="coerce")
+            )
             hist_df["Duration (min)"] = (
-                hist_df["exit_time"] - hist_df["entry_time"]
+                exit_times - entry_times
             ).dt.total_seconds() / 60
         # Summary metrics
         total_trades = len(hist_df)
