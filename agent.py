@@ -80,6 +80,10 @@ NEWS_INTERVAL = 3600
 RUN_DASHBOARD = os.getenv("RUN_DASHBOARD", "0") == "1"
 rl_sizer = RLPositionSizer()
 
+# Explicit USD bounds for trade sizing
+MIN_TRADE_USD = 100.0
+MAX_TRADE_USD = 200.0
+
 logger.info(
     "Paths: LOG_FILE=%s TRADE_HISTORY=%s ACTIVE_TRADES=%s REJECTED_TRADES=%s LEARNING_LOG=%s",
     LOG_FILE,
@@ -128,7 +132,8 @@ def calculate_dynamic_trade_size(confidence: float, ml_prob: float, score: float
     score_norm = max(0.0, min(1.0, score_norm))
 
     edge = (conf_norm + prob_norm + score_norm) / 3.0
-    return 100.0 + edge * 100.0
+    trade_usd = MIN_TRADE_USD + edge * (MAX_TRADE_USD - MIN_TRADE_USD)
+    return max(MIN_TRADE_USD, min(MAX_TRADE_USD, trade_usd))
 
 
 def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: float):
@@ -565,7 +570,7 @@ def run_agent_loop() -> None:
                         state = get_rl_state(sym_vol_pct)
                         mult = rl_sizer.select_multiplier(state)
                         trade_usd *= mult
-                        trade_usd = max(100.0, min(200.0, trade_usd))
+                        trade_usd = max(MIN_TRADE_USD, min(MAX_TRADE_USD, trade_usd))
                         position_size = round(max(trade_usd / entry_price, 0), 6)
                         sl = round(entry_price - sl_dist, 6)
                         tp1 = round(entry_price + atr_val * 1.0, 6)
