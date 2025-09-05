@@ -503,7 +503,21 @@ def load_trade_history_df() -> pd.DataFrame:
         path = TRADE_HISTORY_FILE
         if os.path.exists(path) and os.path.getsize(path) > 0:
             try:
-                df = pd.read_csv(path, encoding="utf-8")
+                # ``on_bad_lines='skip'`` ensures that a partially written or
+                # otherwise corrupted row does not cause the entire history
+                # load to fail, which would leave the dashboard without any
+                # historical trades.  Older pandas versions do not support
+                # ``on_bad_lines`` so we fall back to the deprecated
+                # ``error_bad_lines``/``warn_bad_lines`` parameters.
+                try:  # pandas >= 1.3
+                    df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
+                except TypeError:  # pragma: no cover - older pandas
+                    df = pd.read_csv(
+                        path,
+                        encoding="utf-8",
+                        error_bad_lines=False,
+                        warn_bad_lines=False,
+                    )
             except Exception as exc:
                 logger.exception("Failed to read trade log file: %s", exc)
         else:
