@@ -471,8 +471,24 @@ def render_live_tab() -> None:
             sizes = pd.to_numeric(hist_df["size"], errors="coerce").fillna(1)
         else:
             sizes = pd.Series([1] * len(hist_df), dtype=float)
-        fees = pd.to_numeric(hist_df.get("fees", pd.Series([0] * len(hist_df))), errors="coerce").fillna(0)
-        slippage = pd.to_numeric(hist_df.get("slippage", pd.Series([0] * len(hist_df))), errors="coerce").fillna(0)
+        def _numeric_series(df: pd.DataFrame, name: str) -> pd.Series:
+            """Return numeric column ``name`` aligned to ``df.index``.
+
+            Falls back to a zero-filled series when the column is missing and
+            gracefully handles DataFrame columns produced by duplicate headers.
+            """
+
+            if name in df:
+                col = df[name]
+                if isinstance(col, pd.DataFrame):  # duplicate columns
+                    col = col.iloc[:, 0]
+                series = pd.to_numeric(col, errors="coerce")
+            else:
+                series = pd.Series([0] * len(df), index=df.index)
+            return series.reindex(df.index).fillna(0)
+
+        fees = _numeric_series(hist_df, "fees")
+        slippage = _numeric_series(hist_df, "slippage")
         # Determine direction multiplier
         direction_sign = np.where(directions.str.lower().str.startswith("s"), -1, 1)
         # Use quantity times price difference
