@@ -489,10 +489,32 @@ def render_live_tab() -> None:
 
         fees = _numeric_series(hist_df, "fees")
         slippage = _numeric_series(hist_df, "slippage")
-        # Determine direction multiplier
-        direction_sign = np.where(directions.str.lower().str.startswith("s"), -1, 1)
-        # Use quantity times price difference
-        pnl_abs = (exits - entries) * sizes * direction_sign
+        # Determine direction multiplier and compute PnL safely
+        def _to_float_series(s, index):
+            if isinstance(s, (pd.Series, pd.Index)):
+                s = pd.Series(s, index=getattr(s, "index", None))
+            s = pd.to_numeric(pd.Series(s), errors="coerce")
+            s.index = index
+            return s.fillna(0.0)
+
+        def _to_sign_series(direction, index):
+            m = pd.Series(direction)
+            m.index = index
+            sign = m.map({"long": 1, "short": -1}).fillna(0).astype(float)
+            return sign
+
+        idx = hist_df.index if "hist_df" in locals() else None
+        entries_aln = _to_float_series(entries, idx)
+        exits_aln = _to_float_series(exits, idx)
+        sizes_aln = _to_float_series(sizes, idx)
+        sign_aln = _to_sign_series(directions, idx)
+
+        pnl_vals = (
+            (exits_aln.to_numpy() - entries_aln.to_numpy())
+            * sizes_aln.to_numpy()
+            * sign_aln.to_numpy()
+        )
+        pnl_abs = pd.Series(pnl_vals, index=idx)
         pnl_net = pnl_abs - fees - slippage
         # Compute percentage based on net PnL and notional when available
         if "notional" in hist_df.columns:
