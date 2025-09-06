@@ -527,9 +527,13 @@ def render_live_tab() -> None:
                 0.0,
             )
         else:
+            e = pd.to_numeric(pd.Series(entries), errors="coerce").fillna(0.0).reset_index(drop=True)
+            s = pd.to_numeric(pd.Series(sizes),   errors="coerce").fillna(0.0).reset_index(drop=True)
+            pnl_net_series = pd.to_numeric(pd.Series(pnl_net), errors="coerce").fillna(0.0).reset_index(drop=True)
+            mask_nonzero = (e * s) != 0
             pnl_pct = np.where(
-                (entries * sizes) != 0,
-                pnl_net / (entries * sizes) * 100,
+                mask_nonzero,
+                pnl_net_series / (e * s) * 100,
                 0,
             )
         hist_df["PnL ($)"] = pnl_abs
