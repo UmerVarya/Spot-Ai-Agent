@@ -48,6 +48,9 @@ files are:
 /home/ubuntu/spot_data/trades/rejected_trades.csv
 ```
 
+See [docs/trade_record_format.md](docs/trade_record_format.md) for the expected
+structure of each row in `completed_trades.csv`.
+
 Symlinks back into the repository are created only for read-only
 compatibility with existing tools, but all writes happen directly in the
 `spot_data` tree.
