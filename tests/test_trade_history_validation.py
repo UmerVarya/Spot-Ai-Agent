@@ -10,7 +10,8 @@ def test_load_trade_history_df_drops_invalid_rows(tmp_path, monkeypatch, caplog)
             "direction": "long",
             "entry": 100.0,
             "exit": 110.0,
-            "size": 1.0,
+            "size": 100.0,
+            "position_size": 1.0,
             "outcome": "tp1",
         },
         {
@@ -18,7 +19,8 @@ def test_load_trade_history_df_drops_invalid_rows(tmp_path, monkeypatch, caplog)
             "direction": "long",
             "entry": 50.0,
             "exit": 55.0,
-            "size": 1.0,
+            "size": 50.0,
+            "position_size": 1.0,
             "outcome": "tp1",
         },
         {
@@ -26,7 +28,8 @@ def test_load_trade_history_df_drops_invalid_rows(tmp_path, monkeypatch, caplog)
             "direction": "up",
             "entry": 200.0,
             "exit": 210.0,
-            "size": 1.0,
+            "size": 200.0,
+            "position_size": 1.0,
             "outcome": "tp1",
         },
     ]
