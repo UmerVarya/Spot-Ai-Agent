@@ -16,4 +16,4 @@ def test_load_trade_history_df_normalises_columns(tmp_path, monkeypatch):
     monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(path))
     result = trade_storage.load_trade_history_df()
     assert not result.empty
-    assert {"entry", "exit", "size", "outcome", "entry_time", "exit_time"}.issubset(result.columns)
+    assert {"entry", "exit", "position_size", "outcome", "entry_time", "exit_time"}.issubset(result.columns)

@@ -47,7 +47,8 @@ def send_email(subject, trade_details):
         <p><strong>Symbol:</strong> {details.get('symbol')}</p>
         <p><strong>Direction:</strong> {details.get('direction')}</p>
         <p><strong>Score:</strong> {details.get('confidence')}</p>
-        <p><strong>Position Size:</strong> ${details.get('position_size')}</p>
+        <p><strong>Notional:</strong> ${details.get('size')}</p>
+        <p><strong>Quantity:</strong> {details.get('position_size')}</p>
         <p><strong>Entry:</strong> {details.get('entry')}</p>
         <p><strong>SL:</strong> {details.get('sl')}</p>
         <p><strong>TP1:</strong> {details.get('tp1')}</p>

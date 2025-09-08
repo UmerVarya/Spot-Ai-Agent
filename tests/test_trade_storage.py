@@ -21,7 +21,8 @@ def test_log_trade_result_extended_fields(tmp_path, monkeypatch):
         "symbol": "ETHUSDT",
         "direction": "long",
         "entry": 1000,
-        "size": 1,
+        "size": 1000,
+        "position_size": 1,
         "strategy": "test",
         "session": "Asia",
         "sentiment_bias": "bullish",
@@ -49,7 +50,7 @@ def test_log_trade_result_writes_header_if_file_empty(tmp_path, monkeypatch):
     csv_path = tmp_path / "log.csv"
     csv_path.touch()  # create zero-byte file
     monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
-    trade = {"symbol": "BTCUSDT", "direction": "long", "entry": 1000, "size": 1}
+    trade = {"symbol": "BTCUSDT", "direction": "long", "entry": 1000, "size": 1000, "position_size": 1}
     trade_storage.log_trade_result(trade, outcome="tp1", exit_price=1100)
     with open(csv_path, newline="") as f:
         rows = list(csv.DictReader(f))

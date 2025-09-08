@@ -15,7 +15,7 @@ def test_update_stop_loss_calls_util(monkeypatch):
 
     monkeypatch.setattr(trade_manager, 'update_stop_loss_order', fake_update)
     monkeypatch.setattr(trade_manager, 'send_email', fake_email)
-    trade = {'symbol': 'BTCUSDT', 'size': 1, 'sl': 100, 'tp1': 110, 'status': {'tp1': False}}
+    trade = {'symbol': 'BTCUSDT', 'position_size': 1, 'size': 100, 'sl': 100, 'tp1': 110, 'status': {'tp1': False}}
     trade_manager._update_stop_loss(trade, 90)
     assert trade['sl'] == 90
     assert trade['sl_order_id'] == '123'

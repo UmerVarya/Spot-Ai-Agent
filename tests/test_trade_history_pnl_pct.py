@@ -9,7 +9,8 @@ def test_load_trade_history_df_computes_pnl_pct(tmp_path, monkeypatch):
         "direction": ["long"],
         "entry": [100.0],
         "exit": [110.0],
-        "size": [1.0],
+        "size": [100.0],
+        "position_size": [1.0],
         "outcome": ["tp1"],
         "net pnl": [10.0],  # legacy header with space
         "notional value": [100.0],

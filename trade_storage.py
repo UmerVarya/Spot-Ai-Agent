@@ -334,25 +334,30 @@ def log_trade_result(
     ]
     # Compose row
     entry_price = trade.get("entry")
-    size_val = trade.get("size", trade.get("position_size", 0))
+    size_val = trade.get("size", 0)
+    qty_val = trade.get("position_size", trade.get("quantity", 0))
     try:
         size_val = float(size_val)
     except Exception:
         size_val = 0.0
     try:
+        qty_val = float(qty_val)
+    except Exception:
+        qty_val = 0.0
+    try:
         entry_val = float(entry_price) if entry_price is not None else None
     except Exception:
         entry_val = None
-    notional = entry_val * size_val if entry_val is not None else None
+    notional = size_val if size_val else (entry_val * qty_val if entry_val is not None else None)
     # Compute net PnL and percentage
     pnl_val = 0.0
     if entry_val is not None:
-        pnl_val = (exit_price - entry_val) * size_val
+        pnl_val = (exit_price - entry_val) * qty_val
         if str(trade.get("direction", "")).lower() == "short":
-            pnl_val = (entry_val - exit_price) * size_val
+            pnl_val = (entry_val - exit_price) * qty_val
     pnl_val -= fees
     pnl_val -= slippage
-    pnl_pct = (pnl_val / notional * 100) if notional else 0.0
+    pnl_pct = (pnl_val / size_val * 100) if size_val else 0.0
     row = {
         "trade_id": trade.get("trade_id", str(uuid.uuid4())),
         "timestamp": _to_utc_iso(),
@@ -442,16 +447,22 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
 
     if "pnl" in df.columns:
         df["_pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0)
-    elif all(c in df.columns for c in ["entry", "exit", "size", "direction"]):
+    elif (
+        all(c in df.columns for c in ["entry", "exit", "size", "direction"])
+        or all(c in df.columns for c in ["entry", "exit", "position_size", "direction"])
+    ):
         def _calc(row: pd.Series) -> float:
             try:
                 entry = float(row.get("entry", 0))
                 exit_price = float(row.get("exit", 0))
-                size = float(row.get("size", 0))
+                qty = float(row.get("position_size", row.get("quantity", 0)))
+                if qty == 0:
+                    size_field = float(row.get("size", 0))
+                    qty = size_field / entry if entry != 0 else size_field
                 direction = str(row.get("direction", "")).lower()
-                pnl = (exit_price - entry) * size
+                pnl = (exit_price - entry) * qty
                 if direction == "short":
-                    pnl = (entry - exit_price) * size
+                    pnl = (entry - exit_price) * qty
                 pnl -= float(row.get("fees", 0) or 0)
                 pnl -= float(row.get("slippage", 0) or 0)
                 return pnl
@@ -469,9 +480,12 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
             final = group.tail(1)
         row = final.iloc[0].copy()
         row["pnl"] = pnl_total
-        if "notional" not in row and {"entry", "size"}.issubset(group.columns):
+        if "notional" not in row:
             try:
-                row["notional"] = float(row.get("entry", 0)) * float(row.get("size", 0))
+                if "position_size" in row:
+                    row["notional"] = float(row.get("entry", 0)) * float(row.get("position_size", 0))
+                else:
+                    row["notional"] = float(row.get("size", 0))
             except Exception:
                 row["notional"] = None
         notional_val = row.get("notional")
@@ -564,10 +578,11 @@ def load_trade_history_df() -> pd.DataFrame:
         "entry": "entry",
         "exitprice": "exit",
         "exit": "exit",
-        "positionsize": "size",
-        "position_size": "size",
-        "qty": "size",
-        "quantity": "size",
+        "positionsize": "position_size",
+        "position_size": "position_size",
+        "qty": "position_size",
+        "quantity": "position_size",
+        "usd_size": "size",
         "side": "direction",
         "position": "direction",
         "direction": "direction",

@@ -605,9 +605,8 @@ def run_agent_loop() -> None:
                             "tp2": tp2,
                             "tp3": tp3,
                             "position_size": position_size,
-                            "size": position_size,  # duplicate for dashboard convenience
+                            "size": trade_usd,
                             "initial_size": position_size,  # track original size for partial exits
-                            "usd_size": trade_usd,
                             "risk_amount": risk_amount,
                             "rl_state": state,
                             "rl_multiplier": mult,
@@ -637,9 +636,10 @@ def run_agent_loop() -> None:
                         }
                         logger.info("Narrative:\n%s\n", narrative)
                         logger.info(
-                            "Trade Opened %s @ %s | Size=%s | TP1 %s / TP2 %s / TP3 %s",
+                            "Trade Opened %s @ %s | Notional=%s USD | Qty=%s | TP1 %s / TP2 %s / TP3 %s",
                             symbol,
                             entry_price,
+                            trade_usd,
                             position_size,
                             tp1,
                             tp2,
