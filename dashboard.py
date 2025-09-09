@@ -234,21 +234,21 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
         size_val = 0.0
     # Derive quantity and notional based on configuration
     if SIZE_AS_NOTIONAL:
-        # ``size`` is the notional amount; derive quantity by dividing by entry price
-        qty = size_val / entry_price if entry_price != 0 else 0.0
+        # ``size`` represents the dollar notional; derive quantity using the entry price
+        qty = size_val / entry_price if entry_price else 0.0
         notional = size_val
     else:
-        # ``size`` is the quantity; derive notional by multiplying by entry price
+        # ``size`` represents the asset quantity
         qty = size_val
         notional = entry_price * size_val
-    # Compute unrealised PnL (absolute and percent)
+    # Compute unrealised PnL in dollars and percent
     if direction == "long":
-        pnl_abs = (current_price - entry_price) * qty
+        pnl_dollars = (current_price - entry_price) * qty
     else:
-        pnl_abs = (entry_price - current_price) * qty
+        pnl_dollars = (entry_price - current_price) * qty
     # Avoid division by zero when computing percentage PnL
-    if notional and notional != 0:
-        pnl_percent = (pnl_abs / notional) * 100
+    if notional:
+        pnl_percent = (pnl_dollars / abs(notional)) * 100
     else:
         pnl_percent = 0.0
     # Time in trade (minutes)
@@ -290,7 +290,7 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
         "TP3": round(tp3, 4) if tp3 else None,
         "Size": size_val,
         "Notional ($)": round(notional, 2),
-        "PnL ($)": round(pnl_abs, 4),
+        "PnL ($)": round(pnl_dollars, 2),
         "PnL (%)": round(pnl_percent, 2),
         "Time in Trade (min)": round(time_delta_min, 1) if time_delta_min is not None else None,
         "Strategy": data.get("strategy", data.get("pattern", "")),
