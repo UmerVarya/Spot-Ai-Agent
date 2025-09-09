@@ -424,15 +424,29 @@ def log_trade_result(
     file_exists = os.path.exists(TRADE_HISTORY_FILE) and os.path.getsize(
         TRADE_HISTORY_FILE
     ) > 0
-    # Ensure directory exists
+
+    header_needed = True
+    if file_exists:
+        with open(TRADE_HISTORY_FILE, "r", encoding="utf-8") as f:
+            first_line = f.readline()
+            if first_line and first_line.lower().startswith("trade_id,"):
+                header_needed = False
+            else:
+                remainder = f.read()
+        if header_needed:
+            with open(TRADE_HISTORY_FILE, "w", encoding="utf-8") as f:
+                f.write(",".join(headers) + "\n")
+                f.write(first_line)
+                f.write(remainder)
+            header_needed = False
+            file_exists = True
+
     os.makedirs(os.path.dirname(TRADE_HISTORY_FILE), exist_ok=True)
-    # Write the row to CSV using pandas to avoid misaligned columns and ensure
-    # consistent quoting
     df_row = pd.DataFrame([row], columns=headers)
     df_row.to_csv(
         TRADE_HISTORY_FILE,
         mode="a",
-        header=not file_exists,
+        header=header_needed,
         index=False,
         quoting=csv.QUOTE_MINIMAL,
     )
