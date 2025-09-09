@@ -396,7 +396,7 @@ def log_trade_result(
         "direction": trade.get("direction"),
         "entry_time": _to_utc_iso(trade.get("entry_time")),
         "exit_time": _to_utc_iso(exit_time),
-        "entry": trade.get("entry"),
+        "entry": entry_val,
         "exit": exit_price,
         "size": size_val,
         "notional": notional,
@@ -426,6 +426,12 @@ def log_trade_result(
         "order_imbalance": trade.get("order_imbalance", 0),
         "macro_indicator": trade.get("macro_indicator", 0),
     }
+    float_cols = ["entry", "exit", "size", "notional", "fees", "confidence"]
+    for col in float_cols:
+        try:
+            row[col] = float(row.get(col, 0))
+        except Exception:
+            row[col] = 0.0
     if DB_CURSOR:
         try:
             DB_CURSOR.execute(
