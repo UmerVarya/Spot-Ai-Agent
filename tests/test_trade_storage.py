@@ -59,6 +59,26 @@ def test_log_trade_result_writes_header_if_file_empty(tmp_path, monkeypatch):
     assert rows and rows[0]["symbol"] == "BTCUSDT"
 
 
+def test_log_trade_result_rewrites_missing_header(tmp_path, monkeypatch):
+    """If the existing log lacks a header, it should be inserted."""
+    csv_path = tmp_path / "log.csv"
+    csv_path.write_text("BTCUSDT,1000,1100\n")  # simulate data without header
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
+    trade = {
+        "symbol": "ETHUSDT",
+        "direction": "long",
+        "entry": 2000,
+        "size": 1000,
+        "position_size": 1,
+        "strategy": "test",
+        "session": "Asia",
+    }
+    trade_storage.log_trade_result(trade, outcome="tp1", exit_price=2100)
+    with open(csv_path) as f:
+        first = f.readline().strip().lower()
+    assert first.startswith("trade_id,")
+
+
 def test_size_as_notional_without_position_size(tmp_path, monkeypatch):
     csv_path = tmp_path / "log.csv"
     monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
