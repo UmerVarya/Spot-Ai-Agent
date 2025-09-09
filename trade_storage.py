@@ -34,6 +34,12 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# When ``SIZE_AS_NOTIONAL`` is true (default), the ``size`` field provided to
+# :func:`log_trade_result` is interpreted as the notional dollar amount of the
+# trade.  When false, ``size`` represents the asset quantity.  This mirrors the
+# behaviour used by the live dashboard.
+SIZE_AS_NOTIONAL = os.getenv("SIZE_AS_NOTIONAL", "true").lower() == "true"
+
 
 # Human-readable descriptions for outcome codes used across the system.  These
 # labels are stored alongside each logged trade so downstream CSV exports do not
@@ -334,30 +340,33 @@ def log_trade_result(
     ]
     # Compose row
     entry_price = trade.get("entry")
-    size_val = trade.get("size", 0)
-    qty_val = trade.get("position_size", trade.get("quantity", 0))
+    size_val = trade.get("size", trade.get("position_size", 0))
     try:
         size_val = float(size_val)
     except Exception:
         size_val = 0.0
     try:
-        qty_val = float(qty_val)
-    except Exception:
-        qty_val = 0.0
-    try:
         entry_val = float(entry_price) if entry_price is not None else None
     except Exception:
         entry_val = None
-    notional = size_val if size_val else (entry_val * qty_val if entry_val is not None else None)
+
+    if SIZE_AS_NOTIONAL:
+        notional = size_val
+        quantity = (size_val / entry_val) if entry_val else 0.0
+    else:
+        quantity = size_val
+        notional = entry_val * size_val if entry_val else None
+
     # Compute net PnL and percentage
     pnl_val = 0.0
     if entry_val is not None:
-        pnl_val = (exit_price - entry_val) * qty_val
         if str(trade.get("direction", "")).lower() == "short":
-            pnl_val = (entry_val - exit_price) * qty_val
+            pnl_val = (entry_val - exit_price) * quantity
+        else:
+            pnl_val = (exit_price - entry_val) * quantity
     pnl_val -= fees
     pnl_val -= slippage
-    pnl_pct = (pnl_val / size_val * 100) if size_val else 0.0
+    pnl_pct = (pnl_val / notional * 100) if (notional and notional != 0) else 0.0
     row = {
         "trade_id": trade.get("trade_id", str(uuid.uuid4())),
         "timestamp": _to_utc_iso(),

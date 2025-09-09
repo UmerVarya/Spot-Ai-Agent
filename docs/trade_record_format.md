@@ -14,8 +14,8 @@ Each row recorded by `trade_storage.log_trade_result` contains the following col
 | `exit_time` | Time the position was closed. |
 | `entry` | Entry price for the base asset. |
 | `exit` | Exit price for the base asset. |
-| `size` | Notional amount in quote currency allocated to the trade. |
-| `notional` | Same as `size`. Retained for backward compatibility. |
+| `size` | Position size. By default this is a notional amount in quote currency, but if the `SIZE_AS_NOTIONAL` environment variable is set to `false` it instead represents the asset quantity. |
+| `notional` | Dollar value committed to the trade. When `SIZE_AS_NOTIONAL` is `true`, this is identical to `size`; otherwise it is calculated as `entry * size`. |
 | `fees` | Total commissions paid on exit. |
 | `slippage` | Slippage incurred on exit. |
 | `pnl` | Net profit or loss in quote currency after fees and slippage. |
