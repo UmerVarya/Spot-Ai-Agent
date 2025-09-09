@@ -59,6 +59,45 @@ def test_log_trade_result_writes_header_if_file_empty(tmp_path, monkeypatch):
     assert rows and rows[0]["symbol"] == "BTCUSDT"
 
 
+def test_size_as_notional_without_position_size(tmp_path, monkeypatch):
+    csv_path = tmp_path / "log.csv"
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
+    trade = {
+        "symbol": "ETHUSDT",
+        "direction": "long",
+        "entry": 2000,
+        "size": 100,  # treated as notional
+        "strategy": "test",
+        "session": "Asia",
+    }
+    trade_storage.log_trade_result(trade, outcome="tp1", exit_price=2200)
+    with open(csv_path, newline="") as f:
+        row = next(csv.DictReader(f))
+    assert float(row["notional"]) == 100.0
+    assert float(row["pnl"]) == 10.0
+    assert float(row["pnl_pct"]) == 10.0
+
+
+def test_quantity_size_when_notional_disabled(tmp_path, monkeypatch):
+    csv_path = tmp_path / "log.csv"
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
+    monkeypatch.setattr(trade_storage, "SIZE_AS_NOTIONAL", False)
+    trade = {
+        "symbol": "ETHUSDT",
+        "direction": "long",
+        "entry": 2000,
+        "size": 0.05,  # quantity when SIZE_AS_NOTIONAL is False
+        "strategy": "test",
+        "session": "Asia",
+    }
+    trade_storage.log_trade_result(trade, outcome="tp1", exit_price=2200)
+    with open(csv_path, newline="") as f:
+        row = next(csv.DictReader(f))
+    assert float(row["notional"]) == 100.0
+    assert float(row["pnl"]) == 10.0
+    assert float(row["pnl_pct"]) == 10.0
+
+
 def test_duplicate_trade_guard(tmp_path, monkeypatch):
     path = tmp_path / "active.json"
     monkeypatch.setattr(trade_storage, "ACTIVE_TRADES_FILE", str(path))
