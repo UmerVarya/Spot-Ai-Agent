@@ -59,6 +59,47 @@ OUTCOME_DESCRIPTIONS = {
 }
 
 
+# Canonical column order used for trade history CSV files.  This list is
+# shared by ``log_trade_result`` when writing new rows and
+# ``load_trade_history_df`` when falling back to manual header assignment for
+# malformed files.
+TRADE_HISTORY_HEADERS = [
+    "trade_id",
+    "timestamp",
+    "symbol",
+    "direction",
+    "entry_time",
+    "exit_time",
+    "entry",
+    "exit",
+    "size",
+    "notional",
+    "fees",
+    "slippage",
+    "pnl",
+    "pnl_pct",
+    "outcome",
+    "outcome_desc",
+    "strategy",
+    "session",
+    "confidence",
+    "btc_dominance",
+    "fear_greed",
+    "sentiment_bias",
+    "sentiment_confidence",
+    "score",
+    "pattern",
+    "narrative",
+    "llm_decision",
+    "llm_confidence",
+    "llm_error",
+    "volatility",
+    "htf_trend",
+    "order_imbalance",
+    "macro_indicator",
+]
+
+
 def _to_utc_iso(ts: Optional[str] = None) -> str:
     """Return an ISO-8601 UTC timestamp with ``Z`` suffix.
 
@@ -302,42 +343,9 @@ def log_trade_result(
     slippage : float, default 0.0
         Slippage incurred on exit.
     """
-    # Build headers including notional
-    headers = [
-        "trade_id",
-        "timestamp",
-        "symbol",
-        "direction",
-        "entry_time",
-        "exit_time",
-        "entry",
-        "exit",
-        "size",
-        "notional",
-        "fees",
-        "slippage",
-        "pnl",
-        "pnl_pct",
-        "outcome",
-        "outcome_desc",
-        "strategy",
-        "session",
-        "confidence",
-        "btc_dominance",
-        "fear_greed",
-        "sentiment_bias",
-        "sentiment_confidence",
-        "score",
-        "pattern",
-        "narrative",
-        "llm_decision",
-        "llm_confidence",
-        "llm_error",
-        "volatility",
-        "htf_trend",
-        "order_imbalance",
-        "macro_indicator",
-    ]
+    # Build headers including notional.  Using a shared constant keeps the
+    # writer and reader in sync.
+    headers = TRADE_HISTORY_HEADERS
     # Compose row
     entry_price = trade.get("entry")
     size_val = trade.get("size", trade.get("position_size", 0))
@@ -574,6 +582,34 @@ def load_trade_history_df() -> pd.DataFrame:
                     )
             except Exception as exc:  # pragma: no cover - diagnostic only
                 logger.exception("Failed to read trade log file: %s", exc)
+            else:
+                # If the file has data but no recognizable columns, the first
+                # row may have been misinterpreted as the header.  Re-read
+                # assuming no header and assign the canonical column list.
+                if not df.empty:
+                    cols_lower = [c.lower() for c in df.columns]
+                    expected_keys = ["timestamp", "entry_time", "exit_time", "symbol"]
+                    if not any(any(key in col for col in cols_lower) for key in expected_keys):
+                        try:
+                            try:  # pandas >= 1.3
+                                df = pd.read_csv(
+                                    path,
+                                    header=None,
+                                    names=TRADE_HISTORY_HEADERS,
+                                    encoding="utf-8",
+                                    on_bad_lines="skip",
+                                )
+                            except TypeError:  # pragma: no cover - older pandas
+                                df = pd.read_csv(
+                                    path,
+                                    header=None,
+                                    names=TRADE_HISTORY_HEADERS,
+                                    encoding="utf-8",
+                                    error_bad_lines=False,
+                                    warn_bad_lines=False,
+                                )
+                        except Exception as exc:  # pragma: no cover - diagnostic only
+                            logger.exception("Failed to recover trade log file: %s", exc)
         else:
             df = pd.DataFrame(
                 columns=[
