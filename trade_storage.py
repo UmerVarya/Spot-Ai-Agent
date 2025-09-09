@@ -492,7 +492,16 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
         if "notional" not in row:
             try:
                 if "position_size" in row:
-                    row["notional"] = float(row.get("entry", 0)) * float(row.get("position_size", 0))
+                    row["notional"] = float(row.get("entry", 0)) * float(
+                        row.get("position_size", 0)
+                    )
+                elif {"entry", "size"}.issubset(row.index):
+                    if SIZE_AS_NOTIONAL:
+                        row["notional"] = float(row.get("size", 0))
+                    else:
+                        row["notional"] = float(row.get("entry", 0)) * float(
+                            row.get("size", 0)
+                        )
                 else:
                     row["notional"] = float(row.get("size", 0))
             except Exception:
@@ -659,6 +668,17 @@ def load_trade_history_df() -> pd.DataFrame:
     if dropped:
         logger.warning("Dropped %d malformed trade rows", dropped)
     df = df[mask]
+
+    # ------------------------------------------------------------------
+    # Ensure notional column for backward compatibility
+    # ------------------------------------------------------------------
+    if "notional" not in df.columns and {"entry", "size"}.issubset(df.columns):
+        if SIZE_AS_NOTIONAL:
+            df["notional"] = pd.to_numeric(df["size"], errors="coerce")
+        else:
+            df["notional"] = pd.to_numeric(df["entry"], errors="coerce") * pd.to_numeric(
+                df["size"], errors="coerce"
+            )
 
     # ------------------------------------------------------------------
     # De-duplicate partial exits and filter out open trades

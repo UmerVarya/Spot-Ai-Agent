@@ -447,13 +447,15 @@ def render_live_tab() -> None:
         if "size" not in hist_df.columns and "position_size" in hist_df.columns:
             hist_df["size"] = hist_df["position_size"].astype(float)
         # Derive notional column if missing
-        if "notional" not in hist_df.columns and {
-            "size",
-            "entry",
-        }.issubset(hist_df.columns):
-            hist_df["notional"] = pd.to_numeric(hist_df["size"], errors="coerce") * pd.to_numeric(
-                hist_df["entry"], errors="coerce"
-            )
+        if "notional" not in hist_df.columns and {"size", "entry"}.issubset(
+            hist_df.columns
+        ):
+            if SIZE_AS_NOTIONAL:
+                hist_df["notional"] = pd.to_numeric(hist_df["size"], errors="coerce")
+            else:
+                hist_df["notional"] = pd.to_numeric(
+                    hist_df["entry"], errors="coerce"
+                ) * pd.to_numeric(hist_df["size"], errors="coerce")
         # Compute PnL absolute and percent
         if "direction" in hist_df.columns:
             directions = hist_df["direction"].astype(str)
@@ -468,9 +470,19 @@ def render_live_tab() -> None:
         else:
             exits = pd.to_numeric(hist_df.get("exit_price", pd.Series([np.nan] * len(hist_df))), errors="coerce")
         if "size" in hist_df.columns:
-            sizes = pd.to_numeric(hist_df["size"], errors="coerce").fillna(1)
+            raw_sizes = pd.to_numeric(hist_df["size"], errors="coerce").fillna(0)
         else:
-            sizes = pd.Series([1] * len(hist_df), dtype=float)
+            raw_sizes = pd.Series([0] * len(hist_df), dtype=float)
+        if SIZE_AS_NOTIONAL:
+            entry_for_qty = pd.to_numeric(hist_df.get("entry"), errors="coerce").replace(
+                0, np.nan
+            )
+            sizes = (
+                pd.to_numeric(hist_df.get("notional", raw_sizes), errors="coerce")
+                / entry_for_qty
+            ).fillna(0)
+        else:
+            sizes = raw_sizes
         def _numeric_series(df: pd.DataFrame, name: str) -> pd.Series:
             """Return numeric column ``name`` aligned to ``df.index``.
 
@@ -528,12 +540,16 @@ def render_live_tab() -> None:
             )
         else:
             e = pd.to_numeric(pd.Series(entries), errors="coerce").fillna(0.0).reset_index(drop=True)
-            s = pd.to_numeric(pd.Series(sizes),   errors="coerce").fillna(0.0).reset_index(drop=True)
+            s = pd.to_numeric(pd.Series(sizes), errors="coerce").fillna(0.0).reset_index(drop=True)
             pnl_net_series = pd.to_numeric(pd.Series(pnl_net), errors="coerce").fillna(0.0).reset_index(drop=True)
-            mask_nonzero = (e * s) != 0
+            if SIZE_AS_NOTIONAL:
+                notional_vals = s
+            else:
+                notional_vals = e * s
+            mask_nonzero = notional_vals != 0
             pnl_pct = np.where(
                 mask_nonzero,
-                pnl_net_series / (e * s) * 100,
+                pnl_net_series / notional_vals * 100,
                 0,
             )
         hist_df["PnL ($)"] = pnl_abs
@@ -589,14 +605,17 @@ def render_live_tab() -> None:
         # ------------------------------------------------------------------
         # Risk metrics
         # Compute per-trade returns using net PnL relative to notional value
-        # If notional is zero or missing, fall back to entry * size
+        # If notional is zero or missing, fall back to size or entry*size
+        # depending on ``SIZE_AS_NOTIONAL``
         returns: np.ndarray
         try:
             notional_series = pd.to_numeric(hist_df.get("notional"), errors="coerce")
-            # Fallback: derive notional from entry and size if missing or zero
-            fallback_notional = pd.to_numeric(hist_df.get("entry"), errors="coerce") * pd.to_numeric(
-                hist_df.get("size"), errors="coerce"
-            )
+            size_series = pd.to_numeric(hist_df.get("size"), errors="coerce")
+            entry_series = pd.to_numeric(hist_df.get("entry"), errors="coerce")
+            if SIZE_AS_NOTIONAL:
+                fallback_notional = size_series
+            else:
+                fallback_notional = entry_series * size_series
             notional_series = notional_series.where(notional_series > 0, fallback_notional)
             net_ret = hist_df["PnL (net $)"].astype(float)
             returns = np.where(notional_series > 0, net_ret / notional_series, 0.0)
