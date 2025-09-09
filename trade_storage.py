@@ -264,6 +264,12 @@ def store_trade(trade: dict) -> bool:
     """
     # Ensure entry_time is set and normalised to UTC ISO string
     trade["entry_time"] = _to_utc_iso(trade.get("entry_time"))
+    # Normalise additional timestamp fields that may be present in incoming trade data
+    for ts_field in ("open_time", "close"):
+        if ts_field in trade and trade[ts_field]:
+            dt = pd.to_datetime(trade[ts_field], errors="coerce", utc=True)
+            if pd.notna(dt):
+                trade[ts_field] = dt.isoformat()
     # Assign unique trade ID if missing
     trade.setdefault("trade_id", str(uuid.uuid4()))
     # Remove leverage field (spot only)
@@ -343,6 +349,14 @@ def log_trade_result(
     slippage : float, default 0.0
         Slippage incurred on exit.
     """
+    # Normalise any timestamp fields that may appear in the incoming trade
+    trade = trade.copy()
+    for ts_field in ("open_time", "close"):
+        if ts_field in trade and trade[ts_field]:
+            dt = pd.to_datetime(trade[ts_field], errors="coerce", utc=True)
+            if pd.notna(dt):
+                trade[ts_field] = dt.isoformat()
+
     # Build headers including notional.  Using a shared constant keeps the
     # writer and reader in sync.
     headers = TRADE_HISTORY_HEADERS
