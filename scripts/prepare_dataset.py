@@ -12,31 +12,38 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 # --- Header normalization map (add any variants you've used before) ---
 HEADER_MAP = {
     # identifiers & timing
-    "TradeID":"trade_id", "trade_id":"trade_id",
-    "Symbol":"symbol", "SymbolPair":"symbol",
-    "EntryTime":"entry_time", "ExitTime":"exit_time",
+    "TradeID": "trade_id", "trade_id": "trade_id",
+    "Symbol": "symbol", "SymbolPair": "symbol",
+    "EntryTime": "entry_time", "exit_time": "exit_time",
 
     # prices & sizes
-    "EntryPrice":"entry_price", "ExitPrice":"exit_price",
-    "Size":"size_quote", "SizeQuote":"size_quote", "QuoteSize":"size_quote",
-    "Qty":"size_base", "BaseSize":"size_base",
+    "EntryPrice": "entry_price", "ExitPrice": "exit_price",
+    "entry": "entry_price", "exit": "exit_price",   # <-- add these two
+    "Size": "size_quote", "size": "size_quote", "QuoteSize": "size_quote", "notional": "size_quote",
+    "Qty": "size_base", "BaseSize": "size_base",
 
     # economics
-    "Fees":"fees", "Fee":"fees",
-    "PNL":"pnl_quote", "PnL":"pnl_quote", "PNL_USDT":"pnl_quote",
-    "pnl_pct":"pnl_pct", "PnL_pct":"pnl_pct",
+    "Fees": "fees", "fees": "fees",
+    "Slippage": "slippage", "slippage": "slippage",
+    "PNL": "pnl_quote", "pnl": "pnl_quote", "PnL": "pnl_quote",
+    "PNL_USDT": "pnl_quote", "pnl_pct": "pnl_pct", "PnL_pct": "pnl_pct",
 
     # meta / features
-    "Side":"side",
-    "Score":"score", "ModelScore":"score",
-    "Session":"session",
-    "Sentiment":"sentiment_score", "SentimentScore":"sentiment_score",
-    "Volatility":"volatility", "VolumeZ":"volume_z", "RSI":"rsi",
-    "EMA_Diff":"ema_diff", "BB_Width":"bb_width",
-    "Spread_bps":"spread_bps", "Slippage_bps":"slippage_bps",
+    "Side": "side", "direction": "side",
+    "Score": "score", "ModelScore": "score",
+    "Session": "session",
+    "Sentiment": "sentiment_score", "SentimentScore": "sentiment_score",
+    "sentiment_bias": "sentiment_score", "sentiment_confidence": "sentiment_confidence",
+    "Volatility": "volatility", "volatility": "volatility",
+    "order_imbalance": "order_imbalance", "htf_trend": "htf_trend",
+    "macro_indicator": "macro_indicator", "btc_dominance": "btc_dominance",
+    "fear_greed": "fear_greed",
+    "pattern": "pattern", "narrative": "narrative",
+    "llm_decision": "llm_decision", "llm_confidence": "llm_confidence", "llm_error": "llm_error",
 
     # labels
-    "Trade_Outcome":"outcome", "Outcome":"outcome"
+    "Trade_Outcome": "outcome", "Outcome": "outcome", "outcome": "outcome",
+    "outcome_desc": "outcome_desc"
 }
 
 REQUIRED_COLS_MIN = {"symbol", "entry_time", "exit_time", "entry_price", "exit_price"}
