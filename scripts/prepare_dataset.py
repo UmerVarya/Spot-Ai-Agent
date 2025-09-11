@@ -18,8 +18,8 @@ HEADER_MAP = {
 
     # prices & sizes
     "EntryPrice": "entry_price", "ExitPrice": "exit_price",
-    "entry": "entry_price", "exit": "exit_price",   # <-- add these two
-    "Size": "size_quote", "size": "size_quote", "QuoteSize": "size_quote", "notional": "size_quote",
+    "entry": "entry_price", "exit": "exit_price",
+    "Size": "size_quote", "SizeQuote": "size_quote", "QuoteSize": "size_quote",
     "Qty": "size_base", "BaseSize": "size_base",
 
     # economics
