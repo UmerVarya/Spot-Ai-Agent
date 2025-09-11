@@ -104,9 +104,16 @@ def derive_missing(df):
         if "size_quote" in df.columns:
             df["pnl_pct"] = df["pnl_net_quote"] / df["size_quote"]
 
-    # Binary outcome (label) if missing
-    if "outcome" not in df.columns and "pnl_net_quote" in df.columns:
-        df["outcome"] = (df["pnl_net_quote"] > 0).astype(int)
+    # Binary outcome (label) based on pnl instead of outcome text
+    if "pnl" in df.columns:
+        df["pnl_quote"] = pd.to_numeric(df["pnl"], errors="coerce")
+    if "pnl_pct" in df.columns:
+        df["pnl_pct"] = pd.to_numeric(df["pnl_pct"], errors="coerce")
+
+    if "pnl_quote" in df.columns:
+        df["outcome"] = (df["pnl_quote"] > 0).astype(int)
+    elif "pnl_pct" in df.columns:
+        df["outcome"] = (df["pnl_pct"] > 0).astype(int)
 
     return df
 
