@@ -158,8 +158,10 @@ def main():
 
     print("\n=== Threshold (chosen on VAL by max PnL) ===")
     print(f"threshold = {thr:.3f}")
-    print("\nVAL  -> AUC={val_auc:.3f}  F1={val_f1:.3f}  P={val_pr:.3f}  R={val_rc:.3f}  | best_val_PnL={best_pnl:.2f}"\n          .format(val_auc=val_auc, val_f1=val_f1, val_pr=val_pr, val_rc=val_rc, best_pnl=best['pnl']))
-    print("TEST -> AUC={:.3f}  F1={:.3f}  P={:.3f}  R={:.3f}".format(test_auc, test_f1, test_pr, test_rc))
+    print(
+        f"\nVAL  -> AUC={val_auc:.3f}  F1={val_f1:.3f}  P={val_pr:.3f}  R={val_rc:.3f}  | best_val_PnL={best['pnl']:.2f}"
+    )
+    print(f"TEST -> AUC={test_auc:.3f}  F1={test_f1:.3f}  P={test_pr:.3f}  R={test_rc:.3f}")
 
     print("\n--- Trading results on TEST (selected trades only) ---")
     for k, v in trade_stats.items():
