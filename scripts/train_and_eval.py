@@ -70,16 +70,39 @@ def sharpe_ratio(returns: pd.Series):
     # per-trade Sharpe
     return float(np.sqrt(len(r)) * r.mean() / r.std())
 
-def sweep_threshold_for_val_pnl(y_true, prob, pnl, grid=None):
+def sweep_threshold_for_val_pnl(y_true, prob, pnl, grid=None, min_take=10, min_frac=0.12):
+    """
+    Pick threshold that maximizes PnL on VAL, but only among thresholds
+    that select at least `min_take` trades (or >= min_frac of VAL).
+    Fallback: use quantile threshold targeting min_frac if no candidate qualifies.
+    """
+    import numpy as np
     if grid is None:
-        grid = np.linspace(0.1, 0.9, 81)  # 0.01 steps
-    best = {"thr":0.5, "pnl":-1e18, "f1":0.0}
+        grid = np.linspace(0.1, 0.9, 81)
+
+    n = len(prob)
+    min_take_abs = max(min_take, int(np.ceil(min_frac * n)))
+
+    best = {"thr": 0.5, "pnl": -1e18, "f1": 0.0, "takes": 0}
     for t in grid:
         take = prob >= t
-        pnl_sum = float(pnl[take].sum()) if take.any() else 0.0
-        f1 = f1_score(y_true, (prob>=t).astype(int), zero_division=0)
+        k = int(take.sum())
+        if k < min_take_abs:
+            continue
+        pnl_sum = float(pnl[take].sum()) if k else 0.0
+        # we keep f1 just for tie-breaking / inspection
+        from sklearn.metrics import f1_score
+        f1 = f1_score(y_true, (prob >= t).astype(int), zero_division=0)
         if pnl_sum > best["pnl"]:
-            best = {"thr":float(t), "pnl":pnl_sum, "f1":float(f1)}
+            best = {"thr": float(t), "pnl": pnl_sum, "f1": float(f1), "takes": k}
+
+    # Fallback if nothing met the min-take constraint
+    if best["pnl"] == -1e18:
+        q = 1.0 - min_frac     # e.g., keep top 12% by prob
+        thr = float(np.quantile(prob, q))
+        take = prob >= thr
+        return {"thr": thr, "pnl": float(pnl[take].sum()) if take.any() else 0.0,
+                "f1": 0.0, "takes": int(take.sum()), "fallback": True}
     return best
 
 def summarize_selected(df, take_mask, pnl_col):
@@ -153,6 +176,10 @@ def main():
     test_f1  = f1_score(y_test, test_pred, zero_division=0)
     test_pr  = precision_score(y_test, test_pred, zero_division=0)
     test_rc  = recall_score(y_test, test_pred, zero_division=0)
+
+    val_take_cnt  = int((val_prob  >= thr).sum())
+    test_take_cnt = int((test_prob >= thr).sum())
+    print(f"[INFO] threshold={thr:.3f} | VAL takes={val_take_cnt} | TEST takes={test_take_cnt}")
 
     # Trading metrics on TEST (selected trades only)
     take_mask = test_pred.astype(bool)
