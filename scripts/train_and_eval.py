@@ -47,11 +47,16 @@ def pick_pnl_column(df: pd.DataFrame) -> str:
     return "pnl"
 
 def equity_max_drawdown(pnl_series: pd.Series):
-    equity = pnl_series.cumsum()
+    """Return cumulative equity curve and max drawdown from PnL series.
+
+    The input series is coerced to numeric once to avoid drift between
+    calculations that rely on different representations of the same data.
+    """
+    pnl = pd.to_numeric(pnl_series, errors="coerce").astype(float)
+    equity = pnl.cumsum()
     roll_max = equity.cummax()
     dd = equity - roll_max
-    max_dd = dd.min() if len(dd) else 0.0
-    return equity, float(max_dd)
+    return equity, float(dd.min() if len(dd) else 0.0)
 
 def sharpe_ratio(returns: pd.Series):
     r = returns.dropna().astype(float)
@@ -73,21 +78,39 @@ def sweep_threshold_for_val_pnl(y_true, prob, pnl, grid=None):
     return best
 
 def summarize_selected(df, take_mask, pnl_col):
+    """Summarize performance metrics for selected trades."""
     sub = df.loc[take_mask].copy()
-    n = len(sub)
-    wins = int((sub[pnl_col] > 0).sum())
+    pnl = pd.to_numeric(sub[pnl_col], errors="coerce").astype(float)
+
+    n = int(pnl.count())
+    total = float(pnl.sum())
+    avg = float(total / n) if n else 0.0
+    wins = int((pnl > 0).sum())
     losses = n - wins
-    winp = (wins/n*100) if n else 0.0
-    pnl_sum = float(sub[pnl_col].sum())
-    sr = sharpe_ratio(sub.get("pnl_pct", pd.Series(dtype=float)))
-    _, mdd = equity_max_drawdown(sub[pnl_col])
+    winp = float(wins / n * 100) if n else 0.0
+
+    # Sharpe on per-trade returns if available; else on pnl (scaled)
+    returns = pd.to_numeric(sub.get("pnl_pct", pnl), errors="coerce").astype(float)
+
+    def sharpe_ratio(r):
+        r = r.dropna().astype(float)
+        return 0.0 if len(r) < 2 or r.std() == 0 else float(np.sqrt(len(r)) * r.mean() / r.std())
+
+    sr = sharpe_ratio(returns)
+    _, mdd = equity_max_drawdown(pnl)
+
+    # Safety print to console
+    print(
+        f"[DEBUG] n={n} total={total:.6f} avg={avg:.6f} (should equal total/n={total/n if n else 0:.6f}) using {pnl_col}"
+    )
+
     return {
-        "n_trades": int(n),
-        "win_rate_pct": float(winp),
-        "total_pnl": pnl_sum,
-        "avg_pnl": float(pnl_sum / n) if n else 0.0,
+        "n_trades": n,
+        "win_rate_pct": winp,
+        "total_pnl": total,
+        "avg_pnl": avg,
         "sharpe_per_trade": sr,
-        "max_drawdown": float(mdd),
+        "max_drawdown": mdd,
     }, sub
 
 def main():
@@ -128,20 +151,24 @@ def main():
 
     # Trading metrics on TEST (selected trades only)
     take_mask = test_pred.astype(bool)
-    trade_stats, taken = summarize_selected(test_raw, take_mask, pnl_col_test)
+    trade_stats, _ = summarize_selected(test_raw, take_mask, pnl_col_test)
 
     # Baseline: trade everything on TEST
-    base_stats, base_taken = summarize_selected(test_raw, np.ones(len(test_raw), dtype=bool), pnl_col_test)
-
-    # Equity curve for selected trades
-    equity, mdd = equity_max_drawdown(taken[pnl_col_test].astype(float))
-    taken = taken.assign(equity_curve=equity.values)
+    base_stats, _ = summarize_selected(test_raw, np.ones(len(test_raw), dtype=bool), pnl_col_test)
 
     # ------- Save artifacts -------
+    # Standardize PnL column name for outputs
+    pnl_col_test = pick_pnl_column(test_raw)
     preds = test_raw.copy()
     preds["prob_win"] = test_prob
     preds["pred_label"] = test_pred
+    preds["pnl_standard"] = pd.to_numeric(preds[pnl_col_test], errors="coerce")
     preds.to_csv(OUT_DIR/"predictions_test.csv", index=False)
+
+    taken = test_raw.loc[take_mask].copy()
+    taken["pnl_standard"] = pd.to_numeric(taken[pnl_col_test], errors="coerce")
+    equity, mdd = equity_max_drawdown(taken["pnl_standard"])
+    taken = taken.assign(equity_curve=equity.values)
     taken.to_csv(OUT_DIR/"equity_curve_selected_test.csv", index=False)
 
     report = {
