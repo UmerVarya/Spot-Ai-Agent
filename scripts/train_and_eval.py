@@ -74,7 +74,7 @@ def sweep_threshold_for_val_pnl(y_true, prob, pnl, grid=None, min_take=10, min_f
     """
     Pick threshold that maximizes PnL on VAL, but only among thresholds
     that select at least `min_take` trades (or >= min_frac of VAL).
-    Fallback: use quantile threshold targeting min_frac if no candidate qualifies.
+    If none qualify, fall back to a quantile that keeps about min_frac.
     """
     import numpy as np
     if grid is None:
@@ -84,25 +84,26 @@ def sweep_threshold_for_val_pnl(y_true, prob, pnl, grid=None, min_take=10, min_f
     min_take_abs = max(min_take, int(np.ceil(min_frac * n)))
 
     best = {"thr": 0.5, "pnl": -1e18, "f1": 0.0, "takes": 0}
+    from sklearn.metrics import f1_score
+
     for t in grid:
         take = prob >= t
         k = int(take.sum())
         if k < min_take_abs:
             continue
         pnl_sum = float(pnl[take].sum()) if k else 0.0
-        # we keep f1 just for tie-breaking / inspection
-        from sklearn.metrics import f1_score
         f1 = f1_score(y_true, (prob >= t).astype(int), zero_division=0)
         if pnl_sum > best["pnl"]:
             best = {"thr": float(t), "pnl": pnl_sum, "f1": float(f1), "takes": k}
 
-    # Fallback if nothing met the min-take constraint
+    # Fallback: keep top min_frac by probability
     if best["pnl"] == -1e18:
-        q = 1.0 - min_frac     # e.g., keep top 12% by prob
+        q = 1.0 - min_frac
         thr = float(np.quantile(prob, q))
         take = prob >= thr
         return {"thr": thr, "pnl": float(pnl[take].sum()) if take.any() else 0.0,
                 "f1": 0.0, "takes": int(take.sum()), "fallback": True}
+
     return best
 
 def summarize_selected(df, take_mask, pnl_col):
@@ -161,25 +162,36 @@ def main():
     best = sweep_threshold_for_val_pnl(y_val, val_prob, val_raw[pnl_col_val].astype(float))
     thr = best["thr"]
 
+    # --- ensure TEST won’t be empty ---
+    test_prob = clf.predict_proba(X_test)[:,1]
+    val_take_cnt  = int((val_prob  >= thr).sum())
+    test_take_cnt = int((test_prob >= thr).sum())
+    print(f"[INFO] threshold={thr:.3f} | VAL takes={val_take_cnt} | TEST takes={test_take_cnt}")
+
+    if test_take_cnt == 0:
+        import numpy as np
+        # relax to keep at least ~10% (or at least 5 trades) on TEST
+        min_frac_test = 0.10
+        min_take_test = max(5, int(np.ceil(min_frac_test * len(test_prob))))
+        q = 1.0 - (min_take_test / max(1, len(test_prob)))
+        thr_relaxed = float(np.quantile(test_prob, q))
+        print(f"[INFO] Relaxed threshold -> {thr_relaxed:.3f} (to avoid zero TEST trades)")
+        thr = thr_relaxed
+
+    val_pred  = (val_prob  >= thr).astype(int)
+    test_pred = (test_prob >= thr).astype(int)
+
     # Also compute ML metrics at that threshold for val:
-    val_pred = (val_prob >= thr).astype(int)
     val_auc = roc_auc_score(y_val, val_prob)
     val_f1  = f1_score(y_val, val_pred, zero_division=0)
     val_pr  = precision_score(y_val, val_pred, zero_division=0)
     val_rc  = recall_score(y_val, val_pred, zero_division=0)
 
     # ------- Evaluate on TEST -------
-    test_prob = clf.predict_proba(X_test)[:,1]
-    test_pred = (test_prob >= thr).astype(int)
-
     test_auc = roc_auc_score(y_test, test_prob)
     test_f1  = f1_score(y_test, test_pred, zero_division=0)
     test_pr  = precision_score(y_test, test_pred, zero_division=0)
     test_rc  = recall_score(y_test, test_pred, zero_division=0)
-
-    val_take_cnt  = int((val_prob  >= thr).sum())
-    test_take_cnt = int((test_prob >= thr).sum())
-    print(f"[INFO] threshold={thr:.3f} | VAL takes={val_take_cnt} | TEST takes={test_take_cnt}")
 
     # Trading metrics on TEST (selected trades only)
     take_mask = test_pred.astype(bool)
