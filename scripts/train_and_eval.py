@@ -157,28 +157,35 @@ def main():
     )
     clf.fit(X_train, y_train)
 
-    # ------- Choose threshold on validation by PnL -------
-    val_prob = clf.predict_proba(X_val)[:,1]
-    best = sweep_threshold_for_val_pnl(y_val, val_prob, val_raw[pnl_col_val].astype(float))
+    # --- choose threshold on VAL by max PnL ---
+    val_prob = clf.predict_proba(X_val)[:, 1]
+    best = sweep_threshold_for_val_pnl(
+        y_true=y_val,
+        prob=val_prob,
+        pnl=val_raw[pnl_col_val].astype(float),
+        min_take=10,
+        min_frac=0.12,
+    )
     thr = best["thr"]
 
-    # --- ensure TEST won’t be empty ---
-    test_prob = clf.predict_proba(X_test)[:,1]
-    val_take_cnt  = int((val_prob  >= thr).sum())
+    # --- ensure TEST won’t be empty; relax if needed BEFORE making preds ---
+    test_prob = clf.predict_proba(X_test)[:, 1]
+
+    val_take_cnt = int((val_prob >= thr).sum())
     test_take_cnt = int((test_prob >= thr).sum())
     print(f"[INFO] threshold={thr:.3f} | VAL takes={val_take_cnt} | TEST takes={test_take_cnt}")
 
     if test_take_cnt == 0:
         import numpy as np
-        # relax to keep at least ~10% (or at least 5 trades) on TEST
-        min_frac_test = 0.10
-        min_take_test = max(5, int(np.ceil(min_frac_test * len(test_prob))))
-        q = 1.0 - (min_take_test / max(1, len(test_prob)))
-        thr_relaxed = float(np.quantile(test_prob, q))
-        print(f"[INFO] Relaxed threshold -> {thr_relaxed:.3f} (to avoid zero TEST trades)")
-        thr = thr_relaxed
 
-    val_pred  = (val_prob  >= thr).astype(int)
+        # keep at least max(5, 10%) of TEST by probability
+        min_keep = max(5, int(np.ceil(0.10 * len(test_prob))))
+        q = 1.0 - (min_keep / max(1, len(test_prob)))  # e.g., top 10% by prob or at least 5 trades
+        thr = float(np.quantile(test_prob, q))
+        print(f"[INFO] Relaxed threshold -> {thr:.3f} (keeping ~{min_keep} test trades)")
+
+    # now compute preds USING (possibly relaxed) thr
+    val_pred = (val_prob >= thr).astype(int)
     test_pred = (test_prob >= thr).astype(int)
 
     # Also compute ML metrics at that threshold for val:
