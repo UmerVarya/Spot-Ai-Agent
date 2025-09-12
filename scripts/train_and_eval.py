@@ -35,16 +35,21 @@ def load_raw_splits():
 
 # ------- Utility metrics for trading -------
 def pick_pnl_column(df: pd.DataFrame) -> str:
-    for cand in ["pnl", "pnl_quote", "pnl_net_quote"]:
-        if cand in df.columns:
-            return cand
-    # derive from pct * notional if needed
-    if "pnl_pct" in df.columns and "notional" in df.columns:
-        df["pnl"] = df["pnl_pct"] * df["notional"]
+    # Prefer NET first
+    if "pnl_net_quote" in df.columns:
+        return "pnl_net_quote"
+    if "pnl" in df.columns:  # if your repo’s `pnl` is already net
         return "pnl"
-    # fallback zero (shouldn't happen ideally)
-    df["pnl"] = 0.0
-    return "pnl"
+    # Derive NET if possible
+    if "pnl_pct" in df.columns and "notional" in df.columns:
+        df["pnl_net_quote"] = pd.to_numeric(df["pnl_pct"], errors="coerce") * pd.to_numeric(df["notional"], errors="coerce")
+        return "pnl_net_quote"
+    # Fallback: gross
+    if "pnl_quote" in df.columns:
+        return "pnl_quote"
+    # Last resort
+    df["pnl_net_quote"] = 0.0
+    return "pnl_net_quote"
 
 def equity_max_drawdown(pnl_series: pd.Series):
     """Return cumulative equity curve and max drawdown from PnL series.
