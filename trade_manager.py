@@ -262,13 +262,29 @@ def manage_trades() -> None:
             continue
         # Compute updated indicators for trailing stops and TP
         indicators = calculate_indicators(price_data)
-        adx = indicators.get('adx', 20)
-        macd_hist = indicators.get('macd', 0)
+        adx_series = indicators.get('adx')
+        macd_line = indicators.get('macd')
+        macd_signal = indicators.get('macd_signal')
+        kc_lower_series = indicators.get('kc_lower')
         atr = indicators.get('atr', 0.005)
-        if hasattr(adx, 'iloc'):
-            adx = adx.iloc[-1]
-        if hasattr(macd_hist, 'iloc'):
-            macd_hist = macd_hist.iloc[-1]
+
+        if hasattr(adx_series, 'iloc'):
+            adx = adx_series.iloc[-1]
+            adx_prev = adx_series.iloc[-2] if len(adx_series) > 1 else adx
+        else:
+            adx = adx_prev = adx_series or 20
+
+        if hasattr(macd_line, 'iloc') and hasattr(macd_signal, 'iloc'):
+            macd_line_last = macd_line.iloc[-1]
+            macd_line_prev = macd_line.iloc[-2] if len(macd_line) > 1 else macd_line_last
+            macd_signal_last = macd_signal.iloc[-1]
+            macd_signal_prev = macd_signal.iloc[-2] if len(macd_signal) > 1 else macd_signal_last
+        else:
+            macd_line_last = macd_line_prev = macd_line or 0
+            macd_signal_last = macd_signal_prev = macd_signal or 0
+
+        macd_hist = macd_line_last - macd_signal_last
+        kc_lower_val = kc_lower_series.iloc[-1] if hasattr(kc_lower_series, 'iloc') else kc_lower_series or 0
         # Only long trades are supported in spot mode
         if direction == "long":
             # Take profit logic with partial exits
@@ -385,7 +401,46 @@ def manage_trades() -> None:
                     actions.append("trail_sl")
             # TP4 profit riding logic
             if trade.get('profit_riding'):
-                if macd_hist < 0:
+                trail_pct = trade.get('trail_tp_pct')
+                if trail_pct:
+                    next_tp = trade.get('next_trail_tp')
+                    if not next_tp:
+                        next_tp = current_price * (1 + trail_pct)
+                        trade['next_trail_tp'] = next_tp
+                    if recent_high >= next_tp:
+                        qty = float(trade.get('position_size', 1))
+                        sell_qty = qty * 0.1
+                        commission_rate = estimate_commission(symbol, quantity=sell_qty, maker=False)
+                        fees = next_tp * sell_qty * commission_rate
+                        slip_price = simulate_slippage(next_tp, direction=direction)
+                        slippage_amt = abs(slip_price - next_tp)
+                        partial_trade = trade.copy()
+                        partial_trade['position_size'] = sell_qty
+                        partial_trade['size'] = sell_qty * entry
+                        exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                        partial_trade['exit_price'] = next_tp
+                        partial_trade['exit_time'] = exit_time
+                        log_trade_result(
+                            partial_trade,
+                            outcome="tp_trail",
+                            exit_price=next_tp,
+                            exit_time=exit_time,
+                            fees=fees,
+                            slippage=slippage_amt,
+                        )
+                        send_email(
+                            f"✅ TP Trail: {symbol}",
+                            f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
+                        )
+                        remaining_qty = qty - sell_qty
+                        trade['position_size'] = remaining_qty
+                        trade['size'] = remaining_qty * entry
+                        trade['next_trail_tp'] = next_tp * (1 + trail_pct)
+
+                adx_drop = adx < 20 and adx < adx_prev
+                macd_cross = macd_line_prev > macd_signal_prev and macd_line_last < macd_signal_last
+                price_below_kc = current_price < kc_lower_val
+                if adx_drop and (macd_cross or price_below_kc):
                     logger.warning("%s momentum reversal — exiting TP4", symbol)
                     qty = float(trade.get('position_size', 1))
                     commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
@@ -404,7 +459,10 @@ def manage_trades() -> None:
                         slippage=slippage_amt,
                     )
                     _update_rl(trade, current_price)
-                    send_email(f"✅ TP4 Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
+                    send_email(
+                        f"✅ TP4 Exit: {symbol}",
+                        f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
+                    )
                     actions.append("tp4_exit")
                     logger.debug("%s actions: %s", symbol, actions)
                     continue

@@ -2,6 +2,8 @@
 
 This repository implements the Spot AI Super Agent – a research bot for scanning the crypto market, evaluating signals and managing paper trades. The project now supports asynchronous price fetching, optional dashboard service and basic backtesting utilities.
 
+Profit‑riding exits now combine ADX, MACD and Keltner Channel signals and support optional trailing take‑profit levels to lock in gains while letting winners run.
+
 ## Setup
 
 ```bash
