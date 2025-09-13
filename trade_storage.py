@@ -484,84 +484,89 @@ def log_trade_result(
 def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
     """Collapse partial exits so each trade occupies a single row.
 
-    Trades are grouped by ``entry_time``, ``symbol`` and ``strategy``. All PnL
-    values within a group are summed and the last non-partial row is used as the
-    representative record. Boolean columns ``tp1_partial`` and ``tp2_partial``
-    flag whether those partial exits occurred.
+    Rows are grouped by ``trade_id`` when present, otherwise by ``entry_time``,
+    ``symbol`` and ``strategy``. All PnL values within a group are summed and the
+    last non-partial row is used as the representative record. Boolean columns
+    ``tp1_partial`` and ``tp2_partial`` flag whether those partial exits
+    occurred. Additional ``pnl_tp1``/``pnl_tp2`` fields (with corresponding size
+    and notional columns) expose the contribution of each stage.
     """
+
     if df.empty:
         return df
-    key_cols = [c for c in ["entry_time", "symbol", "strategy"] if c in df.columns]
     df = df.drop_duplicates()
+    if "trade_id" in df.columns:
+        key_cols = ["trade_id"]
+    else:
+        key_cols = [c for c in ["entry_time", "symbol", "strategy"] if c in df.columns]
     if not key_cols:
         return df
 
-    if "pnl" in df.columns:
-        df["_pnl"] = pd.to_numeric(df["pnl"], errors="coerce").fillna(0)
-    elif (
-        all(c in df.columns for c in ["entry", "exit", "size", "direction"])
-        or all(c in df.columns for c in ["entry", "exit", "position_size", "direction"])
-    ):
-        def _calc(row: pd.Series) -> float:
-            try:
-                entry = float(row.get("entry", 0))
-                exit_price = float(row.get("exit", 0))
-                qty = float(row.get("position_size", row.get("quantity", 0)))
-                if qty == 0:
-                    size_field = float(row.get("size", 0))
+    def _calc_fields(row: pd.Series) -> pd.Series:
+        try:
+            entry = float(row.get("entry", 0))
+            exit_price = float(row.get("exit", 0))
+            qty = float(row.get("position_size", row.get("quantity", row.get("size", 0))))
+            if "position_size" not in row and "quantity" not in row:
+                size_field = float(row.get("size", 0))
+                if SIZE_AS_NOTIONAL:
                     qty = size_field / entry if entry != 0 else size_field
-                direction = str(row.get("direction", "")).lower()
-                pnl = (exit_price - entry) * qty
-                if direction == "short":
-                    pnl = (entry - exit_price) * qty
-                pnl -= float(row.get("fees", 0) or 0)
-                pnl -= float(row.get("slippage", 0) or 0)
-                return pnl
-            except Exception:
-                return 0.0
+                else:
+                    qty = size_field
+            direction = str(row.get("direction", "")).lower()
+            pnl = (exit_price - entry) * qty
+            if direction == "short":
+                pnl = (entry - exit_price) * qty
+            pnl -= float(row.get("fees", 0) or 0)
+            pnl -= float(row.get("slippage", 0) or 0)
+            notional = float(row.get("notional", entry * qty if entry and qty else 0))
+            return pd.Series({"_pnl": pnl, "_size": qty, "_notional": notional})
+        except Exception:
+            return pd.Series({"_pnl": 0.0, "_size": 0.0, "_notional": 0.0})
 
-        df["_pnl"] = df.apply(_calc, axis=1)
-    else:
-        df["_pnl"] = 0.0
+    df = df.join(df.apply(_calc_fields, axis=1))
 
     def _collapse(group: pd.DataFrame) -> pd.Series:
         pnl_total = group["_pnl"].sum()
+        size_total = group["_size"].sum()
+        notional_total = group["_notional"].sum()
         final = group[~group["outcome"].astype(str).str.contains("_partial", na=False)]
         if final.empty:
             final = group.tail(1)
         row = final.iloc[0].copy()
         row["pnl"] = pnl_total
-        if "notional" not in row:
-            try:
-                if "position_size" in row:
-                    row["notional"] = float(row.get("entry", 0)) * float(
-                        row.get("position_size", 0)
-                    )
-                elif {"entry", "size"}.issubset(row.index):
-                    if SIZE_AS_NOTIONAL:
-                        row["notional"] = float(row.get("size", 0))
-                    else:
-                        row["notional"] = float(row.get("entry", 0)) * float(
-                            row.get("size", 0)
-                        )
-                else:
-                    row["notional"] = float(row.get("size", 0))
-            except Exception:
-                row["notional"] = None
+        if "position_size" in row:
+            row["position_size"] = size_total
+        if "size" in row:
+            if SIZE_AS_NOTIONAL:
+                row["size"] = notional_total
+            else:
+                row["size"] = size_total
+        else:
+            row["size"] = size_total
+        row["notional"] = notional_total if notional_total else row.get("notional")
         notional_val = row.get("notional")
         if notional_val:
             try:
                 row["pnl_pct"] = pnl_total / float(notional_val) * 100
             except Exception:
                 row["pnl_pct"] = None
-        row["tp1_partial"] = group["outcome"].astype(str).str.contains("tp1_partial").any()
-        row["tp2_partial"] = group["outcome"].astype(str).str.contains("tp2_partial").any()
+        tp1_rows = group[group["outcome"].astype(str).str.contains("tp1_partial", na=False)]
+        tp2_rows = group[group["outcome"].astype(str).str.contains("tp2_partial", na=False)]
+        row["tp1_partial"] = not tp1_rows.empty
+        row["tp2_partial"] = not tp2_rows.empty
+        row["pnl_tp1"] = tp1_rows["_pnl"].sum()
+        row["pnl_tp2"] = tp2_rows["_pnl"].sum()
+        row["size_tp1"] = tp1_rows["_size"].sum()
+        row["size_tp2"] = tp2_rows["_size"].sum()
+        row["notional_tp1"] = tp1_rows["_notional"].sum()
+        row["notional_tp2"] = tp2_rows["_notional"].sum()
         return row
 
     collapsed = (
         df.groupby(key_cols, group_keys=False).apply(_collapse).reset_index(drop=True)
     )
-    return collapsed.drop(columns=["_pnl"], errors="ignore")
+    return collapsed.drop(columns=["_pnl", "_size", "_notional"], errors="ignore")
 
 
 def load_trade_history_df() -> pd.DataFrame:

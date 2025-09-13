@@ -20,6 +20,12 @@ Each row recorded by `trade_storage.log_trade_result` contains the following col
 | `slippage` | Slippage incurred on exit. |
 | `pnl` | Net profit or loss in quote currency after fees and slippage. |
 | `pnl_pct` | Profit/loss as a percentage of `notional`. |
+| `size_tp1` | Size closed at the TP1 partial exit. |
+| `notional_tp1` | Notional value closed at the TP1 partial exit. |
+| `pnl_tp1` | Profit or loss realised at the TP1 partial exit. |
+| `size_tp2` | Size closed at the TP2 partial exit. |
+| `notional_tp2` | Notional value closed at the TP2 partial exit. |
+| `pnl_tp2` | Profit or loss realised at the TP2 partial exit. |
 | `outcome` | Outcome code (see table below). |
 | `outcome_desc` | Human readable description of the outcome. |
 | `strategy` | Name of the strategy responsible for the trade. |
@@ -67,4 +73,4 @@ Partial exits are denoted with a `_partial` suffix. Manual closures may appear a
 trade_id,timestamp,symbol,direction,entry_time,exit_time,entry,exit,size,notional,fees,slippage,pnl,pnl_pct,outcome,outcome_desc,strategy,session,confidence,btc_dominance,fear_greed,sentiment_bias,sentiment_confidence,score,pattern,narrative,llm_decision,llm_confidence,llm_error,volatility,htf_trend,order_imbalance,macro_indicator
 ```
 
-A single trade may produce multiple rows if partial take-profits occur. The loader collapses these into one row using `_deduplicate_history` while retaining `tp1_partial`/`tp2_partial` flags.
+A single trade may produce multiple rows if partial take-profits occur. Rows are grouped by `trade_id` (falling back to `entry_time`, `symbol` and `strategy` when absent) and collapsed into one summary row by `_deduplicate_history`. PnL, size and notional values are summed for the whole trade, while per-stage fields such as `pnl_tp1`, `pnl_tp2`, `size_tp1`, `size_tp2`, `notional_tp1` and `notional_tp2` detail the contribution of each partial exit alongside the `tp1_partial`/`tp2_partial` flags.
