@@ -23,4 +23,5 @@ def test_load_trade_history_df_computes_pnl_pct(tmp_path, monkeypatch):
     result = trade_storage.load_trade_history_df()
     assert pytest.approx(result.iloc[0]["pnl_pct"], rel=1e-6) == 10.0
     assert pytest.approx(result.iloc[0]["PnL (%)"], rel=1e-6) == 10.0
+    assert result.iloc[0]["win"]
 
