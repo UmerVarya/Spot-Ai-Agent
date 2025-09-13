@@ -841,11 +841,16 @@ def render_live_tab() -> None:
             if c in hist_display.columns
         ]
         hist_display = hist_display[display_cols].copy()
+        # Ensure column labels are plain strings for Arrow/JSON serialisation
+        hist_display.columns = [str(c) for c in hist_display.columns]
         # Format numeric columns safely by coercing to numbers before rounding
         numeric_cols = [
             "PnL (net $)",
             "PnL (%)",
             "Duration (min)",
+            "entry",
+            "exit",
+            "size",
             "fees",
             "slippage",
             "notional",
@@ -854,9 +859,9 @@ def render_live_tab() -> None:
         ]
         for col in numeric_cols:
             if col in hist_display.columns:
-                hist_display[col] = (
-                    pd.to_numeric(hist_display[col], errors="coerce").round(2)
-                )
+                hist_display[col] = pd.to_numeric(
+                    hist_display[col], errors="coerce"
+                ).round(2)
         positive_labels = {
             outcome_descriptions[c]
             for c in profit_codes
