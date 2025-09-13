@@ -18,9 +18,12 @@ def get(key: str, default: str | None = None) -> str | None:
 
 
 # Default Groq model and mapping for deprecated names
-DEFAULT_GROQ_MODEL = "llama-3.1-70b-versatile"
+# ``llama-3.1-70b-versatile`` has been decommissioned; use a currently
+# available model instead.
+DEFAULT_GROQ_MODEL = "llama-3.1-70b"
 _DEPRECATED_GROQ_MODELS = {
     "llama3-70b-8192": DEFAULT_GROQ_MODEL,
+    "llama-3.1-70b-versatile": DEFAULT_GROQ_MODEL,
 }
 
 
