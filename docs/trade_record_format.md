@@ -46,6 +46,10 @@ Each row recorded by `trade_storage.log_trade_result` contains the following col
 | `order_imbalance` | Order flow imbalance metric. |
 | `macro_indicator` | Macro indicator value. |
 
+The Streamlit dashboard surfaces the stage-specific `size_tp*`,
+`notional_tp*` and `pnl_tp*` columns so each partial take-profit's
+contribution is visible when present.
+
 A `duration_min` field is **not** stored. It can be derived as the difference between `exit_time` and `entry_time` if needed.
 
 ## Outcome Codes
