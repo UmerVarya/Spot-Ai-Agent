@@ -78,6 +78,12 @@ TRADE_HISTORY_HEADERS = [
     "slippage",
     "pnl",
     "pnl_pct",
+    "size_tp1",
+    "notional_tp1",
+    "pnl_tp1",
+    "size_tp2",
+    "notional_tp2",
+    "pnl_tp2",
     "outcome",
     "outcome_desc",
     "strategy",
@@ -404,6 +410,12 @@ def log_trade_result(
         "slippage": slippage,
         "pnl": pnl_val,
         "pnl_pct": pnl_pct,
+        "size_tp1": 0.0,
+        "notional_tp1": 0.0,
+        "pnl_tp1": 0.0,
+        "size_tp2": 0.0,
+        "notional_tp2": 0.0,
+        "pnl_tp2": 0.0,
         "outcome": outcome,
         "outcome_desc": OUTCOME_DESCRIPTIONS.get(outcome, outcome),
         "strategy": trade.get("strategy", "unknown"),
@@ -426,7 +438,28 @@ def log_trade_result(
         "order_imbalance": trade.get("order_imbalance", 0),
         "macro_indicator": trade.get("macro_indicator", 0),
     }
-    float_cols = ["entry", "exit", "size", "notional", "fees", "confidence"]
+    if "tp1_partial" in outcome:
+        row["size_tp1"] = quantity
+        row["notional_tp1"] = notional or 0.0
+        row["pnl_tp1"] = pnl_val
+    if "tp2_partial" in outcome:
+        row["size_tp2"] = quantity
+        row["notional_tp2"] = notional or 0.0
+        row["pnl_tp2"] = pnl_val
+    float_cols = [
+        "entry",
+        "exit",
+        "size",
+        "notional",
+        "fees",
+        "confidence",
+        "size_tp1",
+        "notional_tp1",
+        "pnl_tp1",
+        "size_tp2",
+        "notional_tp2",
+        "pnl_tp2",
+    ]
     for col in float_cols:
         try:
             row[col] = float(row.get(col, 0))
