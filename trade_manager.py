@@ -16,7 +16,7 @@ guaranteed to read and write the same JSON file regardless of the
 working directory.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Tuple, Optional
 
 from trade_utils import (
@@ -193,10 +193,19 @@ def manage_trades() -> None:
         actions = []
         # Time-based exit: close trades exceeding the maximum holding duration
         entry_time_str = trade.get('entry_time')
-        try:
-            entry_dt = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S") if entry_time_str else None
-        except Exception:
-            entry_dt = None
+        entry_dt = None
+        if entry_time_str:
+            try:
+                # Attempt ISO 8601 parsing first (supports "Z" or offsets)
+                entry_dt = datetime.fromisoformat(entry_time_str.replace("Z", "+00:00"))
+            except Exception:
+                try:
+                    entry_dt = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    entry_dt = None
+        # Convert to naive UTC for comparison
+        if entry_dt is not None and entry_dt.tzinfo is not None:
+            entry_dt = entry_dt.astimezone(timezone.utc).replace(tzinfo=None)
         if entry_dt and datetime.utcnow() - entry_dt >= MAX_HOLDING_TIME:
             actions.append("time_exit")
             logger.info("%s exceeded max holding time; exiting trade.", symbol)
