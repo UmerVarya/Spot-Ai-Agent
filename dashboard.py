@@ -199,6 +199,15 @@ def get_price_history(
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
     return df[["open_time", "close"]].rename(columns={"open_time": "time"})
 
+
+def to_bool(val) -> bool:
+    """Convert common string/int representations to a boolean."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.lower() in {"true", "1", "yes"}
+    return bool(val)
+
 def format_active_row(symbol: str, data: dict) -> dict | None:
     """
     Format a single active trade dictionary into a row for display.
@@ -269,9 +278,10 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     for key, label in [("tp1", "TP1"), ("tp2", "TP2"), ("tp3", "TP3")]:
         # Only show flags for targets that exist in the trade data
         if data.get(key) is not None:
-            status_flags.append(tp_flag(status.get(key), label))
+            hit = to_bool(status.get(key))
+            status_flags.append(tp_flag(hit, label))
 
-    if status.get("sl"):
+    if to_bool(status.get("sl")):
         status_flags.append("🔴 SL")
 
     # Indicate TP4 profit-riding mode when enabled
