@@ -804,26 +804,33 @@ def render_live_tab() -> None:
             hist_df["Outcome Description"] = hist_df["outcome"].map(
                 lambda x: outcome_descriptions.get(str(x), str(x))
             )
-        # Display historical trades table
-        display_cols = [
-            col
-            for col in [
-                "entry_time",
-                "exit_time",
-                "symbol",
-                "direction",
-                "strategy",
-                "session",
-                "entry",
-                "exit",
-                "size",
-                "notional",
-                "fees",
-                "slippage",
-                "Outcome Description",
-            ]
-            if col in hist_df.columns
-        ] + [
+        # Display historical trades table including per-stage metrics when available
+        stage_map = {
+            "pnl_tp1": "PnL TP1 ($)",
+            "pnl_tp2": "PnL TP2 ($)",
+            "size_tp1": "Size TP1",
+            "size_tp2": "Size TP2",
+            "notional_tp1": "Notional TP1 ($)",
+            "notional_tp2": "Notional TP2 ($)",
+        }
+        hist_display = hist_df.rename(columns=stage_map)
+        base_cols = [
+            "entry_time",
+            "exit_time",
+            "symbol",
+            "direction",
+            "strategy",
+            "session",
+            "entry",
+            "exit",
+            "size",
+            "notional",
+            "fees",
+            "slippage",
+            "Outcome Description",
+            *stage_map.values(),
+        ]
+        display_cols = [col for col in base_cols if col in hist_display.columns] + [
             c
             for c in [
                 "PnL (net $)",
@@ -831,11 +838,11 @@ def render_live_tab() -> None:
                 "Duration (min)",
                 "Notional",
             ]
-            if c in hist_df.columns
+            if c in hist_display.columns
         ]
-        hist_display = hist_df[display_cols].copy()
+        hist_display = hist_display[display_cols].copy()
         # Format numeric columns safely by coercing to numbers before rounding
-        for col in [
+        numeric_cols = [
             "PnL (net $)",
             "PnL (%)",
             "Duration (min)",
@@ -843,7 +850,9 @@ def render_live_tab() -> None:
             "slippage",
             "notional",
             "Notional",
-        ]:
+            *stage_map.values(),
+        ]
+        for col in numeric_cols:
             if col in hist_display.columns:
                 hist_display[col] = (
                     pd.to_numeric(hist_display[col], errors="coerce").round(2)
