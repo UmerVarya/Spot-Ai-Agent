@@ -473,6 +473,9 @@ def manage_trades() -> None:
                             f"✅ TP Trail: {symbol}",
                             f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
                         )
+                        new_sl = max(trade.get('sl', 0), next_tp)
+                        _update_stop_loss(trade, new_sl)
+                        logger.info("%s TP Trail: SL moved to %s", symbol, new_sl)
                         remaining_qty = qty - sell_qty
                         trade['position_size'] = remaining_qty
                         trade['size'] = remaining_qty * entry
