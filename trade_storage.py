@@ -78,6 +78,7 @@ TRADE_HISTORY_HEADERS = [
     "slippage",
     "pnl",
     "pnl_pct",
+    "win",
     "size_tp1",
     "notional_tp1",
     "pnl_tp1",
@@ -410,6 +411,7 @@ def log_trade_result(
         "slippage": slippage,
         "pnl": pnl_val,
         "pnl_pct": pnl_pct,
+        "win": pnl_val > 0,
         "size_tp1": 0.0,
         "notional_tp1": 0.0,
         "pnl_tp1": 0.0,
@@ -813,6 +815,14 @@ def load_trade_history_df() -> pd.DataFrame:
     df["pnl_pct"] = pd.to_numeric(df.get("pnl_pct"), errors="coerce")
     if "pnl_pct" in df.columns:
         df["PnL (%)"] = df["pnl_pct"]
+
+    # ------------------------------------------------------------------
+    # Determine win/loss classification
+    # ------------------------------------------------------------------
+    if "win" in df.columns:
+        df["win"] = df["win"].astype(str).str.lower().isin(["true", "1", "yes", "y"])
+    elif "pnl" in df.columns:
+        df["win"] = pd.to_numeric(df["pnl"], errors="coerce") > 0
 
     # ------------------------------------------------------------------
     # Ensure human readable outcome descriptions
