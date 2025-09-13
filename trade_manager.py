@@ -41,8 +41,16 @@ from rl_policy import RLPositionSizer
 
 # === Constants ===
 
-# Exit thresholds
-EARLY_EXIT_THRESHOLD = 0.015  # 1.5% move against entry
+# Weighted early-exit signal configuration
+EARLY_EXIT_WEIGHTS = {
+    "rsi": 0.25,
+    "macd": 0.25,
+    "ema20": 0.20,
+    "ema50": 0.15,
+    "vwap": 0.15,
+}
+EXIT_SCORE_THRESHOLD = 0.6
+ATR_MULTIPLIER = 1.0
 # Require fairly high confidence before exiting on bearish macro signals
 MACRO_CONFIDENCE_EXIT_THRESHOLD = 7
 # Maximum duration to hold a trade before forcing exit
@@ -127,22 +135,55 @@ def should_exit_early(trade: dict, observed_price: float, price_data) -> Tuple[b
     direction = trade.get('direction')
     if entry is None or direction is None:
         return False, None
-    # 1. Price reversed significantly
-    if direction == "long" and observed_price < entry * (1 - EARLY_EXIT_THRESHOLD):
-        return True, "Price dropped beyond early exit threshold"
-    # 2. Indicator weakness
+
     indicators = calculate_indicators(price_data)
+    current_price = price_data['close'].iloc[-1]
+    atr = indicators.get('atr', 0)
+    if hasattr(atr, 'iloc'):
+        atr = atr.iloc[-1]
+    if direction == "long" and atr:
+        drawdown = entry - observed_price
+        if drawdown > atr * ATR_MULTIPLIER:
+            return True, f"Drawdown {drawdown:.4f} exceeds {ATR_MULTIPLIER} ATR ({atr:.4f})"
+
     rsi = indicators.get("rsi", 50)
     macd_hist = indicators.get("macd", 0)
+    ema20 = indicators.get("ema_20", current_price)
+    ema50 = indicators.get("ema_50", current_price)
+    vwap = indicators.get("vwap") or indicators.get("vwma")
+
     if hasattr(rsi, 'iloc'):
         rsi = rsi.iloc[-1]
     if hasattr(macd_hist, 'iloc'):
         macd_hist = macd_hist.iloc[-1]
-    if direction == "long" and rsi < 45:
-        return True, f"Weak RSI: {rsi:.2f}"
-    if direction == "long" and macd_hist < 0:
-        return True, f"MACD histogram reversed: {macd_hist:.4f}"
-    # 3. Macro shift
+    if hasattr(ema20, 'iloc'):
+        ema20 = ema20.iloc[-1]
+    if hasattr(ema50, 'iloc'):
+        ema50 = ema50.iloc[-1]
+    if vwap is not None and hasattr(vwap, 'iloc'):
+        vwap = vwap.iloc[-1]
+
+    score = 0.0
+    reasons = []
+    if direction == "long":
+        if rsi < 45:
+            score += EARLY_EXIT_WEIGHTS["rsi"]
+            reasons.append(f"RSI {rsi:.2f}")
+        if macd_hist < 0:
+            score += EARLY_EXIT_WEIGHTS["macd"]
+            reasons.append(f"MACD {macd_hist:.4f}")
+        if current_price < ema20:
+            score += EARLY_EXIT_WEIGHTS["ema20"]
+            reasons.append("Price below EMA20")
+        if current_price < ema50:
+            score += EARLY_EXIT_WEIGHTS["ema50"]
+            reasons.append("Price below EMA50")
+        if vwap is not None and current_price < vwap:
+            score += EARLY_EXIT_WEIGHTS["vwap"]
+            reasons.append("Close below VWAP")
+    if score >= EXIT_SCORE_THRESHOLD:
+        return True, f"Bearish signals (score {score:.2f}): {', '.join(reasons)}"
+
     macro = analyze_macro_sentiment()
     if macro.get('bias') == "bearish" and macro.get('confidence', 0) >= MACRO_CONFIDENCE_EXIT_THRESHOLD:
         return True, f"Macro sentiment shifted to bearish (Confidence: {macro.get('confidence')})"

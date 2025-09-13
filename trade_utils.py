@@ -531,6 +531,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df['bb_middle'] = bb.bollinger_mavg()
         vwma_calc = VolumeWeightedAveragePrice(df['high'], df['low'], df['close'], df['volume'], window=20)
         df['vwma'] = vwma_calc.volume_weighted_average_price()
+        vwap_calc = VolumeWeightedAveragePrice(df['high'], df['low'], df['close'], df['volume'])
+        df['vwap'] = vwap_calc.volume_weighted_average_price()
         obv_calc = OnBalanceVolumeIndicator(df['close'], df['volume'])
         df['obv'] = obv_calc.on_balance_volume()
         df['dema_20'] = DEMAIndicator(df['close'], window=20).dema_indicator()
