@@ -19,13 +19,16 @@ def optimize_indicator_weights(base_weights: dict, lookback: int = 200) -> dict:
     if not (os.path.exists(SIGNAL_LOG_FILE) and os.path.exists(TRADE_HISTORY_FILE)):
         return base_weights
     try:
-        # Ensure merge keys have consistent dtypes
-        signals = pd.read_csv(
-            SIGNAL_LOG_FILE, dtype={"timestamp": str, "symbol": str}
-        ).tail(lookback)
-        trades = pd.read_csv(
-            TRADE_HISTORY_FILE, dtype={"timestamp": str, "symbol": str}
-        ).tail(lookback)
+        signals = pd.read_csv(SIGNAL_LOG_FILE).tail(lookback)
+        trades = pd.read_csv(TRADE_HISTORY_FILE).tail(lookback)
+
+        # Normalize keys consistently on both frames
+        for df in (signals, trades):
+            if "symbol" in df.columns:
+                df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
+            if "timestamp" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
         merged = pd.merge(
             signals,
             trades[["timestamp", "symbol", "outcome"]],
