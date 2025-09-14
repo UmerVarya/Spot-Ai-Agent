@@ -5,9 +5,8 @@ import config
 
 load_dotenv()
 
-# === Load Groq API Key and model ===
+# === Load Groq API Key ===
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = config.get_groq_model()
 client = Groq(api_key=GROQ_API_KEY)
 
 
@@ -51,7 +50,7 @@ Trade Details:
 """
 
         response = client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=config.get_groq_model(),
             messages=[
                 {"role": "system", "content": "You are a professional crypto trading strategist."},
                 {"role": "user", "content": prompt}

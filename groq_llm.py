@@ -28,7 +28,6 @@ from log_utils import setup_logger
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL = config.get_groq_model()
 HEADERS = {
     "Authorization": f"Bearer {GROQ_API_KEY}",
     "Content-Type": "application/json"
@@ -71,8 +70,9 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
             + " decision (Yes or No), confidence (0 to 10 as a number), reason (a short explanation),"
             + " and thesis (2-3 sentence summary)."
         )
+        model = config.get_groq_model()
         data = {
-            "model": MODEL,
+            "model": model,
             "messages": [
                 {"role": "system", "content": "You are a highly experienced crypto trader assistant. Always respond in JSON."},
                 {"role": "user", "content": user_prompt}
@@ -116,8 +116,9 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
             + " decision (Yes or No), confidence (0 to 10 as a number), reason (a short explanation),"
             + " and thesis (2-3 sentence summary)."
         )
+        model = config.get_groq_model()
         data = {
-            "model": MODEL,
+            "model": model,
             "messages": [
                 {"role": "system", "content": "You are a highly experienced crypto trader assistant. Always respond in JSON."},
                 {"role": "user", "content": user_prompt}

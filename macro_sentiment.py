@@ -6,7 +6,6 @@ from log_utils import setup_logger
 # Centralised configuration loader
 import config
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = config.get_groq_model()
 client = Groq(api_key=GROQ_API_KEY)
 
 logger = setup_logger(__name__)
@@ -36,7 +35,7 @@ Confidence: <0-10 score>
 
     try:
         response = client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=config.get_groq_model(),
             messages=[
                 {"role": "system", "content": "You are a crypto macro market analyst."},
                 {"role": "user", "content": prompt}

@@ -23,11 +23,8 @@ import config
 
 load_dotenv()
 
-# Retrieve API key and model from environment
+# Retrieve API key from environment and initialise the client once
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = config.get_groq_model()
-
-# Initialise the Groq client once
 client = Groq(api_key=GROQ_API_KEY)
 
 
@@ -82,7 +79,7 @@ Write a short, confident explanation justifying the trade in plain English. End 
 
     try:
         response = client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=config.get_groq_model(),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=500,
