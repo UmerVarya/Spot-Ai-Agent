@@ -17,7 +17,6 @@ logger = setup_logger(__name__)
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = config.get_groq_model()
 
 
 async def _fetch_rss(session: aiohttp.ClientSession, url: str, impact: str) -> List[Dict[str, str]]:
@@ -91,7 +90,7 @@ def analyze_news_with_llm(events: List[Dict[str, str]]) -> Dict[str, str]:
     client = Groq(api_key=GROQ_API_KEY)
     try:
         chat_completion = client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=config.get_groq_model(),
             messages=[
                 {"role": "system", "content": "You are a crypto macro risk analyst."},
                 {"role": "user", "content": prompt},

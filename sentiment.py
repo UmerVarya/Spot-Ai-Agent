@@ -11,7 +11,6 @@ load_dotenv()
 # Groq API configuration
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = config.get_groq_model()
 
 # Cache for latest macro sentiment
 latest_macro_sentiment = {"bias": "neutral", "confidence": 5.0, "summary": "No analysis yet."}
@@ -39,7 +38,7 @@ def analyze_macro_news(news_text: str) -> dict:
         {"role": "user", "content": prompt + "\nNews Headlines:\n" + news_text}
     ]
     payload = {
-        "model": GROQ_MODEL,
+        "model": config.get_groq_model(),
         "messages": messages,
         "temperature": 0.2,
         "max_tokens": 200
