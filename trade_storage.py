@@ -473,7 +473,6 @@ def log_trade_result(
                 "INSERT INTO trade_log (data) VALUES (%s)",
                 (Json(row),),
             )
-            return
         except Exception as exc:
             logger.exception("Failed to log trade result to database: %s", exc)
     # Determine whether the history file already contains data.  Simply

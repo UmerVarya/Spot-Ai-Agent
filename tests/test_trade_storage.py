@@ -127,6 +127,43 @@ def test_log_trade_result_rewrites_missing_header(tmp_path, monkeypatch):
     assert first.startswith("trade_id,")
 
 
+def test_log_trade_result_writes_file_when_db_cursor_present(tmp_path, monkeypatch):
+    """Trades should always append to CSV even if a DB cursor is configured."""
+    csv_path = tmp_path / "log.csv"
+
+    class DummyCursor:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, query, params=None):
+            self.calls.append((query, params))
+
+    dummy_cursor = DummyCursor()
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
+    monkeypatch.setattr(trade_storage, "DB_CURSOR", dummy_cursor)
+    monkeypatch.setattr(trade_storage, "Json", lambda x: x)
+
+    trade = {
+        "symbol": "ETHUSDT",
+        "direction": "long",
+        "entry": 1000,
+        "size": 1000,
+        "position_size": 1,
+        "strategy": "test",
+        "session": "Asia",
+    }
+
+    trade_storage.log_trade_result(trade, outcome="tp1", exit_price=1100)
+
+    # Should write a row to CSV
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows and rows[0]["symbol"] == "ETHUSDT"
+
+    # And the DB cursor should have been used
+    assert dummy_cursor.calls
+
+
 def test_size_as_notional_without_position_size(tmp_path, monkeypatch):
     csv_path = tmp_path / "log.csv"
     monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
