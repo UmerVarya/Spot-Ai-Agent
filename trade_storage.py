@@ -631,21 +631,50 @@ def load_trade_history_df() -> pd.DataFrame:
         if os.path.exists(path) and os.path.getsize(path) > 0:
             try:
                 try:  # pandas >= 1.3
-                    df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
+                    df = pd.read_csv(
+                        path,
+                        encoding="utf-8",
+                        on_bad_lines="skip",
+                        engine="python",
+                    )
                 except TypeError:  # pragma: no cover - older pandas
                     df = pd.read_csv(
                         path,
                         encoding="utf-8",
+                        engine="python",
                         error_bad_lines=False,
                         warn_bad_lines=False,
                     )
             except Exception as exc:  # pragma: no cover - diagnostic only
                 logger.exception("Failed to read trade log file: %s", exc)
             else:
-                # If the file has data but no recognizable columns, the first
-                # row may have been misinterpreted as the header.  Re-read
-                # assuming no header and assign the canonical column list.
-                if not df.empty:
+                # If pandas could not recognise any expected columns or
+                # produced an empty frame (often due to quoting issues in
+                # free-form text fields like ``narrative``), fall back to the
+                # built-in CSV reader which is more forgiving.
+                if df.empty or not any(
+                    any(key in str(c).lower() for key in [
+                        "timestamp",
+                        "entry_time",
+                        "exit_time",
+                        "symbol",
+                    ])
+                    for c in df.columns
+                ):
+                    try:
+                        with open(path, "r", encoding="utf-8") as fh:
+                            reader = csv.DictReader(fh)
+                            rows = list(reader)
+                        if rows:
+                            df = pd.DataFrame(rows)
+                    except Exception as exc:  # pragma: no cover - diagnostic only
+                        logger.exception(
+                            "Fallback CSV parsing failed: %s", exc
+                        )
+                else:
+                    # If the file has data but no recognizable columns, the first
+                    # row may have been misinterpreted as the header.  Re-read
+                    # assuming no header and assign the canonical column list.
                     cols_lower = [c.lower() for c in df.columns]
                     expected_keys = ["timestamp", "entry_time", "exit_time", "symbol"]
                     if not any(any(key in col for col in cols_lower) for key in expected_keys):
@@ -657,6 +686,7 @@ def load_trade_history_df() -> pd.DataFrame:
                                     names=TRADE_HISTORY_HEADERS,
                                     encoding="utf-8",
                                     on_bad_lines="skip",
+                                    engine="python",
                                 )
                             except TypeError:  # pragma: no cover - older pandas
                                 df = pd.read_csv(
@@ -664,6 +694,7 @@ def load_trade_history_df() -> pd.DataFrame:
                                     header=None,
                                     names=TRADE_HISTORY_HEADERS,
                                     encoding="utf-8",
+                                    engine="python",
                                     error_bad_lines=False,
                                     warn_bad_lines=False,
                                 )
