@@ -33,6 +33,7 @@ from notifier import send_performance_email
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # When ``SIZE_AS_NOTIONAL`` is true (default), the ``size`` field provided to
 # :func:`log_trade_result` is interpreted as the notional dollar amount of the
@@ -188,26 +189,37 @@ except OSError:
 # File locations; ``ACTIVE_TRADES_FILE`` stores open trades in JSON format and
 # ``TRADE_HISTORY_FILE`` stores completed trades in CSV format.  The latter is
 # the canonical location for historical trade data and is configurable via the
-# ``TRADE_HISTORY_FILE`` environment variable.  Legacy constant names remain as
-# aliases for backward compatibility.
-ACTIVE_TRADES_FILE = os.environ.get(
-    "ACTIVE_TRADES_FILE", os.path.join(DATA_DIR, "active_trades.json")
-).split("#", 1)[0].strip()
-TRADE_HISTORY_FILE = (
-    os.environ.get(
-        "TRADE_HISTORY_FILE", os.path.join(DATA_DIR, "completed_trades.csv")
-    )
-    .split("#", 1)[0]
-    .strip()
+# ``TRADE_HISTORY_FILE`` or legacy ``COMPLETED_TRADES_FILE`` environment
+# variables.  Legacy constant names remain as aliases for backward
+# compatibility.
+_active_default = os.path.join(DATA_DIR, "active_trades.json")
+ACTIVE_TRADES_FILE = (
+    os.environ.get("ACTIVE_TRADES_FILE", _active_default).split("#", 1)[0].strip()
+    or _active_default
 )
+_history_default = os.path.join(DATA_DIR, "completed_trades.csv")
+_history_override = os.environ.get("TRADE_HISTORY_FILE")
+if _history_override is None:
+    _history_override = os.environ.get("COMPLETED_TRADES_FILE")
+_history_override = (_history_override or "").split("#", 1)[0].strip()
+_HISTORY_ENV_OVERRIDE = bool(_history_override)
+TRADE_HISTORY_FILE = _history_override or _history_default
 # Backwards-compatible aliases
 COMPLETED_TRADES_FILE = TRADE_HISTORY_FILE
 TRADE_LOG_FILE = TRADE_HISTORY_FILE
 
+# Legacy trade history files that may still contain data from earlier
+# deployments where the CSV lived alongside the source tree. These are read in
+# addition to the primary history file when no explicit override is supplied.
+_LEGACY_HISTORY_FILENAMES = ("completed_trades.csv", "trade_history.csv")
+_LEGACY_HISTORY_FILES = [
+    os.path.join(_REPO_ROOT, name) for name in _LEGACY_HISTORY_FILENAMES
+]
+_EXPECTED_HISTORY_KEYS = ("timestamp", "entry_time", "exit_time", "symbol")
+
 
 # Symlinks in the repository root allow read-only access for legacy code
 # that still expects files beside the source tree.
-_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 ensure_symlink(ACTIVE_TRADES_FILE, os.path.join(_REPO_ROOT, "active_trades.json"))
 ensure_symlink(TRADE_HISTORY_FILE, os.path.join(_REPO_ROOT, "completed_trades.csv"))
 
@@ -603,6 +615,76 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
     return collapsed.drop(columns=["_pnl", "_size", "_notional"], errors="ignore")
 
 
+def _read_history_frame(path: str) -> pd.DataFrame:
+    """Read a trade history CSV from ``path`` using tolerant parsing."""
+
+    if not path or not (os.path.exists(path) and os.path.getsize(path) > 0):
+        return pd.DataFrame()
+
+    try:
+        try:  # pandas >= 1.3
+            df = pd.read_csv(
+                path,
+                encoding="utf-8",
+                on_bad_lines="skip",
+                engine="python",
+            )
+        except TypeError:  # pragma: no cover - older pandas
+            df = pd.read_csv(
+                path,
+                encoding="utf-8",
+                engine="python",
+                error_bad_lines=False,
+                warn_bad_lines=False,
+            )
+    except Exception as exc:  # pragma: no cover - diagnostic only
+        logger.exception("Failed to read trade log file %s: %s", path, exc)
+        return pd.DataFrame()
+
+    if df.empty or not any(
+        any(key in str(col).lower() for key in _EXPECTED_HISTORY_KEYS)
+        for col in df.columns
+    ):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                rows = list(reader)
+            if rows:
+                df = pd.DataFrame(rows)
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            logger.exception("Fallback CSV parsing failed for %s: %s", path, exc)
+
+    if not df.empty:
+        cols_lower = [str(col).lower() for col in df.columns]
+        if not any(
+            any(key in col for key in _EXPECTED_HISTORY_KEYS) for col in cols_lower
+        ):
+            try:
+                try:  # pandas >= 1.3
+                    df = pd.read_csv(
+                        path,
+                        header=None,
+                        names=TRADE_HISTORY_HEADERS,
+                        encoding="utf-8",
+                        on_bad_lines="skip",
+                        engine="python",
+                    )
+                except TypeError:  # pragma: no cover - older pandas
+                    df = pd.read_csv(
+                        path,
+                        header=None,
+                        names=TRADE_HISTORY_HEADERS,
+                        encoding="utf-8",
+                        engine="python",
+                        error_bad_lines=False,
+                        warn_bad_lines=False,
+                    )
+            except Exception as exc:  # pragma: no cover - diagnostic only
+                logger.exception("Failed to recover trade log file %s: %s", path, exc)
+
+    return df
+
+
 def load_trade_history_df() -> pd.DataFrame:
     """Return historical trades as a DataFrame.
 
@@ -627,79 +709,25 @@ def load_trade_history_df() -> pd.DataFrame:
         except Exception as exc:  # pragma: no cover - diagnostic only
             logger.exception("Failed to load trade history from database: %s", exc)
     else:
-        path = TRADE_HISTORY_FILE
-        if os.path.exists(path) and os.path.getsize(path) > 0:
-            try:
-                try:  # pandas >= 1.3
-                    df = pd.read_csv(
-                        path,
-                        encoding="utf-8",
-                        on_bad_lines="skip",
-                        engine="python",
-                    )
-                except TypeError:  # pragma: no cover - older pandas
-                    df = pd.read_csv(
-                        path,
-                        encoding="utf-8",
-                        engine="python",
-                        error_bad_lines=False,
-                        warn_bad_lines=False,
-                    )
-            except Exception as exc:  # pragma: no cover - diagnostic only
-                logger.exception("Failed to read trade log file: %s", exc)
-            else:
-                # If pandas could not recognise any expected columns or
-                # produced an empty frame (often due to quoting issues in
-                # free-form text fields like ``narrative``), fall back to the
-                # built-in CSV reader which is more forgiving.
-                if df.empty or not any(
-                    any(key in str(c).lower() for key in [
-                        "timestamp",
-                        "entry_time",
-                        "exit_time",
-                        "symbol",
-                    ])
-                    for c in df.columns
-                ):
-                    try:
-                        with open(path, "r", encoding="utf-8") as fh:
-                            reader = csv.DictReader(fh)
-                            rows = list(reader)
-                        if rows:
-                            df = pd.DataFrame(rows)
-                    except Exception as exc:  # pragma: no cover - diagnostic only
-                        logger.exception(
-                            "Fallback CSV parsing failed: %s", exc
-                        )
-                else:
-                    # If the file has data but no recognizable columns, the first
-                    # row may have been misinterpreted as the header.  Re-read
-                    # assuming no header and assign the canonical column list.
-                    cols_lower = [c.lower() for c in df.columns]
-                    expected_keys = ["timestamp", "entry_time", "exit_time", "symbol"]
-                    if not any(any(key in col for col in cols_lower) for key in expected_keys):
-                        try:
-                            try:  # pandas >= 1.3
-                                df = pd.read_csv(
-                                    path,
-                                    header=None,
-                                    names=TRADE_HISTORY_HEADERS,
-                                    encoding="utf-8",
-                                    on_bad_lines="skip",
-                                    engine="python",
-                                )
-                            except TypeError:  # pragma: no cover - older pandas
-                                df = pd.read_csv(
-                                    path,
-                                    header=None,
-                                    names=TRADE_HISTORY_HEADERS,
-                                    encoding="utf-8",
-                                    engine="python",
-                                    error_bad_lines=False,
-                                    warn_bad_lines=False,
-                                )
-                        except Exception as exc:  # pragma: no cover - diagnostic only
-                            logger.exception("Failed to recover trade log file: %s", exc)
+        candidate_paths = [TRADE_HISTORY_FILE]
+        if not _HISTORY_ENV_OVERRIDE:
+            candidate_paths.extend(_LEGACY_HISTORY_FILES)
+
+        frames = []
+        seen = set()
+        for candidate in candidate_paths:
+            if not candidate:
+                continue
+            resolved = os.path.abspath(candidate)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            frame = _read_history_frame(candidate)
+            if not frame.empty:
+                frames.append(frame)
+
+        if frames:
+            df = pd.concat(frames, ignore_index=True, sort=False)
         else:
             df = pd.DataFrame(
                 columns=[
