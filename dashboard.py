@@ -24,6 +24,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
+from pathlib import Path
 from datetime import datetime, timezone
 from log_utils import setup_logger, LOG_FILE
 from backtest import compute_buy_and_hold_pnl, generate_trades_from_ohlcv
@@ -48,6 +49,64 @@ except Exception:
             )
 
 from streamlit_autorefresh import st_autorefresh
+
+PRIMARY = os.getenv(
+    "TRADE_HISTORY_FILE",
+    "/home/ubuntu/spot_data/trades/completed_trades.csv"
+)
+
+# legacy fallbacks that may contain older rows
+LEGACY = [
+    os.getenv("COMPLETED_TRADES_FILE", ""),          # legacy env alias
+    "/home/ubuntu/spot_data/completed_trades.csv",   # old default path
+]
+
+@st.cache_data(ttl=30)
+def _read_history_frame(path: str) -> pd.DataFrame:
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(str(p), on_bad_lines="skip", engine="python")
+    except Exception as e:
+        # Show a hint in the UI and return empty rather than crashing the page
+        st.warning(f"Could not read {p}: {e}")
+        return pd.DataFrame()
+    # normalize types that downstream filters expect
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    # many dashboards expect a simple OUTCOME field; normalize to upper strings
+    if "outcome" in df.columns:
+        df["outcome"] = df["outcome"].astype(str).str.upper()
+    # keep only the columns we actually use in charts/tables (optional but safer)
+    preferred = [
+        "trade_id","timestamp","symbol","direction","entry_time","exit_time",
+        "entry_price","exit_price","size","notional","fees","pnl","pnl_pct",
+        "outcome","outcome_desc","strategy","session","confidence","score","pattern"
+    ]
+    keep = [c for c in preferred if c in df.columns]
+    if keep:
+        df = df[keep]
+    return df
+
+@st.cache_data(ttl=30)
+def load_trade_history_df() -> pd.DataFrame:
+    frames = [_read_history_frame(PRIMARY)]
+    for lp in LEGACY:
+        if lp and Path(lp).as_posix() != Path(PRIMARY).as_posix():
+            frames.append(_read_history_frame(lp))
+    # merge, drop dupes on trade_id+exit_time (tweak if your schema differs)
+    frames = [f for f in frames if not f.empty]
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    for col in ("trade_id", "exit_time"):
+        if col not in df.columns:
+            df[col] = ""
+    df = df.drop_duplicates(subset=["trade_id","exit_time"], keep="last")
+    if "timestamp" in df.columns:
+        df = df.sort_values("timestamp")
+    return df.reset_index(drop=True)
 
 # Import risk metrics from trade_utils for historical risk analysis
 try:
@@ -121,7 +180,6 @@ except Exception:
 from trade_storage import (
     load_active_trades,
     log_trade_result,
-    load_trade_history_df,
     TRADE_HISTORY_FILE,
     ACTIVE_TRADES_FILE,
 )
@@ -446,9 +504,18 @@ def render_live_tab() -> None:
     else:
         st.info("No active trades found.")
     # Load trade history and compute summary statistics
-    hist_df = load_trade_history_df()
     st.subheader("📊 Historical Performance – Completed Trades")
-    if not hist_df.empty:
+    hist = load_trade_history_df()
+    st.caption(
+        f"Loaded {len(hist)} completed trades from "
+        f"{Path(PRIMARY).as_posix()} and {sum(1 for p in LEGACY if p)} fallback file(s)."
+    )
+
+    if hist.empty:
+        st.info("No completed trades logged yet.")
+    else:
+        st.dataframe(hist.tail(20), use_container_width=True)
+        hist_df = hist.copy()
         # Ensure date columns are parsed with timezone awareness
         for col in ["entry_time", "exit_time"]:
             if col in hist_df.columns:
@@ -892,10 +959,6 @@ def render_live_tab() -> None:
             "trade_history.csv",
             "text/csv",
         )
-    else:
-        st.info("No completed trades logged yet.")
-
-
 def render_backtest_tab() -> None:
     """Upload a CSV and visualise backtest or price-based results."""
     st.subheader("Backtest Trade Log")
