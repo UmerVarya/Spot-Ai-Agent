@@ -22,10 +22,11 @@ def test_trade_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(completed_path))
     monkeypatch.setattr(trade_storage.os.path, "exists", lambda p: True)
     monkeypatch.setattr(trade_storage.os.path, "getsize", lambda p: 1)
-    captured = {}
+    captured = {"paths": []}
     def fake_read_csv(path, *args, **kwargs):
-        captured["path"] = path
+        captured["paths"].append(path)
         return pd.DataFrame()
     monkeypatch.setattr(trade_storage.pd, "read_csv", fake_read_csv)
     trade_storage.load_trade_history_df()
-    assert captured["path"] == str(completed_path)
+    assert captured["paths"]
+    assert captured["paths"][0] == str(completed_path)
