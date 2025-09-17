@@ -647,7 +647,8 @@ def render_live_tab() -> None:
         def _to_sign_series(direction, index):
             m = pd.Series(direction)
             m.index = index
-            sign = m.map({"long": 1, "short": -1}).fillna(0).astype(float)
+            normalized = m.astype("string").str.lower().str.strip()
+            sign = normalized.map({"long": 1, "short": -1}).fillna(0).astype(float)
             return sign
 
         idx = hist_df.index if "hist_df" in locals() else None
