@@ -95,13 +95,53 @@ def _read_history_frame(path: str) -> pd.DataFrame:
         df["outcome"] = df["outcome"].astype(str).str.upper()
     # keep only the columns we actually use in charts/tables (optional but safer)
     preferred = [
-        "trade_id","timestamp","symbol","direction","entry_time","exit_time",
-        "entry_price","exit_price","size","notional","fees","pnl","pnl_pct",
-        "outcome","outcome_desc","strategy","session","confidence","score","pattern"
+        "trade_id",
+        "timestamp",
+        "symbol",
+        "direction",
+        "entry_time",
+        "exit_time",
+        "entry",
+        "entry_price",
+        "exit",
+        "exit_price",
+        "size",
+        "notional",
+        "fees",
+        "slippage",
+        "pnl",
+        "pnl_pct",
+        "win",
+        "size_tp1",
+        "notional_tp1",
+        "pnl_tp1",
+        "size_tp2",
+        "notional_tp2",
+        "pnl_tp2",
+        "outcome",
+        "outcome_desc",
+        "strategy",
+        "session",
+        "confidence",
+        "btc_dominance",
+        "fear_greed",
+        "sentiment_bias",
+        "sentiment_confidence",
+        "score",
+        "pattern",
+        "narrative",
+        "llm_decision",
+        "llm_confidence",
+        "llm_error",
+        "volatility",
+        "htf_trend",
+        "order_imbalance",
+        "macro_indicator",
     ]
-    keep = [c for c in preferred if c in df.columns]
-    if keep:
-        df = df[keep]
+    ordered_cols = [c for c in preferred if c in df.columns]
+    if ordered_cols:
+        remainder = [c for c in df.columns if c not in ordered_cols]
+        df = df[ordered_cols + remainder]
     return df
 
 @st.cache_data(ttl=30)
@@ -293,8 +333,9 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     Returns ``None`` if mandatory fields are missing or a live price
     cannot be retrieved.
     """
-    entry = data.get("entry")
-    direction = data.get("direction")
+    entry = data.get("entry", data.get("entry_price"))
+    direction_raw = data.get("direction")
+    direction = str(direction_raw).lower() if direction_raw is not None else None
     sl = data.get("sl")
     tp1 = data.get("tp1")
     tp2 = data.get("tp2")
@@ -324,7 +365,8 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
         qty = size_val
         notional = entry_price * size_val
     # Compute unrealised PnL in dollars and percent
-    if direction == "long":
+    is_short = direction == "short"
+    if not is_short:
         pnl_dollars = (current_price - entry_price) * qty
     else:
         pnl_dollars = (entry_price - current_price) * qty
@@ -364,7 +406,7 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     status_str = " | ".join(status_flags) if status_flags else "Running"
     return {
         "Symbol": symbol,
-        "Direction": direction,
+        "Direction": direction_raw if direction_raw is not None else ("short" if is_short else "long"),
         "Entry": round(entry_price, 4),
         "Price": round(current_price, 4),
         "SL": round(sl, 4) if sl else None,
@@ -486,7 +528,11 @@ def render_live_tab() -> None:
             trade_info = next(
                 (t for t in trades if t.get("symbol") == selected_symbol), {}
             )
-            entry_val = float(trade_info.get("entry", 0))
+            entry_source = trade_info.get("entry") or trade_info.get("entry_price")
+            try:
+                entry_val = float(entry_source)
+            except Exception:
+                entry_val = 0.0
             levels = {
                 "Entry": entry_val,
                 "SL": trade_info.get("sl"),
@@ -531,6 +577,8 @@ def render_live_tab() -> None:
     else:
         st.dataframe(hist.tail(20), use_container_width=True)
         hist_df = hist.copy()
+        entry_col = next((c for c in ("entry", "entry_price") if c in hist_df.columns), None)
+        exit_col = next((c for c in ("exit", "exit_price") if c in hist_df.columns), None)
         # Ensure date columns are parsed with timezone awareness
         for col in ["entry_time", "exit_time"]:
             if col in hist_df.columns:
@@ -539,28 +587,29 @@ def render_live_tab() -> None:
         if "size" not in hist_df.columns and "position_size" in hist_df.columns:
             hist_df["size"] = hist_df["position_size"].astype(float)
         # Derive notional column if missing
-        if "notional" not in hist_df.columns and {"size", "entry"}.issubset(
-            hist_df.columns
-        ):
+        if "notional" not in hist_df.columns and entry_col and "size" in hist_df.columns:
+            size_numeric = pd.to_numeric(hist_df["size"], errors="coerce")
             if SIZE_AS_NOTIONAL:
-                hist_df["notional"] = pd.to_numeric(hist_df["size"], errors="coerce")
+                hist_df["notional"] = size_numeric
             else:
-                hist_df["notional"] = pd.to_numeric(
-                    hist_df["entry"], errors="coerce"
-                ) * pd.to_numeric(hist_df["size"], errors="coerce")
+                entry_numeric = pd.to_numeric(hist_df[entry_col], errors="coerce")
+                hist_df["notional"] = entry_numeric * size_numeric
         # Compute PnL absolute and percent
         if "direction" in hist_df.columns:
             directions = hist_df["direction"].astype(str)
         else:
             directions = pd.Series(["long"] * len(hist_df), index=hist_df.index)
-        entries = numcol(hist_df, "entry", default=0.0)
-        if "exit" in hist_df.columns:
-            exits = numcol(hist_df, "exit")
+        if entry_col:
+            entries = numcol(hist_df, entry_col, default=0.0)
         else:
-            exits = numcol(hist_df, "exit_price")
+            entries = pd.Series(0.0, index=hist_df.index)
+        if exit_col:
+            exits = numcol(hist_df, exit_col)
+        else:
+            exits = pd.Series(0.0, index=hist_df.index)
         raw_sizes = numcol(hist_df, "size", default=0.0).fillna(0)
         if SIZE_AS_NOTIONAL:
-            entry_for_qty = numcol(hist_df, "entry")
+            entry_for_qty = numcol(hist_df, entry_col, default=np.nan) if entry_col else pd.Series(np.nan, index=hist_df.index)
             entry_for_qty = entry_for_qty.mask(entry_for_qty == 0)
             if "notional" in hist_df.columns:
                 notional_for_qty = numcol(hist_df, "notional")
@@ -624,7 +673,11 @@ def render_live_tab() -> None:
                 0.0,
             )
         else:
-            e = pd.to_numeric(pd.Series(entries), errors="coerce").fillna(0.0).reset_index(drop=True)
+            e = (
+                pd.to_numeric(pd.Series(entries), errors="coerce")
+                .fillna(0.0)
+                .reset_index(drop=True)
+            )
             s = pd.to_numeric(pd.Series(sizes), errors="coerce").fillna(0.0).reset_index(drop=True)
             pnl_net_series = pd.to_numeric(pd.Series(pnl_net), errors="coerce").fillna(0.0).reset_index(drop=True)
             if SIZE_AS_NOTIONAL:
@@ -696,7 +749,10 @@ def render_live_tab() -> None:
         try:
             notional_series = numcol(hist_df, "notional")
             size_series = numcol(hist_df, "size", default=0.0)
-            entry_series = numcol(hist_df, "entry", default=0.0)
+            if entry_col:
+                entry_series = numcol(hist_df, entry_col, default=0.0)
+            else:
+                entry_series = pd.Series([0.0] * len(hist_df), index=hist_df.index)
             if SIZE_AS_NOTIONAL:
                 fallback_notional = size_series
             else:
@@ -897,7 +953,9 @@ def render_live_tab() -> None:
             "strategy",
             "session",
             "entry",
+            "entry_price",
             "exit",
+            "exit_price",
             "size",
             "notional",
             "fees",
@@ -924,7 +982,9 @@ def render_live_tab() -> None:
             "PnL (%)",
             "Duration (min)",
             "entry",
+            "entry_price",
             "exit",
+            "exit_price",
             "size",
             "fees",
             "slippage",
