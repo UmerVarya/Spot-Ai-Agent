@@ -35,6 +35,21 @@ try:
 except Exception:  # pragma: no cover
     alt = None
 
+
+def numcol(df: pd.DataFrame, name: str, default=np.nan) -> pd.Series:
+    """Return numeric Series for column `name` (or an aligned NaN Series if missing)."""
+
+    if name in df.columns:
+        col = df[name]
+        if isinstance(col, pd.DataFrame):  # duplicate headers
+            col = col.iloc[:, 0]
+        s = pd.to_numeric(col, errors="coerce")
+    else:
+        s = pd.Series(default, index=df.index, dtype="float64")
+    # sanitize weird values without using .replace on a scalar
+    s = s.where(np.isfinite(s))  # turn inf/-inf into NaN
+    return s
+
 # Ensure environment variables are loaded once
 import config
 
@@ -537,27 +552,21 @@ def render_live_tab() -> None:
         if "direction" in hist_df.columns:
             directions = hist_df["direction"].astype(str)
         else:
-            directions = pd.Series(["long"] * len(hist_df))
-        if "entry" in hist_df.columns:
-            entries = pd.to_numeric(hist_df["entry"], errors="coerce")
-        else:
-            entries = pd.Series([0] * len(hist_df), dtype=float)
+            directions = pd.Series(["long"] * len(hist_df), index=hist_df.index)
+        entries = numcol(hist_df, "entry", default=0.0)
         if "exit" in hist_df.columns:
-            exits = pd.to_numeric(hist_df["exit"], errors="coerce")
+            exits = numcol(hist_df, "exit")
         else:
-            exits = pd.to_numeric(hist_df.get("exit_price", pd.Series([np.nan] * len(hist_df))), errors="coerce")
-        if "size" in hist_df.columns:
-            raw_sizes = pd.to_numeric(hist_df["size"], errors="coerce").fillna(0)
-        else:
-            raw_sizes = pd.Series([0] * len(hist_df), dtype=float)
+            exits = numcol(hist_df, "exit_price")
+        raw_sizes = numcol(hist_df, "size", default=0.0).fillna(0)
         if SIZE_AS_NOTIONAL:
-            entry_for_qty = pd.to_numeric(hist_df.get("entry"), errors="coerce").replace(
-                0, np.nan
-            )
-            sizes = (
-                pd.to_numeric(hist_df.get("notional", raw_sizes), errors="coerce")
-                / entry_for_qty
-            ).fillna(0)
+            entry_for_qty = numcol(hist_df, "entry")
+            entry_for_qty = entry_for_qty.mask(entry_for_qty == 0)
+            if "notional" in hist_df.columns:
+                notional_for_qty = numcol(hist_df, "notional")
+            else:
+                notional_for_qty = raw_sizes
+            sizes = (notional_for_qty / entry_for_qty).fillna(0)
         else:
             sizes = raw_sizes
         def _numeric_series(df: pd.DataFrame, name: str) -> pd.Series:
@@ -607,9 +616,8 @@ def render_live_tab() -> None:
         pnl_net = pnl_abs - fees - slippage
         # Compute percentage based on net PnL and notional when available
         if "notional" in hist_df.columns:
-            notional_series = pd.to_numeric(
-                hist_df["notional"], errors="coerce"
-            ).replace(0, np.nan)
+            notional_series = numcol(hist_df, "notional")
+            notional_series = notional_series.mask(notional_series == 0)
             pnl_pct = np.where(
                 notional_series.notnull(),
                 pnl_net / notional_series * 100,
@@ -686,9 +694,9 @@ def render_live_tab() -> None:
         # depending on ``SIZE_AS_NOTIONAL``
         returns: np.ndarray
         try:
-            notional_series = pd.to_numeric(hist_df.get("notional"), errors="coerce")
-            size_series = pd.to_numeric(hist_df.get("size"), errors="coerce")
-            entry_series = pd.to_numeric(hist_df.get("entry"), errors="coerce")
+            notional_series = numcol(hist_df, "notional")
+            size_series = numcol(hist_df, "size", default=0.0)
+            entry_series = numcol(hist_df, "entry", default=0.0)
             if SIZE_AS_NOTIONAL:
                 fallback_notional = size_series
             else:
