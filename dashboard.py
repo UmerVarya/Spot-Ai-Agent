@@ -159,8 +159,15 @@ def load_trade_history_df() -> pd.DataFrame:
         if col not in df.columns:
             df[col] = ""
     df = df.drop_duplicates(subset=["trade_id","exit_time"], keep="last")
-    if "timestamp" in df.columns:
-        df = df.sort_values("timestamp")
+    try:
+        df = _deduplicate_history(df)
+    except Exception:
+        pass
+    if "outcome" in df.columns:
+        df = df[df["outcome"].astype(str).str.lower() != "open"]
+    sort_cols = [col for col in ("exit_time", "timestamp") if col in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols)
     return df.reset_index(drop=True)
 
 # Import risk metrics from trade_utils for historical risk analysis
@@ -237,6 +244,7 @@ from trade_storage import (
     log_trade_result,
     TRADE_HISTORY_FILE,
     ACTIVE_TRADES_FILE,
+    _deduplicate_history,
 )
 from notifier import REJECTED_TRADES_FILE
 from trade_logger import TRADE_LEARNING_LOG_FILE
@@ -568,7 +576,7 @@ def render_live_tab() -> None:
     st.subheader("📊 Historical Performance – Completed Trades")
     hist = load_trade_history_df()
     st.caption(
-        f"Loaded {len(hist)} completed trades from "
+        f"Loaded {len(hist)} completed trades (partial exits collapsed) from "
         f"{Path(PRIMARY).as_posix()} and {sum(1 for p in LEGACY if p)} fallback file(s)."
     )
 
@@ -651,47 +659,57 @@ def render_live_tab() -> None:
             sign = normalized.map({"long": 1, "short": -1}).fillna(0).astype(float)
             return sign
 
-        idx = hist_df.index if "hist_df" in locals() else None
-        entries_aln = _to_float_series(entries, idx)
-        exits_aln = _to_float_series(exits, idx)
-        sizes_aln = _to_float_series(sizes, idx)
-        sign_aln = _to_sign_series(directions, idx)
-
-        pnl_vals = (
-            (exits_aln.to_numpy() - entries_aln.to_numpy())
-            * sizes_aln.to_numpy()
-            * sign_aln.to_numpy()
-        )
-        pnl_abs = pd.Series(pnl_vals, index=idx)
-        pnl_net = pnl_abs - fees - slippage
-        # Compute percentage based on net PnL and notional when available
-        if "notional" in hist_df.columns:
-            notional_series = numcol(hist_df, "notional")
-            notional_series = notional_series.mask(notional_series == 0)
-            pnl_pct = np.where(
-                notional_series.notnull(),
-                pnl_net / notional_series * 100,
-                0.0,
-            )
+        idx = hist_df.index
+        pnl_source = None
+        for col in ("pnl", "net_pnl"):
+            if col in hist_df.columns:
+                candidate = numcol(hist_df, col)
+                if candidate.notna().any():
+                    pnl_source = candidate
+                    break
+        if pnl_source is not None:
+            pnl_net = pnl_source.fillna(0.0)
+            pnl_gross = pnl_net + fees + slippage
         else:
-            e = (
-                pd.to_numeric(pd.Series(entries), errors="coerce")
-                .fillna(0.0)
-                .reset_index(drop=True)
+            entries_aln = _to_float_series(entries, idx)
+            exits_aln = _to_float_series(exits, idx)
+            sizes_aln = _to_float_series(sizes, idx)
+            sign_aln = _to_sign_series(directions, idx)
+            pnl_vals = (
+                (exits_aln.to_numpy() - entries_aln.to_numpy())
+                * sizes_aln.to_numpy()
+                * sign_aln.to_numpy()
             )
-            s = pd.to_numeric(pd.Series(sizes), errors="coerce").fillna(0.0).reset_index(drop=True)
-            pnl_net_series = pd.to_numeric(pd.Series(pnl_net), errors="coerce").fillna(0.0).reset_index(drop=True)
+            pnl_gross = pd.Series(pnl_vals, index=idx)
+            pnl_net = pnl_gross - fees - slippage
+        pnl_pct_series: pd.Series | None = None
+        if "pnl_pct" in hist_df.columns:
+            candidate_pct = numcol(hist_df, "pnl_pct")
+            if candidate_pct.notna().any():
+                pnl_pct_series = candidate_pct
+        if pnl_pct_series is not None:
+            pnl_pct = pnl_pct_series.fillna(0.0)
+        elif "notional" in hist_df.columns:
+            notional_series = numcol(hist_df, "notional")
+            safe_notional = notional_series.replace({0: np.nan})
+            pnl_pct = pd.Series(0.0, index=idx, dtype=float)
+            mask = safe_notional.notna()
+            pnl_pct.loc[mask] = (
+                pnl_net.loc[mask] / safe_notional.loc[mask]
+            ) * 100
+            pnl_pct = pnl_pct.fillna(0.0)
+        else:
+            entries_numeric = pd.to_numeric(entries, errors="coerce").fillna(0.0)
+            sizes_numeric = pd.to_numeric(sizes, errors="coerce").fillna(0.0)
+            pnl_numeric = pd.to_numeric(pnl_net, errors="coerce").fillna(0.0)
             if SIZE_AS_NOTIONAL:
-                notional_vals = s
+                notional_vals = sizes_numeric
             else:
-                notional_vals = e * s
-            mask_nonzero = notional_vals != 0
-            pnl_pct = np.where(
-                mask_nonzero,
-                pnl_net_series / notional_vals * 100,
-                0,
-            )
-        hist_df["PnL ($)"] = pnl_abs
+                notional_vals = entries_numeric * sizes_numeric
+            pnl_pct = pd.Series(0.0, index=idx, dtype=float)
+            mask = notional_vals != 0
+            pnl_pct.loc[mask] = (pnl_numeric.loc[mask] / notional_vals.loc[mask]) * 100
+        hist_df["PnL ($)"] = pnl_gross
         hist_df["PnL (net $)"] = pnl_net
         hist_df["PnL (%)"] = pnl_pct
         # Compute duration in minutes
@@ -710,7 +728,7 @@ def render_live_tab() -> None:
         wins = (hist_df["PnL (net $)"] > 0).sum()
         losses = (hist_df["PnL (net $)"] < 0).sum()
         win_loss_ratio = wins / losses if losses > 0 else float("inf")
-        total_gross = pnl_abs.sum()
+        total_gross = pnl_gross.sum()
         total_net = pnl_net.sum()
         win_rate = wins / total_trades * 100 if total_trades else 0.0
         avg_trade_pnl = total_net / total_trades if total_trades else 0.0
