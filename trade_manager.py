@@ -108,6 +108,33 @@ def _update_stop_loss(trade: dict, new_sl: float) -> None:
     )
 
 
+def _persist_active_snapshot(
+    updated_trades: List[dict],
+    active_trades: List[dict],
+    index: int,
+    *,
+    include_current: bool = True,
+) -> None:
+    """Persist a best-effort snapshot of active trades immediately.
+
+    ``manage_trades`` normally batches calls to :func:`save_active_trades`
+    until the end of the loop.  If the process crashes after a trade result
+    has been written to the history log but before the batch save completes,
+    the on-disk active trades JSON can become stale.  To reduce that window we
+    flush the current in-memory view whenever a trade mutates or exits.
+    """
+
+    try:
+        snapshot: List[dict] = list(updated_trades)
+        if include_current and 0 <= index < len(active_trades):
+            snapshot.append(active_trades[index])
+        if index + 1 < len(active_trades):
+            snapshot.extend(active_trades[index + 1 :])
+        save_active_trades([trade for trade in snapshot if trade is not None])
+    except Exception:
+        logger.exception("Failed to persist active trades snapshot")
+
+
 def create_new_trade(trade: dict) -> bool:
     """Add a new trade to persistent storage if not already active.
 
@@ -194,7 +221,7 @@ def manage_trades() -> None:
     """Iterate over active trades and update or close them."""
     active_trades = load_active_trades()
     updated_trades: List[dict] = []
-    for trade in active_trades:
+    for index, trade in enumerate(active_trades):
         symbol = trade.get("symbol")
         # Ensure original size (quantity) is tracked for partial profit-taking
         if "initial_size" not in trade:
@@ -267,6 +294,9 @@ def manage_trades() -> None:
                 fees=fees,
                 slippage=slippage,
             )
+            _persist_active_snapshot(
+                updated_trades, active_trades, index, include_current=False
+            )
             _update_rl(trade, current_price)
             send_email(f" Time Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
             logger.debug("%s actions: %s", symbol, actions)
@@ -296,6 +326,9 @@ def manage_trades() -> None:
                 exit_time=trade['exit_time'],
                 fees=fees,
                 slippage=slippage,
+            )
+            _persist_active_snapshot(
+                updated_trades, active_trades, index, include_current=False
             )
             _update_rl(trade, current_price)
             send_email(f" Early Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
@@ -353,16 +386,21 @@ def manage_trades() -> None:
                     fees=fees,
                     slippage=slippage_amt,
                 )
-                send_email(f"✅ TP1 Partial: {symbol}", f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                 remaining_qty = qty - sell_qty
                 trade['position_size'] = remaining_qty
                 trade['size'] = remaining_qty * entry
+                _persist_active_snapshot(updated_trades, active_trades, index)
                 break_even_price = max(entry, trade.get('sl', entry))
                 _update_stop_loss(trade, break_even_price)
+                _persist_active_snapshot(updated_trades, active_trades, index)
                 logger.info(
                     "%s hit TP1 — sold 50%% and moved SL to Break Even (%s)",
                     symbol,
                     break_even_price,
+                )
+                send_email(
+                    f"✅ TP1 Partial: {symbol}",
+                    f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
                 )
                 actions.append("tp1_partial")
 
@@ -390,18 +428,24 @@ def manage_trades() -> None:
                     fees=fees,
                     slippage=slippage_amt,
                 )
-                send_email(f"✅ TP2 Partial: {symbol}", f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                 remaining_qty = qty - sell_qty
                 trade['position_size'] = remaining_qty
                 trade['size'] = remaining_qty * entry
+                _persist_active_snapshot(updated_trades, active_trades, index)
                 _update_stop_loss(trade, tp1)
+                _persist_active_snapshot(updated_trades, active_trades, index)
                 logger.info("%s hit TP2 — sold 30% and moved SL to TP1", symbol)
+                send_email(
+                    f"✅ TP2 Partial: {symbol}",
+                    f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
+                )
                 actions.append("tp2_partial")
 
             if trade['status'].get('tp2') and not trade['status'].get('tp3') and recent_high >= tp3:
                 trade['status']['tp3'] = True
                 trade['profit_riding'] = True  # enable TP4 mode
                 _update_stop_loss(trade, tp2)
+                _persist_active_snapshot(updated_trades, active_trades, index)
                 logger.info("%s hit TP3 — Entering TP4 Profit Riding Mode", symbol)
                 send_email(f"✅ TP3 Hit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                 actions.append("tp3_hit")
@@ -427,6 +471,9 @@ def manage_trades() -> None:
                     fees=fees,
                     slippage=slippage_amt,
                 )
+                _persist_active_snapshot(
+                    updated_trades, active_trades, index, include_current=False
+                )
                 _update_rl(trade, sl)
                 send_email(f" Stop Loss Hit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
                 actions.append("stop_loss")
@@ -438,6 +485,7 @@ def manage_trades() -> None:
                 trail_sl = round(max(entry, current_price - atr * trail_multiplier), 6)
                 if trail_sl > trade['sl']:
                     _update_stop_loss(trade, trail_sl)
+                    _persist_active_snapshot(updated_trades, active_trades, index)
                     logger.info("%s TP1 trail: SL moved to %s", symbol, trail_sl)
                     actions.append("trail_sl")
             # TP4 profit riding logic
@@ -448,6 +496,7 @@ def manage_trades() -> None:
                     if not next_tp:
                         next_tp = current_price * (1 + trail_pct)
                         trade['next_trail_tp'] = next_tp
+                        _persist_active_snapshot(updated_trades, active_trades, index)
                     if recent_high >= next_tp:
                         qty = float(trade.get('position_size', 1))
                         sell_qty = qty * 0.1
@@ -469,17 +518,19 @@ def manage_trades() -> None:
                             fees=fees,
                             slippage=slippage_amt,
                         )
-                        send_email(
-                            f"✅ TP Trail: {symbol}",
-                            f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
-                        )
                         new_sl = max(trade.get('sl', 0), next_tp)
                         _update_stop_loss(trade, new_sl)
+                        _persist_active_snapshot(updated_trades, active_trades, index)
                         logger.info("%s TP Trail: SL moved to %s", symbol, new_sl)
                         remaining_qty = qty - sell_qty
                         trade['position_size'] = remaining_qty
                         trade['size'] = remaining_qty * entry
                         trade['next_trail_tp'] = next_tp * (1 + trail_pct)
+                        _persist_active_snapshot(updated_trades, active_trades, index)
+                        send_email(
+                            f"✅ TP Trail: {symbol}",
+                            f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
+                        )
 
                 adx_drop = adx < 20 and adx < adx_prev
                 macd_cross = macd_line_prev > macd_signal_prev and macd_line_last < macd_signal_last
@@ -502,6 +553,9 @@ def manage_trades() -> None:
                         fees=fees,
                         slippage=slippage_amt,
                     )
+                    _persist_active_snapshot(
+                        updated_trades, active_trades, index, include_current=False
+                    )
                     _update_rl(trade, current_price)
                     send_email(
                         f"✅ TP4 Exit: {symbol}",
@@ -514,6 +568,7 @@ def manage_trades() -> None:
                 trail_sl = round(current_price - atr * trail_multiplier, 6)
                 if trail_sl > trade['sl']:
                     _update_stop_loss(trade, trail_sl)
+                    _persist_active_snapshot(updated_trades, active_trades, index)
                     logger.info("%s TP4 ride: SL trailed to %s", symbol, trail_sl)
                     actions.append("tp4_trail_sl")
         # Add the trade back to the updated list if still active
