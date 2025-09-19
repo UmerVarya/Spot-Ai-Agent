@@ -685,9 +685,19 @@ def _read_history_frame(path: str) -> pd.DataFrame:
     return df
 
 
-def load_trade_history_df() -> pd.DataFrame:
+def load_trade_history_df(path: Optional[str] = None) -> pd.DataFrame:
     """Return historical trades as a DataFrame.
 
+    Parameters
+    ----------
+    path : str, optional
+        When provided, load data from this CSV path instead of the configured
+        ``TRADE_HISTORY_FILE`` (and legacy fallbacks).  Passing ``None``
+        preserves the original behaviour which also checks the optional
+        database cursor.
+
+    Notes
+    -----
     The loader is intentionally tolerant so that header or format changes do
     not silently discard valid rows.  Column names are normalised and mapped to
     a canonical set used throughout the dashboard.  Timestamp fields are parsed
@@ -701,7 +711,8 @@ def load_trade_history_df() -> pd.DataFrame:
     # ------------------------------------------------------------------
     # Load from database or CSV
     # ------------------------------------------------------------------
-    if DB_CURSOR:
+    use_db = path is None and DB_CURSOR
+    if use_db:
         try:
             DB_CURSOR.execute("SELECT data FROM trade_log ORDER BY id")
             rows = [row[0] for row in DB_CURSOR.fetchall()]
@@ -709,9 +720,12 @@ def load_trade_history_df() -> pd.DataFrame:
         except Exception as exc:  # pragma: no cover - diagnostic only
             logger.exception("Failed to load trade history from database: %s", exc)
     else:
-        candidate_paths = [TRADE_HISTORY_FILE]
-        if not _HISTORY_ENV_OVERRIDE:
-            candidate_paths.extend(_LEGACY_HISTORY_FILES)
+        if path:
+            candidate_paths = [path]
+        else:
+            candidate_paths = [TRADE_HISTORY_FILE]
+            if not _HISTORY_ENV_OVERRIDE:
+                candidate_paths.extend(_LEGACY_HISTORY_FILES)
 
         frames = []
         seen = set()
@@ -728,6 +742,8 @@ def load_trade_history_df() -> pd.DataFrame:
 
         if frames:
             df = pd.concat(frames, ignore_index=True, sort=False)
+        elif path:
+            df = pd.DataFrame()
         else:
             df = pd.DataFrame(
                 columns=[
