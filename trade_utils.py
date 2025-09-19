@@ -10,7 +10,11 @@ from log_utils import setup_logger
 
 from weight_optimizer import optimize_indicator_weights
 
-from trade_storage import TRADE_HISTORY_FILE  # shared trade log path
+from trade_storage import (
+    TRADE_HISTORY_FILE,
+    load_trade_history_df,
+    load_trade_history_from_path,
+)  # shared trade log path
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
 from multi_timeframe import (
@@ -560,32 +564,108 @@ def get_top_symbols(limit: int = 30) -> list:
     symbols = [x['symbol'] for x in sorted_tickers if x['symbol'].endswith("USDT") and not x['symbol'].endswith("BUSD")]
     return symbols[:limit]
 
+def _load_history_for_metrics(log_file: str) -> pd.DataFrame:
+    """Helper to load trade history with canonical column names."""
+
+    if log_file == TRADE_HISTORY_FILE:
+        return load_trade_history_df()
+    if not os.path.exists(log_file):
+        return pd.DataFrame()
+    header_line = ""
+    try:
+        with open(log_file, "r", encoding="utf-8") as fh:
+            header_line = fh.readline()
+    except OSError:
+        return pd.DataFrame()
+
+    header_lower = header_line.strip().lower()
+    has_header = bool(header_lower) and any(
+        token in header_lower for token in ("trade_id", "timestamp", "symbol", "entry")
+    )
+
+    if has_header:
+        df = load_trade_history_from_path(log_file)
+        if not df.empty and {"entry", "exit"}.issubset(df.columns):
+            return df
+
+    fallback_cols = [
+        "timestamp",
+        "symbol",
+        "direction",
+        "entry",
+        "exit",
+        "outcome",
+        "btc_d",
+        "fg",
+        "sent_conf",
+        "sent_bias",
+        "score",
+    ]
+    try:
+        df = pd.read_csv(
+            log_file,
+            header=None,
+            names=fallback_cols,
+            encoding="utf-8",
+        )
+    except Exception:
+        return pd.DataFrame()
+
+    rename_map = {
+        "btc_d": "btc_dominance",
+        "fg": "fear_greed",
+        "sent_conf": "sentiment_confidence",
+        "sent_bias": "sentiment_bias",
+    }
+    return df.rename(columns=rename_map)
+
+
 def compute_performance_metrics(log_file: str = TRADE_HISTORY_FILE, lookback: int = 100) -> dict:
     """Return risk-adjusted performance metrics from the trade log."""
-    if not os.path.exists(log_file):
+
+    df = _load_history_for_metrics(log_file)
+    if df.empty:
         return {}
-    try:
-        cols = [
-            "timestamp", "symbol", "direction", "entry", "exit", "outcome",
-            "btc_d", "fg", "sent_conf", "sent_bias", "score",
-        ]
-        df = pd.read_csv(log_file, names=cols, encoding="utf-8")
-        df = df.tail(lookback)
-        df["entry"] = pd.to_numeric(df["entry"], errors="coerce")
-        df["exit"] = pd.to_numeric(df["exit"], errors="coerce")
-        df = df.dropna(subset=["entry", "exit"])
-        df["ret"] = (df["exit"] - df["entry"]) / df["entry"]
-        rets = df["ret"].tolist()
-        equity_curve = (1 + df["ret"]).cumprod()
-        return {
-            "sharpe": sharpe_ratio(rets),
-            "calmar": calmar_ratio(rets),
-            "max_drawdown": max_drawdown(equity_curve),
-            "var": value_at_risk(rets),
-            "es": expected_shortfall(rets),
-        }
-    except Exception:
+
+    df = df.tail(lookback)
+    if df.empty:
         return {}
+
+    df = df.assign(
+        _entry=pd.to_numeric(df.get("entry"), errors="coerce"),
+        _exit=pd.to_numeric(df.get("exit"), errors="coerce"),
+    )
+    directions = df.get("direction", pd.Series("long", index=df.index))
+    directions = directions.fillna("long").astype(str).str.lower()
+
+    mask = df["_entry"].notna() & df["_exit"].notna() & df["_entry"].ne(0)
+    if not mask.any():
+        return {}
+
+    entry_vals = df.loc[mask, "_entry"].to_numpy()
+    exit_vals = df.loc[mask, "_exit"].to_numpy()
+    dir_vals = directions.loc[mask].to_numpy()
+
+    returns = np.where(
+        dir_vals == "short",
+        (entry_vals - exit_vals) / entry_vals,
+        (exit_vals - entry_vals) / entry_vals,
+    )
+
+    if returns.size == 0:
+        return {}
+
+    returns_series = pd.Series(returns)
+    equity_curve = (1 + returns_series).cumprod().tolist()
+    rets = returns_series.tolist()
+
+    return {
+        "sharpe": sharpe_ratio(rets),
+        "calmar": calmar_ratio(rets),
+        "max_drawdown": max_drawdown(equity_curve),
+        "var": value_at_risk(rets),
+        "es": expected_shortfall(rets),
+    }
 
 
 def get_last_trade_outcome(log_file: str = TRADE_HISTORY_FILE) -> str | None:
@@ -596,23 +676,32 @@ def get_last_trade_outcome(log_file: str = TRADE_HISTORY_FILE) -> str | None:
     missing or empty, ``None`` is returned so that callers can fall back to a
     neutral state.
     """
-    if not os.path.exists(log_file):
+    df = _load_history_for_metrics(log_file)
+    if df.empty:
         return None
-    try:
-        df = pd.read_csv(log_file, names=[
-            "timestamp", "symbol", "direction", "entry", "exit", "outcome",
-            "btc_d", "fg", "sent_conf", "sent_bias", "score",
-        ], encoding="utf-8")
-        if df.empty:
-            return None
-        last = df.tail(1)
-        entry = pd.to_numeric(last["entry"], errors="coerce").iloc[0]
-        exit_price = pd.to_numeric(last["exit"], errors="coerce").iloc[0]
-        if pd.isna(entry) or pd.isna(exit_price):
-            return None
-        return "win" if exit_price > entry else "loss"
-    except Exception:
+
+    df = df.assign(
+        _entry=pd.to_numeric(df.get("entry"), errors="coerce"),
+        _exit=pd.to_numeric(df.get("exit"), errors="coerce"),
+    )
+
+    mask = df["_entry"].notna() & df["_exit"].notna() & df["_entry"].ne(0)
+    df = df[mask]
+    if df.empty:
         return None
+
+    sort_cols = [col for col in ("exit_time", "timestamp") if col in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols)
+
+    last = df.iloc[-1]
+    entry = float(last["_entry"])
+    exit_price = float(last["_exit"])
+    direction = str(last.get("direction", "long")).lower()
+
+    if direction == "short":
+        return "win" if exit_price < entry else "loss"
+    return "win" if exit_price > entry else "loss"
 
 def get_rl_state(vol_percentile: float | None, log_file: str = TRADE_HISTORY_FILE) -> str:
     """Construct a compound RL state from last outcome and volatility.

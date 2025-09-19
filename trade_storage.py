@@ -641,6 +641,30 @@ def _read_history_frame(path: str) -> pd.DataFrame:
         logger.exception("Failed to read trade log file %s: %s", path, exc)
         return pd.DataFrame()
 
+    if df.empty:
+        try:
+            try:  # pandas >= 1.3
+                df = pd.read_csv(
+                    path,
+                    header=None,
+                    names=TRADE_HISTORY_HEADERS,
+                    encoding="utf-8",
+                    on_bad_lines="skip",
+                    engine="python",
+                )
+            except TypeError:  # pragma: no cover - older pandas
+                df = pd.read_csv(
+                    path,
+                    header=None,
+                    names=TRADE_HISTORY_HEADERS,
+                    encoding="utf-8",
+                    engine="python",
+                    error_bad_lines=False,
+                    warn_bad_lines=False,
+                )
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            logger.exception("Headerless CSV parsing failed for %s: %s", path, exc)
+
     if df.empty or not any(
         any(key in str(col).lower() for key in _EXPECTED_HISTORY_KEYS)
         for col in df.columns
@@ -683,6 +707,136 @@ def _read_history_frame(path: str) -> pd.DataFrame:
                 logger.exception("Failed to recover trade log file %s: %s", path, exc)
 
     return df
+
+
+def _normalise_history(df: pd.DataFrame) -> pd.DataFrame:
+    """Return ``df`` with canonicalised headers and derived fields."""
+
+    if df.empty:
+        return df
+
+    def _norm(col: str) -> str:
+        return re.sub(r"[\s_]+", "", str(col).strip().lower())
+
+    synonyms = {
+        "tradeid": "trade_id",
+        "time": "timestamp",
+        "timestamp": "timestamp",
+        "symbol": "symbol",
+        "pair": "symbol",
+        "ticker": "symbol",
+        "entryprice": "entry",
+        "entry": "entry",
+        "exitprice": "exit",
+        "exit": "exit",
+        "positionsize": "position_size",
+        "position_size": "position_size",
+        "qty": "position_size",
+        "quantity": "position_size",
+        "usd_size": "size",
+        "side": "direction",
+        "position": "direction",
+        "direction": "direction",
+        "tradeoutcome": "outcome",
+        "result": "outcome",
+        "traderesult": "outcome",
+        "entrytimestamp": "entry_time",
+        "entrytime": "entry_time",
+        "exittimestamp": "exit_time",
+        "exittime": "exit_time",
+        "pnlusd": "pnl",
+        "pnl$": "pnl",
+        "netpnl": "net_pnl",
+        "pnl": "pnl",
+        "pnlpercent": "pnl_pct",
+        "pnl%": "pnl_pct",
+        "pnlpct": "pnl_pct",
+        "notionalvalue": "notional",
+        "notionalusd": "notional",
+        "notional": "notional",
+    }
+
+    rename_map = {}
+    for col in df.columns:
+        key = _norm(col)
+        if key in synonyms:
+            rename_map[col] = synonyms[key]
+        else:
+            rename_map[col] = str(col).strip().lower().replace(" ", "_")
+    df = df.rename(columns=rename_map)
+
+    time_cols = [c for c in ["timestamp", "entry_time", "exit_time"] if c in df.columns]
+    for col in time_cols:
+        df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+    if time_cols:
+        time_mask = pd.Series(False, index=df.index)
+        for col in time_cols:
+            time_mask |= df[col].notna()
+        dropped = len(df) - int(time_mask.sum())
+        if dropped:
+            logger.warning("Dropped %d rows with unparseable timestamps", dropped)
+        df = df[time_mask]
+
+    if "symbol" in df.columns:
+        symbol_mask = df["symbol"].astype(str).str.match(r"^[A-Za-z0-9_]+$", na=False)
+    else:
+        symbol_mask = pd.Series([True] * len(df))
+
+    if "direction" in df.columns:
+        dir_series = df["direction"].astype(str).str.lower()
+        dir_series = dir_series.replace({"buy": "long", "sell": "short"})
+        df["direction"] = dir_series
+        direction_mask = dir_series.isin(["long", "short"])
+    else:
+        direction_mask = pd.Series([True] * len(df))
+
+    mask = symbol_mask & direction_mask
+    dropped = len(df) - int(mask.sum())
+    if dropped:
+        logger.warning("Dropped %d malformed trade rows", dropped)
+    df = df[mask]
+
+    if "notional" not in df.columns and {"entry", "size"}.issubset(df.columns):
+        if SIZE_AS_NOTIONAL:
+            df["notional"] = pd.to_numeric(df["size"], errors="coerce")
+        else:
+            df["notional"] = pd.to_numeric(df["entry"], errors="coerce") * pd.to_numeric(
+                df["size"], errors="coerce"
+            )
+
+    df = _deduplicate_history(df)
+
+    if not df.empty and "outcome" in df.columns:
+        df = df[df["outcome"].astype(str).str.lower() != "open"]
+
+    if "pnl_pct" not in df.columns:
+        pnl_source = None
+        if {"net_pnl", "notional"}.issubset(df.columns):
+            pnl_source = df["net_pnl"]
+        elif {"pnl", "notional"}.issubset(df.columns):
+            pnl_source = df["pnl"]
+        if pnl_source is not None:
+            notional = pd.to_numeric(df["notional"], errors="coerce").replace(0, pd.NA)
+            df["pnl_pct"] = (
+                pd.to_numeric(pnl_source, errors="coerce") / notional
+            ) * 100
+    df["pnl_pct"] = pd.to_numeric(df.get("pnl_pct"), errors="coerce")
+    if "pnl_pct" in df.columns:
+        df["PnL (%)"] = df["pnl_pct"]
+
+    if "win" in df.columns:
+        df["win"] = df["win"].astype(str).str.lower().isin(["true", "1", "yes", "y"])
+    elif "pnl" in df.columns:
+        df["win"] = pd.to_numeric(df["pnl"], errors="coerce") > 0
+
+    if "outcome_desc" in df.columns:
+        df = df.rename(columns={"outcome_desc": "Outcome Description"})
+    elif "outcome" in df.columns:
+        df["Outcome Description"] = df["outcome"].map(
+            lambda x: OUTCOME_DESCRIPTIONS.get(str(x), str(x))
+        )
+
+    return df.reset_index(drop=True)
 
 
 def load_trade_history_df() -> pd.DataFrame:
@@ -746,153 +900,16 @@ def load_trade_history_df() -> pd.DataFrame:
     if df.empty:
         return df
 
-    # ------------------------------------------------------------------
-    # Normalise headers
-    # ------------------------------------------------------------------
-    def _norm(col: str) -> str:
-        return re.sub(r"[\s_]+", "", str(col).strip().lower())
+    return _normalise_history(df)
 
-    # Map of normalised legacy names to canonical forms
-    synonyms = {
-        "tradeid": "trade_id",
-        "time": "timestamp",
-        "timestamp": "timestamp",
-        "symbol": "symbol",
-        "pair": "symbol",
-        "ticker": "symbol",
-        "entryprice": "entry",
-        "entry": "entry",
-        "exitprice": "exit",
-        "exit": "exit",
-        "positionsize": "position_size",
-        "position_size": "position_size",
-        "qty": "position_size",
-        "quantity": "position_size",
-        "usd_size": "size",
-        "side": "direction",
-        "position": "direction",
-        "direction": "direction",
-        "tradeoutcome": "outcome",
-        "result": "outcome",
-        "traderesult": "outcome",
-        "entrytimestamp": "entry_time",
-        "entrytime": "entry_time",
-        "exittimestamp": "exit_time",
-        "exittime": "exit_time",
-        "pnlusd": "pnl",
-        "pnl$": "pnl",
-        "netpnl": "net_pnl",
-        "pnl": "pnl",
-        "pnlpercent": "pnl_pct",
-        "pnl%": "pnl_pct",
-        "pnlpct": "pnl_pct",
-        "notionalvalue": "notional",
-        "notionalusd": "notional",
-        "notional": "notional",
-    }
 
-    rename_map = {}
-    for col in df.columns:
-        key = _norm(col)
-        if key in synonyms:
-            rename_map[col] = synonyms[key]
-        else:
-            rename_map[col] = str(col).strip().lower().replace(" ", "_")
-    df = df.rename(columns=rename_map)
+def load_trade_history_from_path(path: str) -> pd.DataFrame:
+    """Load and normalise a trade history CSV from ``path``."""
 
-    # ------------------------------------------------------------------
-    # Parse timestamps and drop rows that cannot be parsed at all
-    # ------------------------------------------------------------------
-    time_cols = [c for c in ["timestamp", "entry_time", "exit_time"] if c in df.columns]
-    for col in time_cols:
-        df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
-    if time_cols:
-        time_mask = pd.Series(False, index=df.index)
-        for col in time_cols:
-            time_mask |= df[col].notna()
-        dropped = len(df) - int(time_mask.sum())
-        if dropped:
-            logger.warning("Dropped %d rows with unparseable timestamps", dropped)
-        df = df[time_mask]
-
-    # ------------------------------------------------------------------
-    # Validate symbol/direction but keep other rows intact
-    # ------------------------------------------------------------------
-    if "symbol" in df.columns:
-        symbol_mask = df["symbol"].astype(str).str.match(r"^[A-Za-z0-9_]+$", na=False)
-    else:
-        symbol_mask = pd.Series([True] * len(df))
-
-    if "direction" in df.columns:
-        dir_series = df["direction"].astype(str).str.lower()
-        dir_series = dir_series.replace({"buy": "long", "sell": "short"})
-        df["direction"] = dir_series
-        direction_mask = dir_series.isin(["long", "short"])
-    else:
-        direction_mask = pd.Series([True] * len(df))
-
-    mask = symbol_mask & direction_mask
-    dropped = len(df) - int(mask.sum())
-    if dropped:
-        logger.warning("Dropped %d malformed trade rows", dropped)
-    df = df[mask]
-
-    # ------------------------------------------------------------------
-    # Ensure notional column for backward compatibility
-    # ------------------------------------------------------------------
-    if "notional" not in df.columns and {"entry", "size"}.issubset(df.columns):
-        if SIZE_AS_NOTIONAL:
-            df["notional"] = pd.to_numeric(df["size"], errors="coerce")
-        else:
-            df["notional"] = pd.to_numeric(df["entry"], errors="coerce") * pd.to_numeric(
-                df["size"], errors="coerce"
-            )
-
-    # ------------------------------------------------------------------
-    # De-duplicate partial exits and filter out open trades
-    # ------------------------------------------------------------------
-    df = _deduplicate_history(df)
-
-    if not df.empty and "outcome" in df.columns:
-        df = df[df["outcome"].astype(str).str.lower() != "open"]
-
-    # ------------------------------------------------------------------
-    # Compute PnL percentage when possible
-    # ------------------------------------------------------------------
-    if "pnl_pct" not in df.columns:
-        pnl_source = None
-        if {"net_pnl", "notional"}.issubset(df.columns):
-            pnl_source = df["net_pnl"]
-        elif {"pnl", "notional"}.issubset(df.columns):
-            pnl_source = df["pnl"]
-        if pnl_source is not None:
-            notional = pd.to_numeric(df["notional"], errors="coerce").replace(0, pd.NA)
-            df["pnl_pct"] = (
-                pd.to_numeric(pnl_source, errors="coerce") / notional
-            ) * 100
-    df["pnl_pct"] = pd.to_numeric(df.get("pnl_pct"), errors="coerce")
-    if "pnl_pct" in df.columns:
-        df["PnL (%)"] = df["pnl_pct"]
-
-    # ------------------------------------------------------------------
-    # Determine win/loss classification
-    # ------------------------------------------------------------------
-    if "win" in df.columns:
-        df["win"] = df["win"].astype(str).str.lower().isin(["true", "1", "yes", "y"])
-    elif "pnl" in df.columns:
-        df["win"] = pd.to_numeric(df["pnl"], errors="coerce") > 0
-
-    # ------------------------------------------------------------------
-    # Ensure human readable outcome descriptions
-    # ------------------------------------------------------------------
-    if "outcome_desc" in df.columns:
-        df = df.rename(columns={"outcome_desc": "Outcome Description"})
-    elif "outcome" in df.columns:
-        df["Outcome Description"] = df["outcome"].map(
-            lambda x: OUTCOME_DESCRIPTIONS.get(str(x), str(x))
-        )
-
-    return df.reset_index(drop=True)
+    frame = _read_history_frame(path)
+    if frame.empty:
+        return frame
+    return _normalise_history(frame)
 
 
 def _maybe_send_llm_performance_email() -> None:
