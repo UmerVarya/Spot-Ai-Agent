@@ -10,7 +10,7 @@ from log_utils import setup_logger
 
 from weight_optimizer import optimize_indicator_weights
 
-from trade_storage import TRADE_HISTORY_FILE  # shared trade log path
+from trade_storage import TRADE_HISTORY_FILE, load_trade_history_df  # shared trade log path
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
 from multi_timeframe import (
@@ -560,31 +560,78 @@ def get_top_symbols(limit: int = 30) -> list:
     symbols = [x['symbol'] for x in sorted_tickers if x['symbol'].endswith("USDT") and not x['symbol'].endswith("BUSD")]
     return symbols[:limit]
 
+def _extract_trade_returns(df: pd.DataFrame) -> pd.Series:
+    """Return per-trade returns as decimal values."""
+    if df.empty:
+        return pd.Series(dtype=float)
+
+    if "pnl_pct" in df.columns:
+        returns = pd.to_numeric(df["pnl_pct"], errors="coerce") / 100.0
+    elif {"pnl", "notional"}.issubset(df.columns):
+        pnl = pd.to_numeric(df["pnl"], errors="coerce")
+        notional = pd.to_numeric(df["notional"], errors="coerce").replace(0, np.nan)
+        returns = pnl / notional
+    else:
+        entry = df.get("entry")
+        exit_price = df.get("exit")
+        if entry is None or exit_price is None:
+            return pd.Series(dtype=float)
+        entry = pd.to_numeric(entry, errors="coerce")
+        exit_price = pd.to_numeric(exit_price, errors="coerce")
+        direction = df.get("direction")
+        if direction is None:
+            direction = pd.Series("long", index=df.index)
+        else:
+            direction = direction.astype(str).str.lower()
+        returns = pd.Series(np.nan, index=df.index, dtype=float)
+        mask = entry.notna() & exit_price.notna() & (entry != 0)
+        returns.loc[mask] = (exit_price.loc[mask] - entry.loc[mask]) / entry.loc[mask]
+        short_mask = mask & direction.eq("short")
+        returns.loc[short_mask] = (entry.loc[short_mask] - exit_price.loc[short_mask]) / entry.loc[short_mask]
+
+    returns = returns.astype(float).replace([np.inf, -np.inf], np.nan).dropna()
+    return returns
+
+
 def compute_performance_metrics(log_file: str = TRADE_HISTORY_FILE, lookback: int = 100) -> dict:
     """Return risk-adjusted performance metrics from the trade log."""
-    if not os.path.exists(log_file):
+
+    use_default_source = log_file == TRADE_HISTORY_FILE
+    if not use_default_source and (not log_file or not os.path.exists(log_file)):
         return {}
+
     try:
-        cols = [
-            "timestamp", "symbol", "direction", "entry", "exit", "outcome",
-            "btc_d", "fg", "sent_conf", "sent_bias", "score",
-        ]
-        df = pd.read_csv(log_file, names=cols, encoding="utf-8")
-        df = df.tail(lookback)
-        df["entry"] = pd.to_numeric(df["entry"], errors="coerce")
-        df["exit"] = pd.to_numeric(df["exit"], errors="coerce")
-        df = df.dropna(subset=["entry", "exit"])
-        df["ret"] = (df["exit"] - df["entry"]) / df["entry"]
-        rets = df["ret"].tolist()
-        equity_curve = (1 + df["ret"]).cumprod()
-        return {
-            "sharpe": sharpe_ratio(rets),
-            "calmar": calmar_ratio(rets),
+        if use_default_source:
+            df = load_trade_history_df()
+        else:
+            df = load_trade_history_df(log_file)
+
+        if df.empty:
+            return {}
+
+        sort_cols = [col for col in ("exit_time", "timestamp") if col in df.columns]
+        if sort_cols:
+            df = df.sort_values(sort_cols)
+        if lookback and lookback > 0:
+            df = df.tail(lookback)
+
+        returns = _extract_trade_returns(df)
+        if returns.empty:
+            return {}
+
+        equity_curve = (1 + returns).cumprod()
+        metrics = {
+            "sharpe": sharpe_ratio(returns),
+            "calmar": calmar_ratio(returns),
             "max_drawdown": max_drawdown(equity_curve),
-            "var": value_at_risk(rets),
-            "es": expected_shortfall(rets),
+            "var": value_at_risk(returns),
+            "es": expected_shortfall(returns),
         }
-    except Exception:
+        return {key: float(value) for key, value in metrics.items()}
+    except Exception as exc:
+        logger.exception(
+            "Failed to compute performance metrics from %s: %s", log_file, exc
+        )
         return {}
 
 
