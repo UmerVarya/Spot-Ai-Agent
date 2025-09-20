@@ -972,9 +972,10 @@ def render_live_tab() -> None:
         ]
         for col in numeric_cols:
             if col in hist_display.columns:
-                hist_display[col] = pd.to_numeric(
-                    hist_display[col], errors="coerce"
-                ).round(2)
+                converted = pd.to_numeric(hist_display[col], errors="coerce")
+                if pd.api.types.is_bool_dtype(converted):
+                    converted = converted.astype(float)
+                hist_display[col] = converted.round(2)
         positive_labels = {
             outcome_descriptions[c]
             for c in profit_codes
