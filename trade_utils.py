@@ -646,17 +646,64 @@ def get_last_trade_outcome(log_file: str = TRADE_HISTORY_FILE) -> str | None:
     if not os.path.exists(log_file):
         return None
     try:
-        df = pd.read_csv(log_file, names=[
-            "timestamp", "symbol", "direction", "entry", "exit", "outcome",
-            "btc_d", "fg", "sent_conf", "sent_bias", "score",
-        ], encoding="utf-8")
-        if df.empty:
+        df = load_trade_history_df(log_file)
+    except Exception:
+        df = pd.DataFrame()
+    if df.empty:
+        try:
+            fallback = pd.read_csv(
+                log_file,
+                names=[
+                    "timestamp",
+                    "symbol",
+                    "direction",
+                    "entry",
+                    "exit",
+                    "outcome",
+                    "btc_d",
+                    "fg",
+                    "sent_conf",
+                    "sent_bias",
+                    "score",
+                ],
+                encoding="utf-8",
+            )
+        except Exception:
             return None
-        last = df.tail(1)
-        entry = pd.to_numeric(last["entry"], errors="coerce").iloc[0]
-        exit_price = pd.to_numeric(last["exit"], errors="coerce").iloc[0]
+        if fallback.empty:
+            return None
+        last = fallback.tail(1)
+        entry = pd.to_numeric(last.get("entry"), errors="coerce").iloc[0]
+        exit_price = pd.to_numeric(last.get("exit"), errors="coerce").iloc[0]
         if pd.isna(entry) or pd.isna(exit_price):
             return None
+        direction_series = last.get("direction")
+        direction = (
+            str(direction_series.iloc[0]).lower()
+            if direction_series is not None and not direction_series.empty
+            else "long"
+        )
+        if direction == "short":
+            return "win" if exit_price < entry else "loss"
+        return "win" if exit_price > entry else "loss"
+    try:
+        last = df.tail(1)
+        entry_series = last.get("entry", last.get("entry_price"))
+        exit_series = last.get("exit", last.get("exit_price"))
+        if entry_series is None or exit_series is None:
+            return None
+        entry = pd.to_numeric(entry_series, errors="coerce").iloc[0]
+        exit_price = pd.to_numeric(exit_series, errors="coerce").iloc[0]
+        if pd.isna(entry) or pd.isna(exit_price):
+            return None
+        direction_series = last.get("direction")
+        direction = (
+            str(direction_series.iloc[0]).lower()
+            if direction_series is not None and not direction_series.empty
+            else "long"
+        )
+        if direction == "short":
+            return "win" if exit_price < entry else "loss"
         return "win" if exit_price > entry else "loss"
     except Exception:
         return None

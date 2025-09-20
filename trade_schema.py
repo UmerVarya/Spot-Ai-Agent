@@ -1,0 +1,190 @@
+"""Utilities describing the canonical trade log schema.
+
+This module centralises the column ordering and alias handling for the
+trade history CSV produced by the agent. Historically each component
+(dashboard, storage, analytics) maintained its own ad-hoc list of
+columns and legacy aliases. When new fields were added to the log or
+renamed, those assumptions drifted apart which caused subtle bugs such
+as the dashboard looking for ``sent_conf`` while the logger emitted
+``sentiment_confidence``.
+
+By defining the schema in a single place the codebase can import the
+same constants and helper functions, reducing the likelihood of those
+mismatches. ``normalise_history_columns`` exposes the normalisation
+logic so that callers consistently map legacy headers onto the canonical
+names used throughout the project.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Dict, Iterable
+
+import pandas as pd
+
+# Canonical column order for the trade history CSV.  The list mirrors the
+# headers written by :func:`trade_storage.log_trade_result` and is reused by
+# the dashboard to display columns in a stable order.
+TRADE_HISTORY_COLUMNS = [
+    "trade_id",
+    "timestamp",
+    "symbol",
+    "direction",
+    "entry_time",
+    "exit_time",
+    "entry",
+    "exit",
+    "size",
+    "notional",
+    "fees",
+    "slippage",
+    "pnl",
+    "pnl_pct",
+    "win",
+    "size_tp1",
+    "notional_tp1",
+    "pnl_tp1",
+    "size_tp2",
+    "notional_tp2",
+    "pnl_tp2",
+    "outcome",
+    "outcome_desc",
+    "strategy",
+    "session",
+    "confidence",
+    "btc_dominance",
+    "fear_greed",
+    "sentiment_bias",
+    "sentiment_confidence",
+    "score",
+    "pattern",
+    "narrative",
+    "llm_decision",
+    "llm_confidence",
+    "llm_error",
+    "volatility",
+    "htf_trend",
+    "order_imbalance",
+    "macro_indicator",
+]
+
+# Mapping of normalised legacy column names to their canonical equivalents.
+# Keys are lower-case strings with whitespace and underscores removed to make
+# matching tolerant of formatting differences such as ``Entry Price`` or
+# ``entry_price``.
+COLUMN_SYNONYMS: Dict[str, str] = {
+    "tradeid": "trade_id",
+    "time": "timestamp",
+    "timestamp": "timestamp",
+    "pair": "symbol",
+    "ticker": "symbol",
+    "symbol": "symbol",
+    "entryprice": "entry",
+    "entry": "entry",
+    "entrytime": "entry_time",
+    "entrytimestamp": "entry_time",
+    "exitprice": "exit",
+    "exit": "exit",
+    "exittime": "exit_time",
+    "exittimestamp": "exit_time",
+    "positionsize": "position_size",
+    "qty": "position_size",
+    "quantity": "position_size",
+    "usdsize": "size",
+    "size": "size",
+    "side": "direction",
+    "position": "direction",
+    "direction": "direction",
+    "tradeoutcome": "outcome",
+    "traderesult": "outcome",
+    "result": "outcome",
+    "outcome": "outcome",
+    "pnlusd": "pnl",
+    "pnl$": "pnl",
+    "netpnl": "net_pnl",
+    "pnl": "pnl",
+    "pnlpercent": "pnl_pct",
+    "pnl%": "pnl_pct",
+    "pnlpct": "pnl_pct",
+    "notionalvalue": "notional",
+    "notionalusd": "notional",
+    "notional": "notional",
+    "sentimentconfidence": "sentiment_confidence",
+    "sentconfidence": "sentiment_confidence",
+    "sentimentconf": "sentiment_confidence",
+    "sentconf": "sentiment_confidence",
+    "sentiment_bias": "sentiment_bias",
+    "sentimentbias": "sentiment_bias",
+    "btcdominance": "btc_dominance",
+    "feargreed": "fear_greed",
+    "llmdecision": "llm_decision",
+    "llmconfidence": "llm_confidence",
+    "llmerror": "llm_error",
+    "volatilitypercent": "volatility",
+    "volatilitypct": "volatility",
+    "htftrend": "htf_trend",
+    "orderimbalance": "order_imbalance",
+    "macroindicator": "macro_indicator",
+}
+
+
+def _normalise_token(name: str) -> str:
+    """Return a canonical token for a column name."""
+
+    return re.sub(r"[\s_]+", "", str(name).strip().lower())
+
+
+def _sanitise_default(name: str) -> str:
+    """Fallback sanitisation used when no synonym is defined."""
+
+    # Preserve underscores while normalising casing; this mirrors the previous
+    # behaviour scattered across multiple modules.
+    return str(name).strip().lower().replace(" ", "_")
+
+
+def canonicalise_column(name: str) -> str:
+    """Map ``name`` onto the canonical schema column."""
+
+    token = _normalise_token(name)
+    return COLUMN_SYNONYMS.get(token, _sanitise_default(name))
+
+
+def build_rename_map(columns: Iterable[str]) -> Dict[str, str]:
+    """Construct a rename map that resolves aliases without creating duplicates."""
+
+    rename_map: Dict[str, str] = {}
+    seen_targets: set[str] = set()
+    for col in columns:
+        canonical = canonicalise_column(col)
+        if canonical in seen_targets and canonical != col:
+            # The canonical name is already present (for example both ``entry``
+            # and ``entry_price`` exist).  Keep a sanitised version of the
+            # original column to avoid silent data loss while still removing
+            # whitespace/odd casing.
+            sanitised = _sanitise_default(col)
+            if sanitised in seen_targets and sanitised != canonical:
+                base = sanitised or "column"
+                index = 1
+                candidate = f"{base}_{index}"
+                while candidate in seen_targets:
+                    index += 1
+                    candidate = f"{base}_{index}"
+                rename_map[col] = candidate
+                seen_targets.add(candidate)
+            else:
+                rename_map[col] = sanitised
+                seen_targets.add(sanitised)
+            continue
+        rename_map[col] = canonical
+        seen_targets.add(canonical)
+    return rename_map
+
+
+def normalise_history_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Return ``df`` with legacy headers mapped onto canonical schema names."""
+
+    if df.empty:
+        return df
+    rename_map = build_rename_map(df.columns)
+    return df.rename(columns=rename_map)
+

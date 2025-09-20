@@ -24,13 +24,13 @@ import os
 import csv
 import logging
 import uuid
-import re
 from datetime import datetime, timezone
 from typing import Optional
 from log_utils import ensure_symlink
 from notifier import send_performance_email
 
 import pandas as pd
+from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
 
 logger = logging.getLogger(__name__)
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -60,52 +60,10 @@ OUTCOME_DESCRIPTIONS = {
 }
 
 
-# Canonical column order used for trade history CSV files.  This list is
-# shared by ``log_trade_result`` when writing new rows and
-# ``load_trade_history_df`` when falling back to manual header assignment for
-# malformed files.
-TRADE_HISTORY_HEADERS = [
-    "trade_id",
-    "timestamp",
-    "symbol",
-    "direction",
-    "entry_time",
-    "exit_time",
-    "entry",
-    "exit",
-    "size",
-    "notional",
-    "fees",
-    "slippage",
-    "pnl",
-    "pnl_pct",
-    "win",
-    "size_tp1",
-    "notional_tp1",
-    "pnl_tp1",
-    "size_tp2",
-    "notional_tp2",
-    "pnl_tp2",
-    "outcome",
-    "outcome_desc",
-    "strategy",
-    "session",
-    "confidence",
-    "btc_dominance",
-    "fear_greed",
-    "sentiment_bias",
-    "sentiment_confidence",
-    "score",
-    "pattern",
-    "narrative",
-    "llm_decision",
-    "llm_confidence",
-    "llm_error",
-    "volatility",
-    "htf_trend",
-    "order_imbalance",
-    "macro_indicator",
-]
+# Canonical column order used for trade history CSV files.  The list lives in
+# :mod:`trade_schema` so that every component consumes the same definition.
+# ``TRADE_HISTORY_HEADERS`` is kept as an alias for backwards compatibility.
+TRADE_HISTORY_HEADERS = TRADE_HISTORY_COLUMNS
 
 
 def _to_utc_iso(ts: Optional[str] = None) -> str:
@@ -763,58 +721,9 @@ def load_trade_history_df(path: Optional[str] = None) -> pd.DataFrame:
         return df
 
     # ------------------------------------------------------------------
-    # Normalise headers
+    # Normalise headers using the shared schema helpers
     # ------------------------------------------------------------------
-    def _norm(col: str) -> str:
-        return re.sub(r"[\s_]+", "", str(col).strip().lower())
-
-    # Map of normalised legacy names to canonical forms
-    synonyms = {
-        "tradeid": "trade_id",
-        "time": "timestamp",
-        "timestamp": "timestamp",
-        "symbol": "symbol",
-        "pair": "symbol",
-        "ticker": "symbol",
-        "entryprice": "entry",
-        "entry": "entry",
-        "exitprice": "exit",
-        "exit": "exit",
-        "positionsize": "position_size",
-        "position_size": "position_size",
-        "qty": "position_size",
-        "quantity": "position_size",
-        "usd_size": "size",
-        "side": "direction",
-        "position": "direction",
-        "direction": "direction",
-        "tradeoutcome": "outcome",
-        "result": "outcome",
-        "traderesult": "outcome",
-        "entrytimestamp": "entry_time",
-        "entrytime": "entry_time",
-        "exittimestamp": "exit_time",
-        "exittime": "exit_time",
-        "pnlusd": "pnl",
-        "pnl$": "pnl",
-        "netpnl": "net_pnl",
-        "pnl": "pnl",
-        "pnlpercent": "pnl_pct",
-        "pnl%": "pnl_pct",
-        "pnlpct": "pnl_pct",
-        "notionalvalue": "notional",
-        "notionalusd": "notional",
-        "notional": "notional",
-    }
-
-    rename_map = {}
-    for col in df.columns:
-        key = _norm(col)
-        if key in synonyms:
-            rename_map[col] = synonyms[key]
-        else:
-            rename_map[col] = str(col).strip().lower().replace(" ", "_")
-    df = df.rename(columns=rename_map)
+    df = normalise_history_columns(df)
 
     # ------------------------------------------------------------------
     # Parse timestamps and drop rows that cannot be parsed at all
