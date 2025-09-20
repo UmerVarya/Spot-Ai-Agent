@@ -66,6 +66,76 @@ except Exception:
 
 from streamlit_autorefresh import st_autorefresh
 
+
+def _arrow_safe_scalar(value):
+    """Return a JSON/Arrow serialisable representation of ``value``.
+
+    ``pyarrow`` (used internally by ``st.dataframe``) relies on json encoding for
+    certain pieces of pandas metadata.  Numpy scalar types such as
+    :class:`numpy.int64` are not JSON serialisable which results in runtime
+    errors when Streamlit attempts to display the data frame.  Converting those
+    scalars to their native Python equivalents keeps the values intact while
+    satisfying Arrow's encoder.
+    """
+
+    if isinstance(value, np.generic):
+        try:
+            return value.item()
+        except Exception:
+            return value
+    return value
+
+
+def _arrow_safe_index(index: pd.Index) -> pd.Index:
+    """Return ``index`` with numpy scalar labels converted to Python scalars."""
+
+    if isinstance(index, pd.MultiIndex):
+        tuples = [
+            tuple(_arrow_safe_scalar(level) for level in labels)
+            for labels in index.tolist()
+        ]
+        names = [
+            (_arrow_safe_scalar(name) if name is not None else None)
+            for name in index.names
+        ]
+        return pd.MultiIndex.from_tuples(tuples, names=names)
+    if isinstance(index, pd.RangeIndex):
+        start = _arrow_safe_scalar(index.start)
+        stop = _arrow_safe_scalar(index.stop)
+        step = _arrow_safe_scalar(index.step)
+        name = index.name
+        if name is not None:
+            name = _arrow_safe_scalar(name)
+        return pd.RangeIndex(start=start, stop=stop, step=step, name=name)
+    name = index.name
+    if name is not None:
+        name = _arrow_safe_scalar(name)
+    return pd.Index([_arrow_safe_scalar(x) for x in index.tolist()], name=name)
+
+
+def arrow_safe_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a defensive copy of ``df`` safe for Streamlit/Arrow display."""
+
+    if df is None:
+        return df
+    safe = df.copy()
+    if isinstance(safe.columns, pd.MultiIndex):
+        tuples = [
+            tuple(_arrow_safe_scalar(level) for level in labels)
+            for labels in safe.columns.tolist()
+        ]
+        names = [
+            (_arrow_safe_scalar(name) if name is not None else None)
+            for name in safe.columns.names
+        ]
+        safe.columns = pd.MultiIndex.from_tuples(tuples, names=names)
+    else:
+        safe.columns = [_arrow_safe_scalar(col) for col in safe.columns]
+    safe.index = _arrow_safe_index(safe.index)
+    if not safe.empty:
+        safe = safe.applymap(_arrow_safe_scalar)
+    return safe
+
 PRIMARY = os.getenv(
     "TRADE_HISTORY_FILE",
     "/home/ubuntu/spot_data/trades/historical_trades.csv",
@@ -485,7 +555,7 @@ def render_live_tab() -> None:
         df_display["Notional ($)"] = df_display["Notional ($)"].apply(
             lambda x: f"${x:,.2f}"
         )
-        st.dataframe(df_display, use_container_width=True)
+        st.dataframe(arrow_safe_dataframe(df_display), use_container_width=True)
 
         # Optional price chart for a selected trade
         selected_symbol = st.selectbox(
@@ -551,7 +621,10 @@ def render_live_tab() -> None:
             with st.expander(
                 f"View latest {latest_count} trade(s) in raw format", expanded=False
             ):
-                st.dataframe(hist.tail(latest_count), use_container_width=True)
+                st.dataframe(
+                    arrow_safe_dataframe(hist.tail(latest_count)),
+                    use_container_width=True,
+                )
         hist_df = hist.copy()
         entry_col = next((c for c in ("entry", "entry_price") if c in hist_df.columns), None)
         exit_col = next((c for c in ("exit", "exit_price") if c in hist_df.columns), None)
@@ -1003,6 +1076,7 @@ def render_live_tab() -> None:
                 return "color: red"
             return ""
 
+        hist_display = arrow_safe_dataframe(hist_display)
         hist_display_style = hist_display.style.applymap(
             style_outcome, subset=["Outcome Description"]
         )
@@ -1066,7 +1140,7 @@ def render_backtest_tab() -> None:
         hist, bins = np.histogram(df[pnl_col].astype(float), bins=20)
         hist_df = pd.DataFrame({"Return": bins[:-1], "Count": hist})
         st.bar_chart(hist_df.set_index("Return"), use_container_width=True)
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(arrow_safe_dataframe(df), use_container_width=True)
 
         # If OHLCV columns are present, generate synthetic trade labels and
         # train the ML model automatically.
