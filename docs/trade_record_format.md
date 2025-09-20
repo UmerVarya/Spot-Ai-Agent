@@ -1,6 +1,6 @@
 # Trade Record Format
 
-Completed trades are appended to a unified CSV. By default this file lives at `/home/ubuntu/spot_data/trades/completed_trades.csv`, but the path can be changed with the `TRADE_HISTORY_FILE` environment variable (alias `COMPLETED_TRADES_FILE`).
+Completed trades are appended to a unified CSV. By default this file lives at `/home/ubuntu/spot_data/trades/historical_trades.csv`, but the path can be changed with the `TRADE_HISTORY_FILE` environment variable (alias `COMPLETED_TRADES_FILE`).
 
 Each row recorded by `trade_storage.log_trade_result` contains the following columns. All timestamps use ISO 8601 in UTC (e.g. `2025-09-05T09:56:35Z`). The `timestamp` column is when the result was logged and is distinct from the trade's `entry_time` and `exit_time`.
 
@@ -20,19 +20,12 @@ Each row recorded by `trade_storage.log_trade_result` contains the following col
 | `slippage` | Slippage incurred on exit. |
 | `pnl` | Net profit or loss in quote currency after fees and slippage. |
 | `pnl_pct` | Profit/loss as a percentage of `notional`. |
-| `win` | `true` if `pnl` is positive, else `false`. |
-| `size_tp1` | Size closed at the TP1 partial exit. |
-| `notional_tp1` | Notional value closed at the TP1 partial exit. |
-| `pnl_tp1` | Profit or loss realised at the TP1 partial exit. |
-| `size_tp2` | Size closed at the TP2 partial exit. |
-| `notional_tp2` | Notional value closed at the TP2 partial exit. |
-| `pnl_tp2` | Profit or loss realised at the TP2 partial exit. |
 | `outcome` | Outcome code (see table below). |
 | `outcome_desc` | Human readable description of the outcome. |
 | `strategy` | Name of the strategy responsible for the trade. |
 | `session` | Market session or timeframe identifier. |
-| `confidence` | Confidence score supplied by the strategy. |
-| `btc_dominance` | BTC dominance value at entry. |
+| `confidence` | Confidence score supplied by the strategy. Missing values are stored as `N/A`. |
+| `btc_dominance` | BTC dominance value at entry (or `N/A` when unavailable). |
 | `fear_greed` | Fear & Greed index value at entry. |
 | `sentiment_bias` | Aggregate sentiment classification. |
 | `sentiment_confidence` | Confidence in `sentiment_bias`. |
@@ -46,6 +39,14 @@ Each row recorded by `trade_storage.log_trade_result` contains the following col
 | `htf_trend` | Higher time frame trend assessment. |
 | `order_imbalance` | Order flow imbalance metric. |
 | `macro_indicator` | Macro indicator value. |
+| `tp1_partial` | `true` when a TP1 partial exit occurred; otherwise `false`. |
+| `tp2_partial` | `true` when a TP2 partial exit occurred; otherwise `false`. |
+| `pnl_tp1` | Profit or loss realised at the TP1 partial exit. |
+| `pnl_tp2` | Profit or loss realised at the TP2 partial exit. |
+| `size_tp1` | Size closed at the TP1 partial exit. |
+| `size_tp2` | Size closed at the TP2 partial exit. |
+| `notional_tp1` | Notional value closed at the TP1 partial exit. |
+| `notional_tp2` | Notional value closed at the TP2 partial exit. |
 
 The Streamlit dashboard surfaces the stage-specific `size_tp*`,
 `notional_tp*` and `pnl_tp*` columns so each partial take-profit's
@@ -75,7 +76,7 @@ Partial exits are denoted with a `_partial` suffix. Manual closures may appear a
 ## Example Header
 
 ```
-trade_id,timestamp,symbol,direction,entry_time,exit_time,entry,exit,size,notional,fees,slippage,pnl,pnl_pct,win,size_tp1,notional_tp1,pnl_tp1,size_tp2,notional_tp2,pnl_tp2,outcome,outcome_desc,strategy,session,confidence,btc_dominance,fear_greed,sentiment_bias,sentiment_confidence,score,pattern,narrative,llm_decision,llm_confidence,llm_error,volatility,htf_trend,order_imbalance,macro_indicator
+trade_id,timestamp,symbol,direction,entry_time,exit_time,entry,exit,size,notional,fees,slippage,pnl,pnl_pct,outcome,outcome_desc,strategy,session,confidence,btc_dominance,fear_greed,sentiment_bias,sentiment_confidence,score,pattern,narrative,llm_decision,llm_confidence,llm_error,volatility,htf_trend,order_imbalance,macro_indicator,tp1_partial,tp2_partial,pnl_tp1,pnl_tp2,size_tp1,size_tp2,notional_tp1,notional_tp2
 ```
 
 A single trade may produce multiple rows if partial take-profits occur. Rows are grouped by `trade_id` (falling back to `entry_time`, `symbol` and `strategy` when absent) and collapsed into one summary row by `_deduplicate_history`. PnL, size and notional values are summed for the whole trade, while per-stage fields such as `pnl_tp1`, `pnl_tp2`, `size_tp1`, `size_tp2`, `notional_tp1` and `notional_tp2` detail the contribution of each partial exit alongside the `tp1_partial`/`tp2_partial` flags.

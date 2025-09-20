@@ -68,13 +68,14 @@ from streamlit_autorefresh import st_autorefresh
 
 PRIMARY = os.getenv(
     "TRADE_HISTORY_FILE",
-    "/home/ubuntu/spot_data/trades/completed_trades.csv"
+    "/home/ubuntu/spot_data/trades/historical_trades.csv",
 )
 
 # legacy fallbacks that may contain older rows
 LEGACY = [
     os.getenv("COMPLETED_TRADES_FILE", ""),          # legacy env alias
-    "/home/ubuntu/spot_data/completed_trades.csv",   # old default path
+    "/home/ubuntu/spot_data/trades/completed_trades.csv",  # previous default path
+    "/home/ubuntu/spot_data/completed_trades.csv",   # very old default path
 ]
 
 @st.cache_data(ttl=30)

@@ -40,13 +40,6 @@ TRADE_HISTORY_COLUMNS = [
     "slippage",
     "pnl",
     "pnl_pct",
-    "win",
-    "size_tp1",
-    "notional_tp1",
-    "pnl_tp1",
-    "size_tp2",
-    "notional_tp2",
-    "pnl_tp2",
     "outcome",
     "outcome_desc",
     "strategy",
@@ -66,6 +59,14 @@ TRADE_HISTORY_COLUMNS = [
     "htf_trend",
     "order_imbalance",
     "macro_indicator",
+    "tp1_partial",
+    "tp2_partial",
+    "pnl_tp1",
+    "pnl_tp2",
+    "size_tp1",
+    "size_tp2",
+    "notional_tp1",
+    "notional_tp2",
 ]
 
 # Mapping of normalised legacy column names to their canonical equivalents.
@@ -125,6 +126,16 @@ COLUMN_SYNONYMS: Dict[str, str] = {
     "htftrend": "htf_trend",
     "orderimbalance": "order_imbalance",
     "macroindicator": "macro_indicator",
+    "tp1partial": "tp1_partial",
+    "tp2partial": "tp2_partial",
+    "tp1pnl": "pnl_tp1",
+    "pnltp1": "pnl_tp1",
+    "tp2pnl": "pnl_tp2",
+    "pnltp2": "pnl_tp2",
+    "sizetp1": "size_tp1",
+    "sizetp2": "size_tp2",
+    "notionaltp1": "notional_tp1",
+    "notionaltp2": "notional_tp2",
 }
 
 

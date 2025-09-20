@@ -18,7 +18,7 @@ Set the following environment variables as needed:
 - `DATA_DIR` – optional override for trade storage. Defaults to
   `/home/ubuntu/spot_data/trades`.
 - `TRADE_HISTORY_FILE` – optional override for the unified completed trades log.
-  Defaults to `/home/ubuntu/spot_data/trades/completed_trades.csv`.
+  Defaults to `/home/ubuntu/spot_data/trades/historical_trades.csv`.
 - `RUN_DASHBOARD` – set to `1` to launch the Streamlit dashboard from the agent,
   or `0` to rely on the separate `spot-ai-dashboard` service
 
@@ -46,12 +46,12 @@ files are:
 ```
 /home/ubuntu/spot_data/logs/spot_ai.log          # agent log output
 /home/ubuntu/spot_data/trades/active_trades.json # open positions
-/home/ubuntu/spot_data/trades/completed_trades.csv # unified trade log
+/home/ubuntu/spot_data/trades/historical_trades.csv # unified trade log
 /home/ubuntu/spot_data/trades/rejected_trades.csv
 ```
 
 See [docs/trade_record_format.md](docs/trade_record_format.md) for the expected
-structure of each row in `completed_trades.csv`.
+structure of each row in `historical_trades.csv`.
 
 Symlinks back into the repository are created only for read-only
 compatibility with existing tools, but all writes happen directly in the

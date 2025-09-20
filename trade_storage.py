@@ -64,6 +64,7 @@ OUTCOME_DESCRIPTIONS = {
 # :mod:`trade_schema` so that every component consumes the same definition.
 # ``TRADE_HISTORY_HEADERS`` is kept as an alias for backwards compatibility.
 TRADE_HISTORY_HEADERS = TRADE_HISTORY_COLUMNS
+MISSING_VALUE = "N/A"
 
 
 def _to_utc_iso(ts: Optional[str] = None) -> str:
@@ -155,7 +156,7 @@ ACTIVE_TRADES_FILE = (
     os.environ.get("ACTIVE_TRADES_FILE", _active_default).split("#", 1)[0].strip()
     or _active_default
 )
-_history_default = os.path.join(DATA_DIR, "completed_trades.csv")
+_history_default = os.path.join(DATA_DIR, "historical_trades.csv")
 _history_override = os.environ.get("TRADE_HISTORY_FILE")
 if _history_override is None:
     _history_override = os.environ.get("COMPLETED_TRADES_FILE")
@@ -169,7 +170,11 @@ TRADE_LOG_FILE = TRADE_HISTORY_FILE
 # Legacy trade history files that may still contain data from earlier
 # deployments where the CSV lived alongside the source tree. These are read in
 # addition to the primary history file when no explicit override is supplied.
-_LEGACY_HISTORY_FILENAMES = ("completed_trades.csv", "trade_history.csv")
+_LEGACY_HISTORY_FILENAMES = (
+    "historical_trades.csv",
+    "completed_trades.csv",
+    "trade_history.csv",
+)
 _LEGACY_HISTORY_FILES = [
     os.path.join(_REPO_ROOT, name) for name in _LEGACY_HISTORY_FILENAMES
 ]
@@ -179,6 +184,7 @@ _EXPECTED_HISTORY_KEYS = ("timestamp", "entry_time", "exit_time", "symbol")
 # Symlinks in the repository root allow read-only access for legacy code
 # that still expects files beside the source tree.
 ensure_symlink(ACTIVE_TRADES_FILE, os.path.join(_REPO_ROOT, "active_trades.json"))
+ensure_symlink(TRADE_HISTORY_FILE, os.path.join(_REPO_ROOT, "historical_trades.csv"))
 ensure_symlink(TRADE_HISTORY_FILE, os.path.join(_REPO_ROOT, "completed_trades.csv"))
 
 
@@ -337,7 +343,22 @@ def log_trade_result(
     # Build headers including notional.  Using a shared constant keeps the
     # writer and reader in sync.
     headers = TRADE_HISTORY_HEADERS
-    # Compose row
+
+    def _optional_text_field(value: Optional[str]) -> str:
+        if value is None:
+            return MISSING_VALUE
+        if isinstance(value, str):
+            return value if value.strip() else MISSING_VALUE
+        return str(value)
+
+    def _optional_numeric_field(value: Optional[object]):
+        if value is None or value == "":
+            return MISSING_VALUE
+        try:
+            return float(value)
+        except Exception:
+            return MISSING_VALUE
+
     entry_price = trade.get("entry")
     size_val = trade.get("size", trade.get("position_size", 0))
     try:
@@ -356,6 +377,15 @@ def log_trade_result(
         quantity = size_val
         notional = entry_val * size_val if entry_val else None
 
+    try:
+        fees_val = float(fees)
+    except Exception:
+        fees_val = 0.0
+    try:
+        slippage_val = float(slippage)
+    except Exception:
+        slippage_val = 0.0
+
     # Compute net PnL and percentage
     pnl_val = 0.0
     if entry_val is not None:
@@ -363,80 +393,88 @@ def log_trade_result(
             pnl_val = (entry_val - exit_price) * quantity
         else:
             pnl_val = (exit_price - entry_val) * quantity
-    pnl_val -= fees
-    pnl_val -= slippage
-    pnl_pct = (pnl_val / notional * 100) if (notional and notional != 0) else 0.0
+    pnl_val -= fees_val
+    pnl_val -= slippage_val
+    pnl_pct = None
+    if isinstance(notional, (int, float)) and notional not in (0, 0.0):
+        pnl_pct = (pnl_val / notional) * 100
+
+    entry_time_source = trade.get("entry_time") or trade.get("open_time")
+    entry_time_value = MISSING_VALUE
+    if entry_time_source:
+        entry_dt = pd.to_datetime(entry_time_source, errors="coerce", utc=True)
+        if pd.notna(entry_dt):
+            entry_time_value = entry_dt.isoformat().replace("+00:00", "Z")
+    exit_time_source = exit_time or trade.get("close")
+    exit_dt = pd.to_datetime(exit_time_source, errors="coerce", utc=True)
+    if pd.notna(exit_dt):
+        exit_time_value = exit_dt.isoformat().replace("+00:00", "Z")
+    else:
+        exit_time_value = _to_utc_iso()
+
+    sentiment_conf = trade.get("sentiment_confidence")
+    if sentiment_conf is None:
+        sentiment_conf = trade.get("confidence")
+    score_val = trade.get("score", trade.get("strength"))
+    outcome_text = str(outcome or "")
+    outcome_lower = outcome_text.lower()
+    tp1_flag = "tp1_partial" in outcome_lower
+    tp2_flag = "tp2_partial" in outcome_lower
+
     row = {
         "trade_id": trade.get("trade_id", str(uuid.uuid4())),
         "timestamp": _to_utc_iso(),
-        "symbol": trade.get("symbol"),
-        "direction": trade.get("direction"),
-        "entry_time": _to_utc_iso(trade.get("entry_time")),
-        "exit_time": _to_utc_iso(exit_time),
-        "entry": entry_val,
-        "exit": exit_price,
-        "size": size_val,
-        "notional": notional,
-        "fees": fees,
-        "slippage": slippage,
-        "pnl": pnl_val,
-        "pnl_pct": pnl_pct,
-        "win": pnl_val > 0,
-        "size_tp1": 0.0,
-        "notional_tp1": 0.0,
-        "pnl_tp1": 0.0,
-        "size_tp2": 0.0,
-        "notional_tp2": 0.0,
-        "pnl_tp2": 0.0,
-        "outcome": outcome,
-        "outcome_desc": OUTCOME_DESCRIPTIONS.get(outcome, outcome),
-        "strategy": trade.get("strategy", "unknown"),
-        "session": trade.get("session", "unknown"),
-        "confidence": trade.get("confidence", 0),
-        "btc_dominance": trade.get("btc_dominance", 0),
-        "fear_greed": trade.get("fear_greed", 0),
-        "sentiment_bias": trade.get("sentiment_bias", "neutral"),
-        "sentiment_confidence": trade.get(
-            "sentiment_confidence", trade.get("confidence", 0)
+        "symbol": _optional_text_field(trade.get("symbol")),
+        "direction": _optional_text_field(trade.get("direction")),
+        "entry_time": entry_time_value,
+        "exit_time": exit_time_value,
+        "entry": _optional_numeric_field(entry_val),
+        "exit": _optional_numeric_field(exit_price),
+        "size": _optional_numeric_field(size_val),
+        "notional": _optional_numeric_field(notional),
+        "fees": _optional_numeric_field(fees_val),
+        "slippage": _optional_numeric_field(slippage_val),
+        "pnl": _optional_numeric_field(pnl_val),
+        "pnl_pct": _optional_numeric_field(pnl_pct),
+        "outcome": _optional_text_field(outcome_text or None),
+        "outcome_desc": _optional_text_field(
+            OUTCOME_DESCRIPTIONS.get(outcome, outcome)
         ),
-        "score": trade.get("score", trade.get("strength", 0)),
-        "pattern": trade.get("pattern", "None"),
-        "narrative": trade.get("narrative", "No explanation"),
-        "llm_decision": trade.get("llm_decision"),
-        "llm_confidence": trade.get("llm_confidence"),
-        "llm_error": trade.get("llm_error"),
-        "volatility": trade.get("volatility", 0),
-        "htf_trend": trade.get("htf_trend", 0),
-        "order_imbalance": trade.get("order_imbalance", 0),
-        "macro_indicator": trade.get("macro_indicator", 0),
+        "strategy": _optional_text_field(trade.get("strategy")),
+        "session": _optional_text_field(trade.get("session")),
+        "confidence": _optional_numeric_field(trade.get("confidence")),
+        "btc_dominance": _optional_numeric_field(trade.get("btc_dominance")),
+        "fear_greed": _optional_numeric_field(trade.get("fear_greed")),
+        "sentiment_bias": _optional_text_field(trade.get("sentiment_bias")),
+        "sentiment_confidence": _optional_numeric_field(sentiment_conf),
+        "score": _optional_numeric_field(score_val),
+        "pattern": _optional_text_field(trade.get("pattern")),
+        "narrative": _optional_text_field(trade.get("narrative")),
+        "llm_decision": _optional_text_field(trade.get("llm_decision")),
+        "llm_confidence": _optional_numeric_field(trade.get("llm_confidence")),
+        "llm_error": _optional_text_field(trade.get("llm_error")),
+        "volatility": _optional_numeric_field(trade.get("volatility")),
+        "htf_trend": _optional_numeric_field(trade.get("htf_trend")),
+        "order_imbalance": _optional_numeric_field(trade.get("order_imbalance")),
+        "macro_indicator": _optional_numeric_field(trade.get("macro_indicator")),
+        "tp1_partial": tp1_flag,
+        "tp2_partial": tp2_flag,
+        "pnl_tp1": _optional_numeric_field(0.0),
+        "pnl_tp2": _optional_numeric_field(0.0),
+        "size_tp1": _optional_numeric_field(0.0),
+        "size_tp2": _optional_numeric_field(0.0),
+        "notional_tp1": _optional_numeric_field(0.0),
+        "notional_tp2": _optional_numeric_field(0.0),
     }
-    if "tp1_partial" in outcome:
-        row["size_tp1"] = quantity
-        row["notional_tp1"] = notional or 0.0
-        row["pnl_tp1"] = pnl_val
-    if "tp2_partial" in outcome:
-        row["size_tp2"] = quantity
-        row["notional_tp2"] = notional or 0.0
-        row["pnl_tp2"] = pnl_val
-    float_cols = [
-        "entry",
-        "exit",
-        "size",
-        "notional",
-        "fees",
-        "confidence",
-        "size_tp1",
-        "notional_tp1",
-        "pnl_tp1",
-        "size_tp2",
-        "notional_tp2",
-        "pnl_tp2",
-    ]
-    for col in float_cols:
-        try:
-            row[col] = float(row.get(col, 0))
-        except Exception:
-            row[col] = 0.0
+
+    if tp1_flag:
+        row["pnl_tp1"] = _optional_numeric_field(pnl_val)
+        row["size_tp1"] = _optional_numeric_field(quantity)
+        row["notional_tp1"] = _optional_numeric_field(notional)
+    if tp2_flag:
+        row["pnl_tp2"] = _optional_numeric_field(pnl_val)
+        row["size_tp2"] = _optional_numeric_field(quantity)
+        row["notional_tp2"] = _optional_numeric_field(notional)
     if DB_CURSOR:
         try:
             DB_CURSOR.execute(
@@ -498,6 +536,8 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
 
     if df.empty:
         return df
+
+    df = df.replace(MISSING_VALUE, pd.NA)
     df = df.drop_duplicates()
     if "trade_id" in df.columns:
         key_cols = ["trade_id"]
@@ -703,19 +743,7 @@ def load_trade_history_df(path: Optional[str] = None) -> pd.DataFrame:
         elif path:
             df = pd.DataFrame()
         else:
-            df = pd.DataFrame(
-                columns=[
-                    "trade_id",
-                    "timestamp",
-                    "symbol",
-                    "entry",
-                    "exit",
-                    "size",
-                    "direction",
-                    "outcome",
-                    "pnl",
-                ]
-            )
+            df = pd.DataFrame(columns=TRADE_HISTORY_COLUMNS)
 
     if df.empty:
         return df
@@ -777,6 +805,47 @@ def load_trade_history_df(path: Optional[str] = None) -> pd.DataFrame:
     # De-duplicate partial exits and filter out open trades
     # ------------------------------------------------------------------
     df = _deduplicate_history(df)
+
+    for col in ("tp1_partial", "tp2_partial"):
+        if col in df.columns:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.lower()
+                .isin(["true", "1", "yes", "y"])
+            )
+        else:
+            df[col] = False
+
+    numeric_columns = [
+        "entry",
+        "exit",
+        "size",
+        "notional",
+        "fees",
+        "slippage",
+        "pnl",
+        "pnl_pct",
+        "confidence",
+        "btc_dominance",
+        "fear_greed",
+        "sentiment_confidence",
+        "score",
+        "llm_confidence",
+        "volatility",
+        "htf_trend",
+        "order_imbalance",
+        "macro_indicator",
+        "pnl_tp1",
+        "pnl_tp2",
+        "size_tp1",
+        "size_tp2",
+        "notional_tp1",
+        "notional_tp2",
+    ]
+    for col in numeric_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     if not df.empty and "outcome" in df.columns:
         df = df[df["outcome"].astype(str).str.lower() != "open"]
