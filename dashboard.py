@@ -543,7 +543,15 @@ def render_live_tab() -> None:
     if hist.empty:
         st.info("No completed trades logged yet.")
     else:
-        st.dataframe(hist.tail(20), use_container_width=True)
+        # Only surface the raw dataframe on demand so we don't present two
+        # different historical tables back-to-back in the UI.  The styled
+        # view further below remains the primary presentation.
+        latest_count = min(len(hist), 20)
+        if latest_count:
+            with st.expander(
+                f"View latest {latest_count} trade(s) in raw format", expanded=False
+            ):
+                st.dataframe(hist.tail(latest_count), use_container_width=True)
         hist_df = hist.copy()
         entry_col = next((c for c in ("entry", "entry_price") if c in hist_df.columns), None)
         exit_col = next((c for c in ("exit", "exit_price") if c in hist_df.columns), None)
