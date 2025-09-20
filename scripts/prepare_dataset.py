@@ -5,7 +5,9 @@ import numpy as np
 from pathlib import Path
 
 # --- Paths ---
-DEFAULT_HISTORY = os.getenv("COMPLETED_TRADES_FILE", "/home/ubuntu/spot_data/trades/completed_trades.csv")
+DEFAULT_HISTORY = os.getenv(
+    "COMPLETED_TRADES_FILE", "/home/ubuntu/spot_data/trades/historical_trades.csv"
+)
 OUT_DIR = Path(os.getenv("DATASET_DIR", "/home/ubuntu/spot_data/datasets"))
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
