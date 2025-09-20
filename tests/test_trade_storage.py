@@ -203,6 +203,18 @@ def test_quantity_size_when_notional_disabled(tmp_path, monkeypatch):
     assert float(row["pnl_pct"]) == 10.0
 
 
+def test_load_trade_history_df_alias_normalisation(tmp_path):
+    csv_path = tmp_path / "history.csv"
+    csv_path.write_text(
+        "time,symbol,direction,outcome,entry_price,exit_price,sent_conf\n"
+        "2024-01-01T00:00:00Z,BTCUSDT,long,tp1,100,110,7.5\n"
+    )
+    df = trade_storage.load_trade_history_df(str(csv_path))
+    assert "timestamp" in df.columns
+    assert "sentiment_confidence" in df.columns
+    assert float(df["sentiment_confidence"].iloc[0]) == 7.5
+
+
 def test_duplicate_trade_guard(tmp_path, monkeypatch):
     path = tmp_path / "active.json"
     monkeypatch.setattr(trade_storage, "ACTIVE_TRADES_FILE", str(path))

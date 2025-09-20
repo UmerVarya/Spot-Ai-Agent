@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 from datetime import datetime, timezone
 from log_utils import setup_logger, LOG_FILE
+from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
 from backtest import compute_buy_and_hold_pnl, generate_trades_from_ohlcv
 from ml_model import train_model
 
@@ -87,6 +88,7 @@ def _read_history_frame(path: str) -> pd.DataFrame:
         # Show a hint in the UI and return empty rather than crashing the page
         st.warning(f"Could not read {p}: {e}")
         return pd.DataFrame()
+    df = normalise_history_columns(df)
     # normalize types that downstream filters expect
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -94,50 +96,7 @@ def _read_history_frame(path: str) -> pd.DataFrame:
     if "outcome" in df.columns:
         df["outcome"] = df["outcome"].astype(str).str.upper()
     # keep only the columns we actually use in charts/tables (optional but safer)
-    preferred = [
-        "trade_id",
-        "timestamp",
-        "symbol",
-        "direction",
-        "entry_time",
-        "exit_time",
-        "entry",
-        "entry_price",
-        "exit",
-        "exit_price",
-        "size",
-        "notional",
-        "fees",
-        "slippage",
-        "pnl",
-        "pnl_pct",
-        "win",
-        "size_tp1",
-        "notional_tp1",
-        "pnl_tp1",
-        "size_tp2",
-        "notional_tp2",
-        "pnl_tp2",
-        "outcome",
-        "outcome_desc",
-        "strategy",
-        "session",
-        "confidence",
-        "btc_dominance",
-        "fear_greed",
-        "sentiment_bias",
-        "sentiment_confidence",
-        "score",
-        "pattern",
-        "narrative",
-        "llm_decision",
-        "llm_confidence",
-        "llm_error",
-        "volatility",
-        "htf_trend",
-        "order_imbalance",
-        "macro_indicator",
-    ]
+    preferred = list(dict.fromkeys(TRADE_HISTORY_COLUMNS + ["entry_price", "exit_price"]))
     ordered_cols = [c for c in preferred if c in df.columns]
     if ordered_cols:
         remainder = [c for c in df.columns if c not in ordered_cols]
