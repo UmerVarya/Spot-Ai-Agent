@@ -136,6 +136,65 @@ def arrow_safe_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         safe = safe.applymap(_arrow_safe_scalar)
     return safe
 
+
+def _fmt_money(val) -> str:
+    if pd.isna(val):
+        return ""
+    try:
+        return f"${float(val):,.2f}"
+    except Exception:
+        return str(val)
+
+
+def _fmt_price(val) -> str:
+    if pd.isna(val):
+        return ""
+    try:
+        return f"{float(val):,.6f}"
+    except Exception:
+        return str(val)
+
+
+def _fmt_quantity(val) -> str:
+    if pd.isna(val):
+        return ""
+    try:
+        return f"{float(val):,.4f}"
+    except Exception:
+        return str(val)
+
+
+def _fmt_percent(val) -> str:
+    if pd.isna(val):
+        return ""
+    try:
+        return f"{float(val):.2f}%"
+    except Exception:
+        return str(val)
+
+
+def _fmt_duration(val) -> str:
+    if pd.isna(val):
+        return ""
+    try:
+        return f"{float(val):.1f}"
+    except Exception:
+        return str(val)
+
+
+def _highlight_position_limit(val) -> str:
+    if pd.isna(val) or not np.isfinite(MAX_POSITION_USD):
+        return ""
+    try:
+        return (
+            "background-color: rgba(255, 87, 51, 0.25);"
+            if float(val) > MAX_POSITION_USD + 1e-6
+            else ""
+        )
+    except Exception:
+        return ""
+
+
 PRIMARY = os.getenv(
     "TRADE_HISTORY_FILE",
     "/home/ubuntu/spot_data/trades/historical_trades.csv",
@@ -289,6 +348,21 @@ from trade_logger import TRADE_LEARNING_LOG_FILE
 # this behaviour by setting the ``SIZE_AS_NOTIONAL`` environment variable to
 # "false".
 SIZE_AS_NOTIONAL = os.getenv("SIZE_AS_NOTIONAL", "true").lower() == "true"
+
+
+def _env_float(name: str, default: float) -> float:
+    """Return environment variable ``name`` parsed as ``float`` with fallback."""
+
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+MAX_POSITION_USD = _env_float("MAX_TRADE_USD", 200.0)
 
 # Page configuration
 st.set_page_config(
@@ -451,8 +525,8 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
         "TP1": round(tp1, 4) if tp1 else None,
         "TP2": round(tp2, 4) if tp2 else None,
         "TP3": round(tp3, 4) if tp3 else None,
-        "Size": size_val,
-        "Notional ($)": round(notional, 2),
+        "Quantity": round(qty, 6),
+        "Position Size (USDT)": round(notional, 2),
         "PnL ($)": round(pnl_dollars, 2),
         "PnL (%)": round(pnl_percent, 2),
         "Time in Trade (min)": round(time_delta_min, 1) if time_delta_min is not None else None,
@@ -542,20 +616,38 @@ def render_live_tab() -> None:
         col3.metric("Total Unrealised PnL", f"${total_unrealised:,.2f}")
         wins_active = (df_active["PnL ($)"] > 0).sum()
         col4.metric("Winning Trades", wins_active)
-        total_notional = df_active["Notional ($)"].sum() if not df_active.empty else 0.0
-        col5.metric("Total Notional", f"${total_notional:,.2f}")
-        # Display active trades table with formatted PnL columns
-        df_display = df_active.copy()
-        df_display["PnL (%)"] = df_display["PnL (%)"].apply(
-            lambda x: f"{x:.2f}%"
+        total_notional = (
+            df_active["Position Size (USDT)"].sum() if not df_active.empty else 0.0
         )
-        df_display["PnL ($)"] = df_display["PnL ($)"].apply(
-            lambda x: f"${x:,.2f}"
-        )
-        df_display["Notional ($)"] = df_display["Notional ($)"].apply(
-            lambda x: f"${x:,.2f}"
-        )
-        st.dataframe(arrow_safe_dataframe(df_display), use_container_width=True)
+        col5.metric("Total Position Size", f"${total_notional:,.2f}")
+        if np.isfinite(MAX_POSITION_USD) and not df_active.empty:
+            breaches_active = df_active["Position Size (USDT)"] > (MAX_POSITION_USD + 1e-6)
+            if breaches_active.any():
+                st.error(
+                    f"{breaches_active.sum()} active trade(s) exceed the configured "
+                    f"{MAX_POSITION_USD:.0f} USDT cap."
+                )
+        df_display = arrow_safe_dataframe(df_active.copy())
+        formatters = {
+            "Entry": _fmt_price,
+            "Price": _fmt_price,
+            "SL": _fmt_price,
+            "TP1": _fmt_price,
+            "TP2": _fmt_price,
+            "TP3": _fmt_price,
+            "Quantity": _fmt_quantity,
+            "Position Size (USDT)": _fmt_money,
+            "PnL ($)": _fmt_money,
+            "PnL (%)": _fmt_percent,
+            "Time in Trade (min)": _fmt_duration,
+        }
+        fmt_subset = {k: v for k, v in formatters.items() if k in df_display.columns}
+        df_style = df_display.style.format(fmt_subset)
+        if "Position Size (USDT)" in df_display.columns:
+            df_style = df_style.applymap(
+                _highlight_position_limit, subset=["Position Size (USDT)"]
+            )
+        st.dataframe(df_style, use_container_width=True)
 
         # Optional price chart for a selected trade
         selected_symbol = st.selectbox(
@@ -605,26 +697,26 @@ def render_live_tab() -> None:
     # Load trade history and compute summary statistics
     st.subheader("📊 Historical Performance – Completed Trades")
     hist = load_trade_history_df()
+    fallback_sources = sum(1 for p in LEGACY if p)
+    sizing_note = (
+        "Position sizes are shown as USDT notionals."
+        if SIZE_AS_NOTIONAL
+        else "Position sizes reflect entry price multiplied by filled quantity."
+    )
+    limit_note = (
+        f" Maximum configured notional per trade: {MAX_POSITION_USD:,.0f} USDT."
+        if np.isfinite(MAX_POSITION_USD)
+        else ""
+    )
     st.caption(
         f"Loaded {len(hist)} completed trades (partial exits collapsed) from "
-        f"{Path(PRIMARY).as_posix()} and {sum(1 for p in LEGACY if p)} fallback file(s)."
+        f"{Path(PRIMARY).as_posix()} and {fallback_sources} fallback file(s). "
+        f"{sizing_note}{limit_note}"
     )
 
     if hist.empty:
         st.info("No completed trades logged yet.")
     else:
-        # Only surface the raw dataframe on demand so we don't present two
-        # different historical tables back-to-back in the UI.  The styled
-        # view further below remains the primary presentation.
-        latest_count = min(len(hist), 20)
-        if latest_count:
-            with st.expander(
-                f"View latest {latest_count} trade(s) in raw format", expanded=False
-            ):
-                st.dataframe(
-                    arrow_safe_dataframe(hist.tail(latest_count)),
-                    use_container_width=True,
-                )
         hist_df = hist.copy()
         entry_col = next((c for c in ("entry", "entry_price") if c in hist_df.columns), None)
         exit_col = next((c for c in ("exit", "exit_price") if c in hist_df.columns), None)
@@ -667,6 +759,22 @@ def render_live_tab() -> None:
             sizes = (notional_for_qty / entry_for_qty).fillna(0)
         else:
             sizes = raw_sizes
+        quantity_series = pd.to_numeric(sizes, errors="coerce").fillna(0.0)
+        hist_df["Quantity"] = quantity_series
+        notional_series = numcol(hist_df, "notional") if "notional" in hist_df.columns else pd.Series(0.0, index=hist_df.index)
+        if notional_series.eq(0).all():
+            if SIZE_AS_NOTIONAL:
+                notional_series = pd.to_numeric(hist_df.get("size", 0.0), errors="coerce").fillna(0.0)
+            else:
+                notional_series = entries * quantity_series
+        hist_df["Position Size (USDT)"] = pd.to_numeric(notional_series, errors="coerce").fillna(0.0)
+        if np.isfinite(MAX_POSITION_USD):
+            breaches_hist = hist_df["Position Size (USDT)"] > (MAX_POSITION_USD + 1e-6)
+            if breaches_hist.any():
+                st.error(
+                    f"{breaches_hist.sum()} completed trade(s) exceeded the configured "
+                    f"{MAX_POSITION_USD:.0f} USDT cap."
+                )
         def _numeric_series(df: pd.DataFrame, name: str) -> pd.Series:
             """Return numeric column ``name`` aligned to ``df.index``.
 
@@ -1004,60 +1112,71 @@ def render_live_tab() -> None:
             "notional_tp1": "Notional TP1 ($)",
             "notional_tp2": "Notional TP2 ($)",
         }
-        hist_display = hist_df.rename(columns=stage_map)
-        base_cols = [
-            "entry_time",
-            "exit_time",
-            "symbol",
-            "direction",
-            "strategy",
-            "session",
-            "entry",
-            "entry_price",
-            "exit",
-            "exit_price",
-            "size",
-            "notional",
-            "fees",
-            "slippage",
-            "Outcome Description",
-            *stage_map.values(),
+        hist_display = pd.DataFrame(index=hist_df.index)
+        base_columns = [
+            ("trade_id", "Trade ID"),
+            ("entry_time", "Entry Time"),
+            ("exit_time", "Exit Time"),
+            ("symbol", "Symbol"),
+            ("direction", "Direction"),
+            ("strategy", "Strategy"),
+            ("session", "Session"),
         ]
-        display_cols = [col for col in base_cols if col in hist_display.columns] + [
-            c
-            for c in [
-                "PnL (net $)",
-                "PnL (%)",
-                "Duration (min)",
-                "Notional",
-            ]
-            if c in hist_display.columns
-        ]
-        hist_display = hist_display[display_cols].copy()
-        # Ensure column labels are plain strings for Arrow/JSON serialisation
-        hist_display.columns = [str(c) for c in hist_display.columns]
-        # Format numeric columns safely by coercing to numbers before rounding
-        numeric_cols = [
-            "PnL (net $)",
+        for raw, label in base_columns:
+            if raw in hist_df.columns:
+                hist_display[label] = hist_df[raw]
+        if entry_col:
+            hist_display["Entry Price"] = numcol(hist_df, entry_col, default=np.nan)
+        if exit_col:
+            hist_display["Exit Price"] = numcol(hist_df, exit_col, default=np.nan)
+        hist_display["Quantity"] = hist_df.get("Quantity", 0.0)
+        hist_display["Position Size (USDT)"] = hist_df["Position Size (USDT)"]
+        hist_display["Gross PnL (USDT)"] = hist_df["PnL ($)"]
+        hist_display["Net PnL (USDT)"] = hist_df["PnL (net $)"]
+        hist_display["PnL (%)"] = hist_df["PnL (%)"]
+        hist_display["Fees (USDT)"] = fees
+        hist_display["Slippage (USDT)"] = slippage
+        if "Duration (min)" in hist_df.columns:
+            hist_display["Duration (min)"] = hist_df["Duration (min)"]
+        if "Outcome Description" in hist_df.columns:
+            hist_display["Outcome Description"] = hist_df["Outcome Description"]
+        stage_display_order: list[str] = []
+        for key in ("pnl_tp1", "size_tp1", "notional_tp1", "pnl_tp2", "size_tp2", "notional_tp2"):
+            if key in hist_df.columns:
+                label = stage_map[key]
+                hist_display[label] = numcol(hist_df, key)
+                stage_display_order.append(label)
+        for dt_col in ("Entry Time", "Exit Time"):
+            if dt_col in hist_display.columns:
+                timestamps = pd.to_datetime(hist_display[dt_col], errors="coerce", utc=True)
+                formatted = timestamps.dt.strftime("%Y-%m-%d %H:%M:%S")
+                formatted = formatted.where(~timestamps.isna(), "")
+                hist_display[dt_col] = formatted
+        column_order = [
+            "Trade ID",
+            "Entry Time",
+            "Exit Time",
+            "Symbol",
+            "Direction",
+            "Strategy",
+            "Session",
+            "Entry Price",
+            "Exit Price",
+            "Quantity",
+            "Position Size (USDT)",
+            "Gross PnL (USDT)",
+            "Net PnL (USDT)",
             "PnL (%)",
+            "Fees (USDT)",
+            "Slippage (USDT)",
             "Duration (min)",
-            "entry",
-            "entry_price",
-            "exit",
-            "exit_price",
-            "size",
-            "fees",
-            "slippage",
-            "notional",
-            "Notional",
-            *stage_map.values(),
+            "Outcome Description",
+            *stage_display_order,
         ]
-        for col in numeric_cols:
-            if col in hist_display.columns:
-                converted = pd.to_numeric(hist_display[col], errors="coerce")
-                if pd.api.types.is_bool_dtype(converted):
-                    converted = converted.astype(float)
-                hist_display[col] = converted.round(2)
+        ordered = [col for col in column_order if col in hist_display.columns]
+        remainder = [col for col in hist_display.columns if col not in ordered]
+        hist_display = hist_display[ordered + remainder]
+        hist_display = arrow_safe_dataframe(hist_display)
         positive_labels = {
             outcome_descriptions[c]
             for c in profit_codes
@@ -1076,10 +1195,40 @@ def render_live_tab() -> None:
                 return "color: red"
             return ""
 
-        hist_display = arrow_safe_dataframe(hist_display)
-        hist_display_style = hist_display.style.applymap(
-            style_outcome, subset=["Outcome Description"]
-        )
+        formatters: dict[str, object] = {}
+        for col in ("Entry Price", "Exit Price"):
+            if col in hist_display.columns:
+                formatters[col] = _fmt_price
+        for col in ("Quantity", "Size TP1", "Size TP2"):
+            if col in hist_display.columns:
+                formatters[col] = _fmt_quantity
+        money_cols = [
+            "Position Size (USDT)",
+            "Gross PnL (USDT)",
+            "Net PnL (USDT)",
+            "Fees (USDT)",
+            "Slippage (USDT)",
+            "PnL TP1 ($)",
+            "PnL TP2 ($)",
+            "Notional TP1 ($)",
+            "Notional TP2 ($)",
+        ]
+        for col in money_cols:
+            if col in hist_display.columns:
+                formatters[col] = _fmt_money
+        if "PnL (%)" in hist_display.columns:
+            formatters["PnL (%)"] = _fmt_percent
+        if "Duration (min)" in hist_display.columns:
+            formatters["Duration (min)"] = _fmt_duration
+        hist_display_style = hist_display.style.format(formatters)
+        if "Outcome Description" in hist_display.columns:
+            hist_display_style = hist_display_style.applymap(
+                style_outcome, subset=["Outcome Description"]
+            )
+        if "Position Size (USDT)" in hist_display.columns:
+            hist_display_style = hist_display_style.applymap(
+                _highlight_position_limit, subset=["Position Size (USDT)"]
+            )
         st.dataframe(hist_display_style, use_container_width=True)
         # CSV download button
         csv_data = hist_df.to_csv(index=False).encode("utf-8")
