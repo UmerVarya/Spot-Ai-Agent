@@ -109,11 +109,13 @@ def test_log_trade_result_writes_header_if_file_empty(tmp_path, monkeypatch):
     assert rows and rows[0]["symbol"] == "BTCUSDT"
 
 
-def test_log_trade_result_rewrites_missing_header(tmp_path, monkeypatch):
-    """If the existing log lacks a header, it should be inserted."""
+def test_log_trade_result_archives_missing_header(tmp_path, monkeypatch):
+    """Legacy files without headers are archived and replaced."""
+
     csv_path = tmp_path / "log.csv"
     csv_path.write_text("BTCUSDT,1000,1100\n")  # simulate data without header
     monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
+
     trade = {
         "symbol": "ETHUSDT",
         "direction": "long",
@@ -123,10 +125,28 @@ def test_log_trade_result_rewrites_missing_header(tmp_path, monkeypatch):
         "strategy": "test",
         "session": "Asia",
     }
+
     trade_storage.log_trade_result(trade, outcome="tp1", exit_price=2100)
-    with open(csv_path) as f:
-        first = f.readline().strip().lower()
-    assert first.startswith("trade_id,")
+
+    backups = list(csv_path.parent.glob("log.csv.legacy-*"))
+    assert backups, "Expected legacy log to be archived"
+    assert "BTCUSDT" in backups[0].read_text()
+
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "ETHUSDT"
+    assert "BTCUSDT" not in rows[0].values()
+
+
+def test_load_trade_history_df_skips_headerless_csv(tmp_path):
+    legacy = tmp_path / "legacy.csv"
+    legacy.write_text("BTCUSDT,1000,1100\n")
+
+    df = trade_storage.load_trade_history_df(path=str(legacy))
+
+    assert df.empty
 
 
 def test_log_trade_result_writes_file_when_db_cursor_present(tmp_path, monkeypatch):

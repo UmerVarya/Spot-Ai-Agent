@@ -25,12 +25,16 @@ import csv
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Sequence
 from log_utils import ensure_symlink
 from notifier import send_performance_email
 
 import pandas as pd
-from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
+from trade_schema import (
+    TRADE_HISTORY_COLUMNS,
+    build_rename_map,
+    normalise_history_columns,
+)
 
 logger = logging.getLogger(__name__)
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -65,6 +69,53 @@ OUTCOME_DESCRIPTIONS = {
 # ``TRADE_HISTORY_HEADERS`` is kept as an alias for backwards compatibility.
 TRADE_HISTORY_HEADERS = TRADE_HISTORY_COLUMNS
 MISSING_VALUE = "N/A"
+
+
+def _normalise_header_line(header_line: str) -> list[str]:
+    """Return a lower-cased token list for the CSV header line."""
+
+    if not header_line:
+        return []
+    cleaned = header_line.strip().lstrip("\ufeff")
+    if not cleaned:
+        return []
+    return [segment.strip().strip('"').lower() for segment in cleaned.split(",")]
+
+
+def _header_is_compatible(header_line: str, headers: Sequence[str]) -> bool:
+    """Return ``True`` when ``header_line`` resembles a supported schema."""
+
+    tokens = _normalise_header_line(header_line)
+    if not tokens:
+        return False
+
+    rename_map = build_rename_map(tokens)
+    recognised = {
+        rename_map.get(token, "") for token in tokens if rename_map.get(token, "")
+    }
+    recognised &= {str(col) for col in headers}
+    if not recognised:
+        return False
+
+    essential = set(_EXPECTED_HISTORY_KEYS)
+    if recognised & essential:
+        return True
+
+    return len(recognised) >= 3
+
+
+def _archive_legacy_history_file(path: str) -> Optional[str]:
+    """Move a legacy history file aside so a fresh log can be created."""
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = f"{path}.legacy-{timestamp}"
+    try:
+        os.replace(path, backup_path)
+    except OSError as exc:  # pragma: no cover - filesystem specific
+        logger.warning("Unable to archive legacy trade log %s: %s", path, exc)
+        return None
+    logger.info("Archived legacy trade log %s -> %s", path, backup_path)
+    return backup_path
 
 
 def _to_utc_iso(ts: Optional[str] = None) -> str:
@@ -497,19 +548,29 @@ def log_trade_result(
 
     header_needed = True
     if file_exists:
-        with open(TRADE_HISTORY_FILE, "r", encoding="utf-8") as f:
-            first_line = f.readline()
-            if first_line and first_line.lower().startswith("trade_id,"):
-                header_needed = False
-            else:
-                remainder = f.read()
-        if header_needed:
-            with open(TRADE_HISTORY_FILE, "w", encoding="utf-8") as f:
-                f.write(",".join(headers) + "\n")
-                f.write(first_line)
-                f.write(remainder)
+        try:
+            with open(TRADE_HISTORY_FILE, "r", encoding="utf-8") as f:
+                first_line = f.readline()
+        except OSError as exc:  # pragma: no cover - filesystem specific
+            logger.warning(
+                "Unable to inspect trade history header %s: %s", TRADE_HISTORY_FILE, exc
+            )
+            first_line = ""
+        if _header_is_compatible(first_line, headers):
             header_needed = False
-            file_exists = True
+        else:
+            backup_path = _archive_legacy_history_file(TRADE_HISTORY_FILE)
+            if backup_path is None:
+                try:
+                    with open(TRADE_HISTORY_FILE, "w", encoding="utf-8") as f:
+                        f.truncate(0)
+                except OSError as exc:  # pragma: no cover - filesystem specific
+                    logger.exception(
+                        "Failed to reset legacy trade log %s: %s", TRADE_HISTORY_FILE, exc
+                    )
+                    raise
+            file_exists = False
+            header_needed = True
 
     os.makedirs(os.path.dirname(TRADE_HISTORY_FILE), exist_ok=True)
     df_row = pd.DataFrame([row], columns=headers)
@@ -620,6 +681,19 @@ def _read_history_frame(path: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
+        with open(path, "r", encoding="utf-8") as fh:
+            header_line = fh.readline()
+    except OSError as exc:  # pragma: no cover - filesystem specific
+        logger.warning("Unable to inspect trade log %s: %s", path, exc)
+        return pd.DataFrame()
+
+    if not _header_is_compatible(header_line, TRADE_HISTORY_HEADERS):
+        logger.warning(
+            "Skipping legacy trade log with unexpected header: %s", path
+        )
+        return pd.DataFrame()
+
+    try:
         try:  # pandas >= 1.3
             df = pd.read_csv(
                 path,
@@ -638,47 +712,6 @@ def _read_history_frame(path: str) -> pd.DataFrame:
     except Exception as exc:  # pragma: no cover - diagnostic only
         logger.exception("Failed to read trade log file %s: %s", path, exc)
         return pd.DataFrame()
-
-    if df.empty or not any(
-        any(key in str(col).lower() for key in _EXPECTED_HISTORY_KEYS)
-        for col in df.columns
-    ):
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                reader = csv.DictReader(fh)
-                rows = list(reader)
-            if rows:
-                df = pd.DataFrame(rows)
-        except Exception as exc:  # pragma: no cover - diagnostic only
-            logger.exception("Fallback CSV parsing failed for %s: %s", path, exc)
-
-    if not df.empty:
-        cols_lower = [str(col).lower() for col in df.columns]
-        if not any(
-            any(key in col for key in _EXPECTED_HISTORY_KEYS) for col in cols_lower
-        ):
-            try:
-                try:  # pandas >= 1.3
-                    df = pd.read_csv(
-                        path,
-                        header=None,
-                        names=TRADE_HISTORY_HEADERS,
-                        encoding="utf-8",
-                        on_bad_lines="skip",
-                        engine="python",
-                    )
-                except TypeError:  # pragma: no cover - older pandas
-                    df = pd.read_csv(
-                        path,
-                        header=None,
-                        names=TRADE_HISTORY_HEADERS,
-                        encoding="utf-8",
-                        engine="python",
-                        error_bad_lines=False,
-                        warn_bad_lines=False,
-                    )
-            except Exception as exc:  # pragma: no cover - diagnostic only
-                logger.exception("Failed to recover trade log file %s: %s", path, exc)
 
     return df
 

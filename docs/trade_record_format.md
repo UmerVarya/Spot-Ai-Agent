@@ -80,3 +80,7 @@ trade_id,timestamp,symbol,direction,entry_time,exit_time,entry,exit,size,notiona
 ```
 
 A single trade may produce multiple rows if partial take-profits occur. Rows are grouped by `trade_id` (falling back to `entry_time`, `symbol` and `strategy` when absent) and collapsed into one summary row by `_deduplicate_history`. PnL, size and notional values are summed for the whole trade, while per-stage fields such as `pnl_tp1`, `pnl_tp2`, `size_tp1`, `size_tp2`, `notional_tp1` and `notional_tp2` detail the contribution of each partial exit alongside the `tp1_partial`/`tp2_partial` flags.
+
+## Legacy files
+
+Logs created before the unified schema lacked the canonical header row, which caused downstream tools to mislabel fields (for example the dashboard rendering numeric IDs under the **Symbol** column). When `trade_storage.log_trade_result` encounters one of these legacy files it now moves it aside as `historical_trades.csv.legacy-<timestamp>` and starts a fresh log with the correct header. Likewise, `load_trade_history_df` ignores CSVs whose first line does not match the canonical header to prevent misaligned data from reaching the dashboard.
