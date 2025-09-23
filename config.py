@@ -17,14 +17,17 @@ def get(key: str, default: str | None = None) -> str | None:
     return os.getenv(key, default)
 
 
-# Default Groq model and mapping for deprecated names
-# ``llama-3.1-70b-versatile`` has been decommissioned; use a currently
-# available model instead.
-DEFAULT_GROQ_MODEL = "llama-3.1-70b"
+# Default Groq model and mapping for deprecated names.
+# ``llama3-70b-8192`` (and the shorter alias ``llama-3.1-70b``) have been
+# retired by Groq.  The currently supported drop-in replacement is
+# ``llama-3.1-70b-versatile`` which mirrors the earlier capabilities while
+# remaining available through the public API.
+DEFAULT_GROQ_MODEL = "llama-3.1-70b-versatile"
 _DEPRECATED_GROQ_MODELS = {
     "llama3-70b-8192": DEFAULT_GROQ_MODEL,
-    "llama-3.1-70b-versatile": DEFAULT_GROQ_MODEL,
+    "llama-3.1-70b": DEFAULT_GROQ_MODEL,
 }
+_DEPRECATED_LOOKUP = {key.lower(): value for key, value in _DEPRECATED_GROQ_MODELS.items()}
 
 
 def get_groq_model() -> str:
@@ -34,5 +37,16 @@ def get_groq_model() -> str:
     the current default model so API calls do not fail with a 400 error.
     """
 
-    model = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL)
-    return _DEPRECATED_GROQ_MODELS.get(model, model)
+    raw_model = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL)
+    if raw_model is None:
+        return DEFAULT_GROQ_MODEL
+
+    normalized = raw_model.strip()
+    if not normalized:
+        return DEFAULT_GROQ_MODEL
+
+    replacement = _DEPRECATED_LOOKUP.get(normalized.lower())
+    if replacement:
+        return replacement
+
+    return normalized

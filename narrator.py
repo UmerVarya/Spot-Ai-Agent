@@ -2,6 +2,7 @@ import os
 from groq import Groq
 from dotenv import load_dotenv
 import config
+from groq_safe import safe_chat_completion
 
 load_dotenv()
 
@@ -49,12 +50,13 @@ Trade Details:
 - News Headlines: {headlines[:3]}  # Use top 3 headlines only
 """
 
-        response = client.chat.completions.create(
+        response = safe_chat_completion(
+            client,
             model=config.get_groq_model(),
             messages=[
                 {"role": "system", "content": "You are a professional crypto trading strategist."},
                 {"role": "user", "content": prompt}
-            ]
+            ],
         )
 
         return response.choices[0].message.content.strip()

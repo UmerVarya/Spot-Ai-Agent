@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from groq import Groq
 import config
+from groq_safe import safe_chat_completion
 
 from log_utils import setup_logger
 
@@ -89,7 +90,8 @@ def analyze_news_with_llm(events: List[Dict[str, str]]) -> Dict[str, str]:
     prompt = build_news_prompt(events)
     client = Groq(api_key=GROQ_API_KEY)
     try:
-        chat_completion = client.chat.completions.create(
+        chat_completion = safe_chat_completion(
+            client,
             model=config.get_groq_model(),
             messages=[
                 {"role": "system", "content": "You are a crypto macro risk analyst."},
