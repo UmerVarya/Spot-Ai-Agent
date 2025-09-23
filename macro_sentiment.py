@@ -5,6 +5,7 @@ from log_utils import setup_logger
 
 # Centralised configuration loader
 import config
+from groq_safe import safe_chat_completion
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -34,12 +35,13 @@ Confidence: <0-10 score>
 """
 
     try:
-        response = client.chat.completions.create(
+        response = safe_chat_completion(
+            client,
             model=config.get_groq_model(),
             messages=[
                 {"role": "system", "content": "You are a crypto macro market analyst."},
                 {"role": "user", "content": prompt}
-            ]
+            ],
         )
 
         result = response.choices[0].message.content.strip()

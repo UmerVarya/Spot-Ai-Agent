@@ -20,6 +20,7 @@ import os
 
 from dotenv import load_dotenv
 import config
+from groq_safe import safe_chat_completion
 
 load_dotenv()
 
@@ -78,7 +79,8 @@ Write a short, confident explanation justifying the trade in plain English. End 
 """
 
     try:
-        response = client.chat.completions.create(
+        response = safe_chat_completion(
+            client,
             model=config.get_groq_model(),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,

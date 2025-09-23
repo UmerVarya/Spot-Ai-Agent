@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 from log_utils import setup_logger
 import config
+from groq_safe import safe_chat_completion
 
 load_dotenv()
 logger = setup_logger(__name__)
@@ -51,9 +52,10 @@ Now here are the upcoming events:
 def analyze_news_with_llm(prompt):
     try:
         client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        response = client.chat.completions.create(
+        response = safe_chat_completion(
+            client,
             model=config.get_groq_model(),
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
         )
         reply = response.choices[0].message.content
         return json.loads(reply)

@@ -25,6 +25,11 @@ import asyncio
 import time
 import config
 from log_utils import setup_logger
+from groq_safe import (
+    describe_error,
+    extract_error_payload,
+    is_model_decommissioned_error,
+)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -83,23 +88,54 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
         start = time.perf_counter()
         response = requests.post(GROQ_API_URL, headers=HEADERS, json=data)
         latency = time.perf_counter() - start
-        if response.status_code == 200:
-            content = (
-                response.json()
-                .get("choices", [])[0]
-                .get("message", {})
-                .get("content", "")
-                .strip()
-            )
-            logger.info("LLM call succeeded in %.2fs", latency)
-            return content
-        logger.error(
-            "LLM request failed in %.2fs: %s, %s",
-            latency,
-            response.status_code,
-            response.text,
+        model_used = data["model"]
+
+        if response.status_code != 200:
+            error_detail = extract_error_payload(response)
+            if (
+                response.status_code == 400
+                and model_used != config.DEFAULT_GROQ_MODEL
+                and is_model_decommissioned_error(error_detail)
+            ):
+                fallback_model = config.DEFAULT_GROQ_MODEL
+                logger.warning(
+                    "Groq model %s unavailable (%s). Retrying with fallback model %s.",
+                    model_used,
+                    describe_error(error_detail),
+                    fallback_model,
+                )
+                data = {**data, "model": fallback_model}
+                start = time.perf_counter()
+                response = requests.post(GROQ_API_URL, headers=HEADERS, json=data)
+                latency = time.perf_counter() - start
+                model_used = fallback_model
+                if response.status_code != 200:
+                    retry_detail = extract_error_payload(response)
+                    logger.error(
+                        "LLM request failed in %.2fs: %s, %s",
+                        latency,
+                        response.status_code,
+                        describe_error(retry_detail) or response.text,
+                    )
+                    return "LLM error: Unable to generate response."
+            else:
+                logger.error(
+                    "LLM request failed in %.2fs: %s, %s",
+                    latency,
+                    response.status_code,
+                    describe_error(error_detail) or response.text,
+                )
+                return "LLM error: Unable to generate response."
+
+        content = (
+            response.json()
+            .get("choices", [])[0]
+            .get("message", {})
+            .get("content", "")
+            .strip()
         )
-        return "LLM error: Unable to generate response."
+        logger.info("LLM call succeeded in %.2fs", latency)
+        return content
     except Exception as e:
         latency = time.perf_counter() - start if 'start' in locals() else 0.0
         logger.error("LLM Exception after %.2fs: %s", latency, e, exc_info=True)
@@ -130,22 +166,67 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
         async with aiohttp.ClientSession() as session:
             async with session.post(GROQ_API_URL, headers=HEADERS, json=data) as resp:
                 latency = time.perf_counter() - start
-                if resp.status == 200:
-                    result = await resp.json()
-                    logger.info("Async LLM call succeeded in %.2fs", latency)
-                    return (
-                        result.get("choices", [])[0]
-                        .get("message", {})
-                        .get("content", "")
-                        .strip()
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    try:
+                        error_detail = json.loads(error_text)
+                    except Exception:
+                        error_detail = error_text
+                    if (
+                        resp.status == 400
+                        and data["model"] != config.DEFAULT_GROQ_MODEL
+                        and is_model_decommissioned_error(error_detail)
+                    ):
+                        fallback_model = config.DEFAULT_GROQ_MODEL
+                        logger.warning(
+                            "Groq model %s unavailable (%s). Retrying with fallback model %s.",
+                            data["model"],
+                            describe_error(error_detail),
+                            fallback_model,
+                        )
+                        retry_payload = {**data, "model": fallback_model}
+                        start = time.perf_counter()
+                        async with session.post(
+                            GROQ_API_URL, headers=HEADERS, json=retry_payload
+                        ) as retry_resp:
+                            latency = time.perf_counter() - start
+                            if retry_resp.status == 200:
+                                result = await retry_resp.json()
+                                logger.info("Async LLM call succeeded in %.2fs", latency)
+                                return (
+                                    result.get("choices", [])[0]
+                                    .get("message", {})
+                                    .get("content", "")
+                                    .strip()
+                                )
+                            retry_text = await retry_resp.text()
+                            try:
+                                retry_detail = json.loads(retry_text)
+                            except Exception:
+                                retry_detail = retry_text
+                            logger.error(
+                                "LLM request failed in %.2fs: %s, %s",
+                                latency,
+                                retry_resp.status,
+                                describe_error(retry_detail) or retry_text,
+                            )
+                            return "LLM error: Unable to generate response."
+                    logger.error(
+                        "LLM request failed in %.2fs: %s, %s",
+                        latency,
+                        resp.status,
+                        describe_error(error_detail) or error_text,
                     )
-                logger.error(
-                    "LLM request failed in %.2fs: %s, %s",
-                    latency,
-                    resp.status,
-                    await resp.text(),
+                    return "LLM error: Unable to generate response."
+
+                result = await resp.json()
+                logger.info("Async LLM call succeeded in %.2fs", latency)
+                return (
+                    result.get("choices", [])[0]
+                    .get("message", {})
+                    .get("content", "")
+                    .strip()
                 )
-                return "LLM error: Unable to generate response."
     except Exception as e:
         latency = time.perf_counter() - start if 'start' in locals() else 0.0
         logger.error("Async LLM Exception after %.2fs: %s", latency, e, exc_info=True)

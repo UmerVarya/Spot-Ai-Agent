@@ -5,6 +5,11 @@ import requests
 from dotenv import load_dotenv
 from log_utils import setup_logger
 import config
+from groq_safe import (
+    describe_error,
+    extract_error_payload,
+    is_model_decommissioned_error,
+)
 
 load_dotenv()
 
@@ -52,9 +57,50 @@ def analyze_macro_news(news_text: str) -> dict:
     except Exception as e:
         logger.error("Error connecting to Groq API: %s", e, exc_info=True)
         return {"bias": "neutral", "confidence": 5.0, "summary": "No analysis (API error)"}
+
     if not response.ok:
-        logger.error("Groq API returned error: %s, %s", response.status_code, response.text)
-        return {"bias": "neutral", "confidence": 5.0, "summary": "No analysis (API error)"}
+        error_detail = extract_error_payload(response)
+        if (
+            response.status_code == 400
+            and payload["model"] != config.DEFAULT_GROQ_MODEL
+            and is_model_decommissioned_error(error_detail)
+        ):
+            fallback_model = config.DEFAULT_GROQ_MODEL
+            logger.warning(
+                "Groq model %s unavailable (%s). Retrying with fallback model %s.",
+                payload["model"],
+                describe_error(error_detail),
+                fallback_model,
+            )
+            payload = {**payload, "model": fallback_model}
+            try:
+                response = requests.post(GROQ_ENDPOINT, headers=headers, json=payload)
+            except Exception as e:
+                logger.error("Groq fallback request failed: %s", e, exc_info=True)
+                return {
+                    "bias": "neutral",
+                    "confidence": 5.0,
+                    "summary": "No analysis (API error)",
+                }
+            if not response.ok:
+                fallback_detail = extract_error_payload(response)
+                logger.error(
+                    "Groq API returned error after fallback: %s, %s",
+                    response.status_code,
+                    describe_error(fallback_detail) or response.text,
+                )
+                return {
+                    "bias": "neutral",
+                    "confidence": 5.0,
+                    "summary": "No analysis (API error)",
+                }
+        else:
+            logger.error(
+                "Groq API returned error: %s, %s",
+                response.status_code,
+                describe_error(error_detail) or response.text,
+            )
+            return {"bias": "neutral", "confidence": 5.0, "summary": "No analysis (API error)"}
     # Extract the content from the API response
     result_text = ""
     try:
