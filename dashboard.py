@@ -457,12 +457,35 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     profit_riding = data.get("profit_riding", False)
     current_price = get_live_price(symbol)
     # Validate required fields
-    if current_price is None or entry is None or direction is None:
+    if entry is None or direction is None:
         return None
     try:
         entry_price = float(entry)
     except Exception:
         return None
+    if current_price is None:
+        # Fall back to any price snapshot stored with the trade data.  The agent
+        # currently persists only the entry price for active trades when the
+        # Binance client is unavailable (e.g. in offline or testing
+        # environments).  Showing the trade with a stale price is preferable to
+        # hiding it entirely from the dashboard, so we degrade gracefully by
+        # using the last known price and defaulting to the entry price when
+        # nothing else is provided.
+        fallback_fields = (
+            data.get("last_price"),
+            data.get("current_price"),
+            data.get("price"),
+        )
+        for candidate in fallback_fields:
+            if candidate is None:
+                continue
+            try:
+                current_price = float(candidate)
+                break
+            except Exception:
+                continue
+        if current_price is None:
+            current_price = entry_price
     try:
         size_val = float(size_field)
     except Exception:
