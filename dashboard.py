@@ -23,6 +23,7 @@ could be added in future iterations.
 import streamlit as st
 import pandas as pd
 import numpy as np
+import csv
 import os
 from pathlib import Path
 from datetime import datetime, timezone
@@ -207,17 +208,163 @@ LEGACY = [
     "/home/ubuntu/spot_data/completed_trades.csv",   # very old default path
 ]
 
+PARSE_ERROR_TOKEN = "[parse error]"
+_RECOVER_TEXT_COLUMNS = {"llm_error", "narrative", "outcome_desc"}
+
+
+def _repair_bad_row(fields: list[str], headers: list[str]) -> list[str]:
+    """Return ``fields`` padded to ``headers`` while flagging parse issues."""
+
+    expected = len(headers)
+    if expected == 0:
+        return list(fields)
+    result = [PARSE_ERROR_TOKEN] * expected
+    total_fields = len(fields)
+    pointer = 0
+    idx = 0
+    while idx < expected and pointer < total_fields:
+        column = headers[idx]
+        remaining_cols = expected - idx
+        remaining_fields = total_fields - pointer
+        if column in _RECOVER_TEXT_COLUMNS and remaining_fields > remaining_cols:
+            tail_cols = expected - idx - 1
+            value_end = total_fields - tail_cols
+            if value_end <= pointer:
+                value_end = pointer + 1
+            value_parts = fields[pointer:value_end]
+            recovered = ",".join(value_parts).strip()
+            result[idx] = (
+                f"{PARSE_ERROR_TOKEN}: {recovered}"
+                if recovered
+                else PARSE_ERROR_TOKEN
+            )
+            pointer = value_end
+        else:
+            result[idx] = fields[pointer]
+            pointer += 1
+        idx += 1
+    while idx < expected and pointer < total_fields:
+        result[idx] = fields[pointer]
+        pointer += 1
+        idx += 1
+    return result
+
+
+def _relaxed_split(line: str) -> list[str]:
+    """Split ``line`` treating stray quotes as literal characters."""
+
+    fields: list[str] = []
+    current: list[str] = []
+    in_quotes = False
+    i = 0
+    length = len(line)
+    while i < length:
+        ch = line[i]
+        if ch == '"':
+            if in_quotes:
+                next_char = line[i + 1] if i + 1 < length else ""
+                if next_char == '"':
+                    current.append('"')
+                    i += 1
+                elif next_char in {",", "\n", "\r"}:
+                    in_quotes = False
+                else:
+                    current.append('"')
+            else:
+                in_quotes = True
+        elif ch == "," and not in_quotes:
+            fields.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+    fields.append("".join(current).rstrip("\r\n"))
+    return fields
+
+
+def _read_csv_with_recovery(path: Path) -> tuple[pd.DataFrame, int]:
+    """Read ``path`` tolerating malformed rows.
+
+    Returns the DataFrame and the count of recovered rows.
+    """
+
+    recovered_rows = 0
+    headers: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            header_line = handle.readline()
+        if header_line:
+            headers = next(csv.reader([header_line]))
+    except Exception:
+        headers = []
+
+    def _handle_bad_line(fields: list[str]) -> list[str]:
+        nonlocal recovered_rows
+        recovered_rows += 1
+        return _repair_bad_row(fields, headers)
+
+    on_bad_lines: object
+    if headers:
+        on_bad_lines = _handle_bad_line
+    else:
+        on_bad_lines = "error"
+
+    try:
+        df = pd.read_csv(
+            str(path),
+            engine="python",
+            on_bad_lines=on_bad_lines,
+        )
+    except pd.errors.ParserError:
+        if not headers:
+            return pd.DataFrame(), recovered_rows
+        df, manual_recovered = _manual_csv_recovery(path, headers)
+        recovered_rows += manual_recovered
+        return df, recovered_rows
+
+    if headers and df.empty:
+        with path.open("r", encoding="utf-8") as handle:
+            next(handle, "")
+            has_data = any(line.strip() for line in handle)
+        if has_data:
+            df, manual_recovered = _manual_csv_recovery(path, headers)
+            recovered_rows += manual_recovered
+    return df, recovered_rows
+
+
+def _manual_csv_recovery(path: Path, headers: list[str]) -> tuple[pd.DataFrame, int]:
+    rows: list[list[str]] = []
+    manual_recovered = 0
+    with path.open("r", encoding="utf-8") as handle:
+        next(handle, "")
+        for raw in handle:
+            if not raw.strip():
+                continue
+            try:
+                parsed = next(csv.reader([raw]))
+            except csv.Error:
+                parsed = _relaxed_split(raw)
+            manual_recovered += 1
+            rows.append(_repair_bad_row(parsed, headers))
+    if not rows:
+        return pd.DataFrame(columns=headers), manual_recovered
+    return pd.DataFrame(rows, columns=headers), manual_recovered
+
+
 @st.cache_data(ttl=30)
 def _read_history_frame(path: str) -> pd.DataFrame:
     p = Path(path)
     if not p.exists() or not p.is_file():
         return pd.DataFrame()
     try:
-        df = pd.read_csv(str(p), on_bad_lines="skip", engine="python")
+        df, recovered_rows = _read_csv_with_recovery(p)
     except Exception as e:
-        # Show a hint in the UI and return empty rather than crashing the page
         st.warning(f"Could not read {p}: {e}")
         return pd.DataFrame()
+    if recovered_rows:
+        st.warning(
+            f"Recovered {recovered_rows} malformed row(s) while reading {p.name}."
+        )
     df = normalise_history_columns(df)
     # normalize types that downstream filters expect
     if "timestamp" in df.columns:
