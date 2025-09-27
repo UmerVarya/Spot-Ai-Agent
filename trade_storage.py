@@ -69,6 +69,7 @@ OUTCOME_DESCRIPTIONS = {
 # ``TRADE_HISTORY_HEADERS`` is kept as an alias for backwards compatibility.
 TRADE_HISTORY_HEADERS = TRADE_HISTORY_COLUMNS
 MISSING_VALUE = "N/A"
+ERROR_VALUE = "error"
 
 
 def _normalise_header_line(header_line: str) -> list[str]:
@@ -80,6 +81,17 @@ def _normalise_header_line(header_line: str) -> list[str]:
     if not cleaned:
         return []
     return [segment.strip().strip('"').lower() for segment in cleaned.split(",")]
+
+
+def _parse_header_columns(header_line: str) -> list[str]:
+    """Return the raw header columns from ``header_line`` preserving casing."""
+
+    if not header_line:
+        return []
+    cleaned = header_line.strip().lstrip("\ufeff")
+    if not cleaned:
+        return []
+    return [segment.strip().strip('"') for segment in cleaned.split(",")]
 
 
 def _header_is_compatible(header_line: str, headers: Sequence[str]) -> bool:
@@ -393,7 +405,9 @@ def log_trade_result(
 
     # Build headers including notional.  Using a shared constant keeps the
     # writer and reader in sync.
-    headers = TRADE_HISTORY_HEADERS
+    headers = list(TRADE_HISTORY_HEADERS)
+    existing_headers: list[str] = []
+    header_rename_map: dict[str, str] = {}
 
     def _optional_text_field(value: Optional[str]) -> str:
         if value is None:
@@ -408,7 +422,19 @@ def log_trade_result(
         try:
             return float(value)
         except Exception:
+            return ERROR_VALUE
+
+    def _serialise_extra_field(value: Optional[object]):
+        if value is None:
             return MISSING_VALUE
+        if isinstance(value, (str, int, float)):
+            return value
+        if isinstance(value, bool):
+            return value
+        try:
+            return json.dumps(value)
+        except Exception:
+            return ERROR_VALUE
 
     entry_price = trade.get("entry")
     size_val = trade.get("size", trade.get("position_size", 0))
@@ -558,6 +584,13 @@ def log_trade_result(
             first_line = ""
         if _header_is_compatible(first_line, headers):
             header_needed = False
+            existing_headers = _parse_header_columns(first_line)
+            if existing_headers:
+                headers = existing_headers
+                try:
+                    header_rename_map = build_rename_map(existing_headers)
+                except Exception:
+                    header_rename_map = {col: col for col in existing_headers}
         else:
             backup_path = _archive_legacy_history_file(TRADE_HISTORY_FILE)
             if backup_path is None:
@@ -572,8 +605,40 @@ def log_trade_result(
             file_exists = False
             header_needed = True
 
+    if header_needed:
+        header_rename_map = {col: col for col in headers}
+        for key in trade.keys():
+            if key not in header_rename_map:
+                headers.append(key)
+                header_rename_map[key] = key
+
+    if not header_rename_map:
+        header_rename_map = {col: col for col in headers}
+
     os.makedirs(os.path.dirname(TRADE_HISTORY_FILE), exist_ok=True)
-    df_row = pd.DataFrame([row], columns=headers)
+    final_row: dict[str, object] = {}
+    for column in headers:
+        canonical = header_rename_map.get(column, column)
+        value = None
+        if canonical in row:
+            value = row[canonical]
+        elif column in row:
+            value = row[column]
+        elif canonical in trade:
+            value = trade.get(canonical)
+        elif column in trade:
+            value = trade.get(column)
+
+        if value is None:
+            final_row[column] = MISSING_VALUE
+        elif isinstance(value, (int, float, bool)):
+            final_row[column] = value
+        elif column in row or canonical in row:
+            final_row[column] = value
+        else:
+            final_row[column] = _serialise_extra_field(value)
+
+    df_row = pd.DataFrame([{col: final_row.get(col, MISSING_VALUE) for col in headers}], columns=headers)
     df_row.to_csv(
         TRADE_HISTORY_FILE,
         mode="a",
