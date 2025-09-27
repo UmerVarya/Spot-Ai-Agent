@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 from log_utils import setup_logger
+from trade_schema import normalise_history_columns
 from trade_storage import TRADE_HISTORY_FILE
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -21,13 +22,19 @@ def optimize_indicator_weights(base_weights: dict, lookback: int = 200) -> dict:
     try:
         signals = pd.read_csv(SIGNAL_LOG_FILE).tail(lookback)
         trades = pd.read_csv(TRADE_HISTORY_FILE).tail(lookback)
+        trades = normalise_history_columns(trades)
 
         # Normalize keys consistently on both frames
         for df in (signals, trades):
             if "symbol" in df.columns:
                 df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
             if "timestamp" in df.columns:
-                df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+                df["timestamp"] = pd.to_datetime(
+                    df["timestamp"], errors="coerce", utc=True
+                )
+
+        if trades.empty or "outcome" not in trades.columns:
+            return base_weights
 
         merged = pd.merge(
             signals,
