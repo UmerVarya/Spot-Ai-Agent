@@ -87,6 +87,7 @@ COLUMN_SYNONYMS: Dict[str, str] = {
     "exitprice": "exit",
     "exit": "exit",
     "exittime": "exit_time",
+    "timeexit": "exit_time",
     "exittimestamp": "exit_time",
     "positionsize": "position_size",
     "qty": "position_size",
