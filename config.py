@@ -18,14 +18,16 @@ def get(key: str, default: str | None = None) -> str | None:
 
 
 # Default Groq model and mapping for deprecated names.
-# ``llama3-70b-8192`` (and the shorter alias ``llama-3.1-70b``) have been
-# retired by Groq.  The currently supported drop-in replacement is
-# ``llama-3.1-70b-versatile`` which mirrors the earlier capabilities while
-# remaining available through the public API.
-DEFAULT_GROQ_MODEL = "llama-3.1-70b-versatile"
+# Groq periodically retires older Llama releases (for example the
+# ``llama-3.1-70b-versatile`` variant).  To keep the application working
+# without manual intervention we map known, deprecated identifiers to the
+# latest compatible default.  Update the mapping whenever Groq announces a
+# replacement model.
+DEFAULT_GROQ_MODEL = "llama-3.2-70b-versatile"
 _DEPRECATED_GROQ_MODELS = {
     "llama3-70b-8192": DEFAULT_GROQ_MODEL,
     "llama-3.1-70b": DEFAULT_GROQ_MODEL,
+    "llama-3.1-70b-versatile": DEFAULT_GROQ_MODEL,
 }
 _DEPRECATED_LOOKUP = {key.lower(): value for key, value in _DEPRECATED_GROQ_MODELS.items()}
 
