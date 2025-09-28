@@ -32,6 +32,8 @@ from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
 from backtest import compute_buy_and_hold_pnl, generate_trades_from_ohlcv
 from ml_model import train_model
 
+BINANCE_FEE_RATE = 0.00075
+
 try:
     import altair as alt  # type: ignore
 except Exception:  # pragma: no cover
@@ -958,10 +960,15 @@ def render_live_tab() -> None:
                     col = col.iloc[:, 0]
                 series = pd.to_numeric(col, errors="coerce")
             else:
-                series = pd.Series([0] * len(df), index=df.index)
-            return series.reindex(df.index).fillna(0)
+                series = pd.Series([0.0] * len(df), index=df.index, dtype=float)
+            return series.reindex(df.index).fillna(0.0)
 
-        fees = _numeric_series(hist_df, "fees")
+        entry_notional = entries.fillna(0.0).abs() * quantity_series
+        exit_notional = exits.fillna(0.0).abs() * quantity_series
+        estimated_fees = ((entry_notional + exit_notional) * BINANCE_FEE_RATE).fillna(0.0)
+        existing_fees = _numeric_series(hist_df, "fees").fillna(0.0)
+        fees = estimated_fees.where(existing_fees.abs() <= 1e-9, existing_fees)
+        hist_df["Fees (USDT)"] = fees
         slippage = _numeric_series(hist_df, "slippage")
         # Determine direction multiplier and compute PnL safely
         def _to_float_series(s, index):
@@ -980,15 +987,21 @@ def render_live_tab() -> None:
 
         idx = hist_df.index
         pnl_source = None
-        for col in ("pnl", "net_pnl"):
+        pnl_source_name: str | None = None
+        for col in ("net_pnl", "pnl"):
             if col in hist_df.columns:
                 candidate = numcol(hist_df, col)
                 if candidate.notna().any():
                     pnl_source = candidate
+                    pnl_source_name = col
                     break
         if pnl_source is not None:
-            pnl_net = pnl_source.fillna(0.0)
-            pnl_gross = pnl_net + fees + slippage
+            if pnl_source_name == "net_pnl":
+                pnl_net = pnl_source.fillna(0.0)
+                pnl_gross = pnl_net + fees + slippage
+            else:
+                pnl_gross = pnl_source.fillna(0.0)
+                pnl_net = pnl_gross - fees - slippage
         else:
             entries_aln = _to_float_series(entries, idx)
             exits_aln = _to_float_series(exits, idx)
