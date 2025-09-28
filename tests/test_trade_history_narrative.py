@@ -31,6 +31,11 @@ def test_load_trade_history_df_handles_narrative(tmp_path, monkeypatch):
         "strategy": "pattern1",
         "session": "us",
         "narrative": 'Error: something, details {"foo": 1}',
+        "llm_decision": "Approved breakout",
+        "llm_approval": True,
+        "llm_confidence": 7.5,
+        "technical_indicator_score": 6.4,
+        "exit_reason": "TP1 hit",
     }
     path = tmp_path / "history.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:

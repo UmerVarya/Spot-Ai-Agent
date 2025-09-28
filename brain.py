@@ -21,6 +21,8 @@ from log_utils import setup_logger
 import logging
 import math
 
+from trade_utils import summarise_technical_score
+
 logger = setup_logger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -176,6 +178,9 @@ def should_trade(
         A dictionary with keys ``decision`` (bool), ``confidence`` (float),
         ``reason`` (str) and optionally ``narrative`` (str).
     """
+    initial_direction = direction or "long"
+    technical_score = summarise_technical_score(indicators, initial_direction)
+
     try:
         sentiment_bias: str = sentiment.get("bias", "neutral")  # type: ignore[arg-type]
         sentiment_confidence: float = sentiment.get("score", 5.0)  # type: ignore[arg-type]
@@ -185,6 +190,11 @@ def should_trade(
                 "decision": False,
                 "confidence": 0.0,
                 "reason": "Macro news unsafe: " + macro_news.get("reason", "unknown"),
+                "llm_decision": None,
+                "llm_approval": None,
+                "llm_confidence": None,
+                "llm_error": False,
+                "technical_indicator_score": technical_score,
             }
 
         news_summary = summarize_recent_news()
@@ -264,6 +274,9 @@ def should_trade(
             direction = "long"
             logger.info("Fallback direction applied: long (Sentiment: %s)", sentiment_bias)
 
+        if direction != initial_direction:
+            technical_score = summarise_technical_score(indicators, direction)
+
         confidence: float = float(score)
 
         # Sentiment adjustments
@@ -342,8 +355,10 @@ def should_trade(
                 "confidence": final_confidence,
                 "reason": "Trade direction is not long (spot-only mode)",
                 "llm_decision": None,
+                "llm_approval": None,
                 "llm_confidence": None,
                 "llm_error": False,
+                "technical_indicator_score": technical_score,
             }
         if score < score_threshold:
             return {
@@ -351,8 +366,10 @@ def should_trade(
                 "confidence": final_confidence,
                 "reason": f"Score {score:.2f} below threshold {score_threshold:.2f}",
                 "llm_decision": None,
+                "llm_approval": None,
                 "llm_confidence": None,
                 "llm_error": False,
+                "technical_indicator_score": technical_score,
             }
         # Require a minimum confidence but allow more flexibility for scalping.
         # Original implementation rejected trades below 4.5; we relax this to 4.0
@@ -364,8 +381,10 @@ def should_trade(
                 "confidence": final_confidence,
                 "reason": "Low confidence",
                 "llm_decision": None,
+                "llm_approval": None,
                 "llm_confidence": None,
                 "llm_error": False,
+                "technical_indicator_score": technical_score,
             }
 
         advisor_rating: float | None = None
@@ -426,9 +445,11 @@ def should_trade(
                 "reason": "LLM unavailable or returned error; auto-approval",
                 "narrative": narrative,
                 "news_summary": news_summary,
-                "llm_decision": True,
+                "llm_decision": "LLM unavailable",
+                "llm_approval": True,
                 "llm_confidence": None,
                 "llm_error": True,
+                "technical_indicator_score": technical_score,
             }
 
         # Parse the LLM response (JSON or fallback)
@@ -458,9 +479,11 @@ def should_trade(
                 "reason": f"LLM advisor vetoed trade: {advisor_reason}",
                 "narrative": advisor_thesis,
                 "news_summary": news_summary,
-                "llm_decision": parsed_decision,
+                "llm_decision": advisor_reason,
+                "llm_approval": parsed_decision,
                 "llm_confidence": advisor_rating,
                 "llm_error": False,
+                "technical_indicator_score": technical_score,
             }
 
         # Generate narrative
@@ -484,9 +507,11 @@ def should_trade(
             "reason": "All filters passed",
             "narrative": narrative,
             "news_summary": news_summary,
-            "llm_decision": parsed_decision,
+            "llm_decision": advisor_reason or "Approved",
+            "llm_approval": True,
             "llm_confidence": advisor_rating,
             "llm_error": False,
+            "technical_indicator_score": technical_score,
         }
 
     except Exception as e:
@@ -495,6 +520,8 @@ def should_trade(
             "confidence": 0.0,
             "reason": f"Error in should_trade(): {e}",
             "llm_decision": None,
+            "llm_approval": None,
             "llm_confidence": None,
             "llm_error": True,
+            "technical_indicator_score": technical_score,
         }

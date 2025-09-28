@@ -21,12 +21,12 @@ BAN_COLS = {
     "pnl", "pnl_quote", "pnl_net_quote", "pnl_pct",
     "outcome", "outcome_desc",
     "entry_time", "exit_time", "timestamp",
-    "trade_id", "narrative", "llm_error"
+    "trade_id", "narrative", "llm_error", "exit_reason"
 }
 
 # Candidate numeric/categorical features from your file. Add/remove as needed.
 CANDIDATES_NUM = [
-    "score", "confidence",
+    "score", "technical_indicator_score", "confidence",
     "btc_dominance", "fear_greed",
     "sentiment_bias", "sentiment_confidence",
     "volatility", "htf_trend",
@@ -36,7 +36,7 @@ CANDIDATES_NUM = [
 ]
 
 CANDIDATES_CAT = [
-    "symbol", "direction", "session", "strategy", "pattern", "llm_decision"
+    "symbol", "direction", "session", "strategy", "pattern", "llm_decision", "llm_approval"
 ]
 
 def load_split(name: str) -> pd.DataFrame:

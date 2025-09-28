@@ -3,7 +3,7 @@ import pandas as pd
 import os
 import json
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Any, Mapping
 import traceback
 import asyncio
 from log_utils import setup_logger
@@ -549,6 +549,68 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     except Exception as e:
         logger.warning("[INDICATOR] failed to compute some indicators: %s", e, exc_info=True)
     return df
+
+
+def summarise_technical_score(
+    indicators: Mapping[str, Any],
+    direction: str = "long",
+) -> float:
+    """Return a bounded 0–10 technical score summarising core indicators."""
+
+    def _extract(name: str, default: float) -> float:
+        raw = indicators.get(name)
+        if raw is None:
+            return default
+        try:
+            if hasattr(raw, "iloc"):
+                raw = raw.iloc[-1]
+        except Exception:
+            pass
+        try:
+            return float(raw)
+        except Exception:
+            return default
+
+    rsi = _extract("rsi", 50.0)
+    macd = _extract("macd", 0.0)
+    adx = _extract("adx", 20.0)
+    score = 5.0
+    bias = (direction or "long").strip().lower()
+
+    if bias == "short":
+        if rsi > 70:
+            score += 2.0
+        elif rsi > 55:
+            score += 0.5
+        elif rsi < 30:
+            score -= 2.0
+        elif rsi < 40:
+            score -= 0.5
+        macd_adj = max(min(-macd * 4.0, 1.5), -1.5)
+    else:
+        if rsi < 30:
+            score += 2.0
+        elif rsi < 45:
+            score += 0.5
+        elif rsi > 70:
+            score -= 2.0
+        elif rsi > 60:
+            score -= 0.5
+        macd_adj = max(min(macd * 4.0, 1.5), -1.5)
+
+    score += macd_adj
+
+    if adx >= 35:
+        score += 1.5
+    elif adx >= 25:
+        score += 1.0
+    elif adx >= 15:
+        score += 0.3
+    else:
+        score -= 0.7
+
+    return round(max(0.0, min(score, 10.0)), 2)
+
 
 def get_top_symbols(limit: int = 30) -> list:
     """Return the top quote-volume symbols trading against USDT."""

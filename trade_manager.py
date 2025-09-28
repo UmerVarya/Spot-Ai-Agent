@@ -378,6 +378,7 @@ def manage_trades() -> None:
                 exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 partial_trade['exit_price'] = tp1
                 partial_trade['exit_time'] = exit_time
+                partial_trade['exit_reason'] = "TP1 hit"
                 log_trade_result(
                     partial_trade,
                     outcome="tp1_partial",
@@ -420,6 +421,7 @@ def manage_trades() -> None:
                 exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 partial_trade['exit_price'] = tp2
                 partial_trade['exit_time'] = exit_time
+                partial_trade['exit_reason'] = "TP2 hit"
                 log_trade_result(
                     partial_trade,
                     outcome="tp2_partial",
@@ -463,6 +465,11 @@ def manage_trades() -> None:
                 trade['exit_price'] = sl
                 trade['exit_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 trade['outcome'] = "tp4_sl" if trade.get("profit_riding") else "sl"
+                trade['exit_reason'] = (
+                    "Trailing stop loss"
+                    if trade.get("profit_riding")
+                    else "Stop loss hit"
+                )
                 log_trade_result(
                     trade,
                     outcome=trade['outcome'],
@@ -510,6 +517,12 @@ def manage_trades() -> None:
                         exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                         partial_trade['exit_price'] = next_tp
                         partial_trade['exit_time'] = exit_time
+                        pct_reason = (
+                            f"{trail_pct * 100:.1f}% trail"
+                            if isinstance(trail_pct, (int, float))
+                            else "Trail target"
+                        )
+                        partial_trade['exit_reason'] = f"Trailing take profit ({pct_reason})"
                         log_trade_result(
                             partial_trade,
                             outcome="tp_trail",
@@ -545,6 +558,7 @@ def manage_trades() -> None:
                     trade['exit_price'] = current_price
                     trade['exit_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                     trade['outcome'] = "tp4"
+                    trade['exit_reason'] = "TP4 trailing exit"
                     log_trade_result(
                         trade,
                         outcome="tp4",

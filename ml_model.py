@@ -138,8 +138,9 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
             atr_val = float(row.get("atr", 0.0)) / 100.0
             vol_val = float(row.get("volume", 0.0)) / 1_000_000.0
             macd_rsi = macd_val * rsi_val  # interaction feature to filter noise
-            llm_decision_raw = row.get("llm_decision", True)
-            llm_decision = 1.0 if str(llm_decision_raw).lower() in {"1", "true", "yes"} else 0.0
+            approval_raw = row.get("llm_approval", row.get("llm_decision"))
+            llm_decision_bool = _coerce_bool(approval_raw)
+            llm_decision = 1.0 if llm_decision_bool is not False else 0.0
             llm_conf_raw = row.get("llm_confidence", 5.0)
             try:
                 llm_conf_val = float(llm_conf_raw) / 10.0
@@ -398,6 +399,27 @@ def _load_model_metadata() -> Dict[str, Any]:
         return {}
 
 
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    try:
+        if isinstance(value, (int, float)) and value == value:
+            if value in (0, 1):
+                return bool(value)
+    except Exception:
+        return None
+    token = str(value).strip().lower()
+    if not token:
+        return None
+    if token in {"true", "1", "yes", "approved", "y"}:
+        return True
+    if token in {"false", "0", "no", "vetoed", "n"}:
+        return False
+    return None
+
+
 def _prepare_feature_vector(
     score: float,
     confidence: float,
@@ -406,7 +428,7 @@ def _prepare_feature_vector(
     fg: float,
     sentiment_conf: float,
     pattern: str,
-    llm_decision: bool,
+    llm_approval: bool,
     llm_confidence: float,
     time_since_last: float,
     recent_win_rate: float,
@@ -422,7 +444,7 @@ def _prepare_feature_vector(
         fg / 100.0,
         sentiment_conf / 10.0,
         pattern_len / 10.0,
-        1.0 if llm_decision else 0.0,
+        1.0 if llm_approval else 0.0,
         llm_confidence / 10.0,
         time_since_last / 24.0,
         recent_win_rate,
@@ -437,11 +459,17 @@ def predict_success_probability(
     fg: float,
     sentiment_conf: float,
     pattern: str,
-    llm_decision: bool = True,
+    llm_approval: bool = True,
     llm_confidence: float = 5.0,
 ) -> float:
     """
     Predict the probability of a trade succeeding based on current features.
+
+    Parameters
+    ----------
+    llm_approval : bool, optional
+        Whether the LLM advisor approved the setup. Defaults to ``True`` when
+        the decision is unavailable so historical models remain compatible.
 
     The function loads the previously trained model.  If a pickled
     sklearn model exists (``ml_model.pkl``) it is used; otherwise it
@@ -485,7 +513,7 @@ def predict_success_probability(
             fg,
             sentiment_conf,
             pattern,
-            llm_decision,
+            llm_approval,
             llm_confidence,
             time_since_last,
             recent_win_rate,

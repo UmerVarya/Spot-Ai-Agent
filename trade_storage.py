@@ -424,6 +424,23 @@ def log_trade_result(
         except Exception:
             return ERROR_VALUE
 
+    def _optional_bool_field(value: Optional[object]):
+        if value is None or value == "":
+            return MISSING_VALUE
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            token = value.strip().lower()
+            if not token:
+                return MISSING_VALUE
+            if token in {"true", "1", "yes", "y", "approved"}:
+                return True
+            if token in {"false", "0", "no", "n", "vetoed"}:
+                return False
+        return ERROR_VALUE
+
     def _serialise_extra_field(value: Optional[object]):
         if value is None:
             return MISSING_VALUE
@@ -570,6 +587,7 @@ def log_trade_result(
         "outcome_desc": _optional_text_field(
             OUTCOME_DESCRIPTIONS.get(outcome, outcome)
         ),
+        "exit_reason": _optional_text_field(trade.get("exit_reason")),
         "strategy": _optional_text_field(strategy_value),
         "session": _optional_text_field(session_value),
         "confidence": _optional_numeric_field(trade.get("confidence")),
@@ -581,8 +599,12 @@ def log_trade_result(
         "pattern": _optional_text_field(trade.get("pattern")),
         "narrative": _optional_text_field(trade.get("narrative")),
         "llm_decision": _optional_text_field(trade.get("llm_decision")),
+        "llm_approval": _optional_bool_field(trade.get("llm_approval")),
         "llm_confidence": _optional_numeric_field(trade.get("llm_confidence")),
         "llm_error": _optional_text_field(trade.get("llm_error")),
+        "technical_indicator_score": _optional_numeric_field(
+            trade.get("technical_indicator_score")
+        ),
         "volatility": _optional_numeric_field(trade.get("volatility")),
         "htf_trend": _optional_numeric_field(trade.get("htf_trend")),
         "order_imbalance": _optional_numeric_field(trade.get("order_imbalance")),
@@ -904,6 +926,18 @@ def load_trade_history_df(path: Optional[str] = None) -> pd.DataFrame:
     # ------------------------------------------------------------------
     df = normalise_history_columns(df)
 
+    if "llm_approval" not in df.columns and "llm_decision" in df.columns:
+        decisions = df["llm_decision"].astype(str).str.lower()
+        positive = {"true", "1", "yes", "approved", "y"}
+        negative = {"false", "0", "no", "vetoed", "n"}
+        bool_mask = decisions.isin(positive | negative)
+        if bool_mask.any():
+            approved_mask = decisions.isin(positive)
+            df.loc[bool_mask, "llm_approval"] = approved_mask.loc[bool_mask]
+            df.loc[bool_mask, "llm_decision"] = approved_mask.loc[bool_mask].map(
+                {True: "approved", False: "vetoed"}
+            )
+
     # ------------------------------------------------------------------
     # Parse timestamps and drop rows that cannot be parsed at all
     # ------------------------------------------------------------------
@@ -968,6 +1002,15 @@ def load_trade_history_df(path: Optional[str] = None) -> pd.DataFrame:
         else:
             df[col] = False
 
+    if "llm_approval" in df.columns:
+        approval_raw = df["llm_approval"].astype(str).str.lower()
+        positive = {"true", "1", "yes", "approved", "y"}
+        negative = {"false", "0", "no", "vetoed", "n"}
+        approval_series = pd.Series(pd.NA, index=df.index, dtype="object")
+        approval_series.loc[approval_raw.isin(positive)] = True
+        approval_series.loc[approval_raw.isin(negative)] = False
+        df["llm_approval"] = approval_series
+
     numeric_columns = [
         "entry",
         "exit",
@@ -982,6 +1025,7 @@ def load_trade_history_df(path: Optional[str] = None) -> pd.DataFrame:
         "fear_greed",
         "sentiment_confidence",
         "score",
+        "technical_indicator_score",
         "llm_confidence",
         "volatility",
         "htf_trend",
@@ -1072,11 +1116,16 @@ def _maybe_send_llm_performance_email() -> None:
         avg_return = subset["return"].mean() * 100
         return count, win_rate, avg_return
 
-    llm_dec = df.get("llm_decision", pd.Series(dtype=str)).astype(str).str.lower()
     llm_err = df.get("llm_error", pd.Series(dtype=str)).astype(str).str.lower()
 
-    approved_mask = (llm_err != "true") & llm_dec.isin(["true", "1", "yes"])
-    vetoed_mask = (llm_err != "true") & llm_dec.isin(["false", "0", "no"])
+    if "llm_approval" in df.columns:
+        approval_series = df["llm_approval"]
+        approved_mask = (llm_err != "true") & approval_series.eq(True).fillna(False)
+        vetoed_mask = (llm_err != "true") & approval_series.eq(False).fillna(False)
+    else:
+        llm_dec = df.get("llm_decision", pd.Series(dtype=str)).astype(str).str.lower()
+        approved_mask = (llm_err != "true") & llm_dec.isin(["true", "1", "yes", "approved"])
+        vetoed_mask = (llm_err != "true") & llm_dec.isin(["false", "0", "no", "vetoed"])
     error_mask = llm_err.isin(["true", "1", "yes"])
 
     a_count, a_win, a_ret = _metrics(approved_mask)
