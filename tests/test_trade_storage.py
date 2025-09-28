@@ -1,8 +1,8 @@
-import json
-from pathlib import Path
+import csv
+import pandas as pd
+
 import trade_storage
 import trade_manager
-import csv
 
 
 def test_save_and_load_active_trades(tmp_path, monkeypatch):
@@ -51,6 +51,35 @@ def test_log_trade_result_extended_fields(tmp_path, monkeypatch):
     assert float(rows[0]["notional_tp2"]) == 0.0
     assert rows[0]["tp1_partial"] == "False"
     assert rows[0]["tp2_partial"] == "False"
+
+
+def test_log_trade_result_reassigns_misplaced_strategy_and_session(tmp_path, monkeypatch):
+    csv_path = tmp_path / "log.csv"
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
+    trade = {
+        "symbol": "BTCUSDT",
+        "direction": "long",
+        "entry": 1000,
+        "size": 1000,
+        "position_size": 1,
+        "strategy": "2025-09-27T13:46:34Z",
+        "session": "2025-09-27T18:46:41Z",
+        "pattern": "mean_reversion",
+    }
+
+    trade_storage.log_trade_result(
+        trade,
+        outcome="tp1",
+        exit_price=1100,
+        exit_time="2025-09-27T18:46:41.123Z",
+    )
+
+    df = pd.read_csv(csv_path)
+    assert df.loc[0, "entry_time"] == "2025-09-27T13:46:34Z"
+    assert df.loc[0, "strategy"] == "mean_reversion"
+    session_value = df.loc[0, "session"]
+    assert pd.isna(session_value) or session_value == "N/A"
+    assert str(df.loc[0, "exit_time"]).startswith("2025-09-27T18:46:41.123")
 
 
 def test_log_trade_result_partial_tp_fields(tmp_path, monkeypatch):

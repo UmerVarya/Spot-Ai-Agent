@@ -476,18 +476,71 @@ def log_trade_result(
     if isinstance(notional, (int, float)) and notional not in (0, 0.0):
         pnl_pct = (pnl_val / notional) * 100
 
+    def _parse_timestamp(value: Optional[object]) -> Optional[pd.Timestamp]:
+        """Return a timezone-aware timestamp when ``value`` resembles a date."""
+
+        if value is None:
+            return None
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned or cleaned.upper() == MISSING_VALUE.upper():
+                return None
+            value = cleaned
+        try:
+            dt = pd.to_datetime(value, errors="coerce", utc=True)
+        except Exception:
+            return None
+        if pd.isna(dt):
+            return None
+        return dt
+
+    strategy_raw = trade.get("strategy")
+    session_raw = trade.get("session")
+    strategy_ts = _parse_timestamp(strategy_raw)
+    session_ts = _parse_timestamp(session_raw)
+
     entry_time_source = trade.get("entry_time") or trade.get("open_time")
+    if not entry_time_source and strategy_ts is not None:
+        entry_time_source = strategy_raw
     entry_time_value = MISSING_VALUE
-    if entry_time_source:
-        entry_dt = pd.to_datetime(entry_time_source, errors="coerce", utc=True)
-        if pd.notna(entry_dt):
-            entry_time_value = entry_dt.isoformat().replace("+00:00", "Z")
+    entry_dt = _parse_timestamp(entry_time_source)
+    if entry_dt is not None:
+        entry_time_value = entry_dt.isoformat().replace("+00:00", "Z")
+
     exit_time_source = exit_time or trade.get("close")
-    exit_dt = pd.to_datetime(exit_time_source, errors="coerce", utc=True)
-    if pd.notna(exit_dt):
+    if exit_time_source is None and session_ts is not None:
+        exit_time_source = session_raw
+    exit_dt = _parse_timestamp(exit_time_source)
+    if exit_dt is not None:
         exit_time_value = exit_dt.isoformat().replace("+00:00", "Z")
     else:
         exit_time_value = _to_utc_iso()
+
+    def _display_value(
+        raw_value: Optional[object],
+        parsed_ts: Optional[pd.Timestamp],
+        fallback_keys: Sequence[str],
+    ) -> Optional[object]:
+        """Return a human-readable value, avoiding timestamps in string fields."""
+
+        if parsed_ts is None:
+            return raw_value
+        for key in fallback_keys:
+            alt = trade.get(key)
+            if alt and _parse_timestamp(alt) is None:
+                return alt
+        return None
+
+    strategy_value = _display_value(
+        strategy_raw,
+        strategy_ts,
+        ("strategy_name", "strategy_label", "pattern"),
+    )
+    session_value = _display_value(
+        session_raw,
+        session_ts,
+        ("session_name", "session_label"),
+    )
 
     sentiment_conf = trade.get("sentiment_confidence")
     if sentiment_conf is None:
@@ -517,8 +570,8 @@ def log_trade_result(
         "outcome_desc": _optional_text_field(
             OUTCOME_DESCRIPTIONS.get(outcome, outcome)
         ),
-        "strategy": _optional_text_field(trade.get("strategy")),
-        "session": _optional_text_field(trade.get("session")),
+        "strategy": _optional_text_field(strategy_value),
+        "session": _optional_text_field(session_value),
         "confidence": _optional_numeric_field(trade.get("confidence")),
         "btc_dominance": _optional_numeric_field(trade.get("btc_dominance")),
         "fear_greed": _optional_numeric_field(trade.get("fear_greed")),
