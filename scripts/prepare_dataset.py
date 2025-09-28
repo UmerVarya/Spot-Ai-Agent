@@ -42,6 +42,9 @@ HEADER_MAP = {
     "fear_greed": "fear_greed",
     "pattern": "pattern", "narrative": "narrative",
     "llm_decision": "llm_decision", "llm_confidence": "llm_confidence", "llm_error": "llm_error",
+    "llm_approval": "llm_approval", "LLMApproval": "llm_approval",
+    "technical_indicator_score": "technical_indicator_score", "TechnicalIndicatorScore": "technical_indicator_score",
+    "exit_reason": "exit_reason", "ExitReason": "exit_reason",
 
     # labels
     "Trade_Outcome": "outcome", "Outcome": "outcome", "outcome": "outcome",
@@ -50,7 +53,7 @@ HEADER_MAP = {
 
 REQUIRED_COLS_MIN = {"symbol", "entry_time", "exit_time", "entry_price", "exit_price"}
 POSSIBLE_FEATURES = [
-    "score","rsi","ema_diff","bb_width","volatility","volume_z",
+    "score","technical_indicator_score","rsi","ema_diff","bb_width","volatility","volume_z",
     "sentiment_score","session","spread_bps","slippage_bps"
 ]
 

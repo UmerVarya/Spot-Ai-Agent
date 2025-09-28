@@ -36,6 +36,7 @@ from trade_utils import (
     get_market_session,
     calculate_indicators,
     compute_performance_metrics,
+    summarise_technical_score,
 )
 from trade_manager import manage_trades, create_new_trade  # trade logic
 from trade_storage import (
@@ -521,6 +522,11 @@ def run_agent_loop() -> None:
                 final_conf = float(decision_obj.get("confidence", score))
                 narrative = decision_obj.get("narrative", "")
                 reason = decision_obj.get("reason", "")
+                llm_signal = decision_obj.get("llm_decision")
+                llm_approval = decision_obj.get("llm_approval")
+                technical_score = decision_obj.get("technical_indicator_score")
+                if technical_score is None:
+                    technical_score = summarise_technical_score(indicators, "long")
                 logger.info(
                     "[Brain] %s -> %s | Confidence: %.2f | Reason: %s",
                     symbol,
@@ -540,7 +546,7 @@ def run_agent_loop() -> None:
                     fg=fg,
                     sentiment_conf=sentiment_confidence,
                     pattern=pattern_name,
-                    llm_decision=decision_obj.get("llm_decision", True),
+                    llm_approval=bool(llm_approval) if llm_approval is not None else True,
                     llm_confidence=decision_obj.get("llm_confidence", 5.0),
                 )
                 if ml_prob < 0.5:
@@ -627,9 +633,11 @@ def run_agent_loop() -> None:
                             "strategy": pattern_name,  # tag strategy by pattern
                             "narrative": narrative,
                             "ml_prob": ml_prob,
-                            "llm_decision": decision_obj.get("llm_decision"),
+                            "llm_decision": llm_signal,
+                            "llm_approval": llm_approval,
                             "llm_confidence": decision_obj.get("llm_confidence"),
                             "llm_error": decision_obj.get("llm_error"),
+                            "technical_indicator_score": technical_score,
                             "status": {"tp1": False, "tp2": False, "tp3": False, "sl": False},
                             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "news_summary": decision_obj.get("news_summary", ""),

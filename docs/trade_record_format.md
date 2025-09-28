@@ -22,6 +22,7 @@ Each row recorded by `trade_storage.log_trade_result` contains the following col
 | `pnl_pct` | Profit/loss as a percentage of `notional`. |
 | `outcome` | Outcome code (see table below). |
 | `outcome_desc` | Human readable description of the outcome. |
+| `exit_reason` | Explanation of how or why the trade closed (e.g. TP1 hit, trailing stop). |
 | `strategy` | Name of the strategy responsible for the trade. |
 | `session` | Market session or timeframe identifier. |
 | `confidence` | Confidence score supplied by the strategy. Missing values are stored as `N/A`. |
@@ -30,10 +31,12 @@ Each row recorded by `trade_storage.log_trade_result` contains the following col
 | `sentiment_bias` | Aggregate sentiment classification. |
 | `sentiment_confidence` | Confidence in `sentiment_bias`. |
 | `score` | Additional score or strength metric. |
+| `technical_indicator_score` | Normalised 0–10 score summarising core technical indicators. |
 | `pattern` | Detected chart pattern. |
 | `narrative` | Free-form narrative explaining the trade. |
-| `llm_decision` | Whether the LLM approved the trade. |
-| `llm_confidence` | Confidence returned by the LLM. |
+| `llm_decision` | Textual advice or rationale returned by the LLM advisor. |
+| `llm_approval` | Boolean flag indicating if the LLM approved the setup. |
+| `llm_confidence` | Numeric confidence score returned by the LLM advisor. |
 | `llm_error` | Indicates the LLM encountered an error. |
 | `volatility` | Measured volatility at entry. |
 | `htf_trend` | Higher time frame trend assessment. |
@@ -76,7 +79,7 @@ Partial exits are denoted with a `_partial` suffix. Manual closures may appear a
 ## Example Header
 
 ```
-trade_id,timestamp,symbol,direction,entry_time,exit_time,entry,exit,size,notional,fees,slippage,pnl,pnl_pct,outcome,outcome_desc,strategy,session,confidence,btc_dominance,fear_greed,sentiment_bias,sentiment_confidence,score,pattern,narrative,llm_decision,llm_confidence,llm_error,volatility,htf_trend,order_imbalance,macro_indicator,tp1_partial,tp2_partial,pnl_tp1,pnl_tp2,size_tp1,size_tp2,notional_tp1,notional_tp2
+trade_id,timestamp,symbol,direction,entry_time,exit_time,entry,exit,size,notional,fees,slippage,pnl,pnl_pct,outcome,outcome_desc,exit_reason,strategy,session,confidence,btc_dominance,fear_greed,sentiment_bias,sentiment_confidence,score,pattern,narrative,llm_decision,llm_approval,llm_confidence,llm_error,technical_indicator_score,volatility,htf_trend,order_imbalance,macro_indicator,tp1_partial,tp2_partial,pnl_tp1,pnl_tp2,size_tp1,size_tp2,notional_tp1,notional_tp2
 ```
 
 A single trade may produce multiple rows if partial take-profits occur. Rows are grouped by `trade_id` (falling back to `entry_time`, `symbol` and `strategy` when absent) and collapsed into one summary row by `_deduplicate_history`. PnL, size and notional values are summed for the whole trade, while per-stage fields such as `pnl_tp1`, `pnl_tp2`, `size_tp1`, `size_tp2`, `notional_tp1` and `notional_tp2` detail the contribution of each partial exit alongside the `tp1_partial`/`tp2_partial` flags.

@@ -176,6 +176,15 @@ def _fmt_percent(val) -> str:
         return str(val)
 
 
+def _fmt_score(val) -> str:
+    if pd.isna(val):
+        return ""
+    try:
+        return f"{float(val):.2f}"
+    except Exception:
+        return str(val)
+
+
 def _fmt_duration(val) -> str:
     if pd.isna(val):
         return ""
@@ -605,6 +614,16 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     status = data.get("status", {})
     profit_riding = data.get("profit_riding", False)
     current_price = get_live_price(symbol)
+    llm_signal = data.get("llm_decision")
+    if isinstance(llm_signal, bool):
+        llm_signal = "approved" if llm_signal else "vetoed"
+    llm_approval = data.get("llm_approval")
+    if llm_approval is None and llm_signal is not None:
+        token = str(llm_signal).strip().lower()
+        if token in {"approved", "true", "yes", "1"}:
+            llm_approval = True
+        elif token in {"vetoed", "false", "no", "0"}:
+            llm_approval = False
     # Validate required fields
     if entry is None or direction is None:
         return None
@@ -688,6 +707,20 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
         status_flags.append("🚀 TP4 mode (Trailing)")
 
     status_str = " | ".join(status_flags) if status_flags else "Running"
+    approval_label = ""
+    if llm_approval is True:
+        approval_label = "Approved"
+    elif llm_approval is False:
+        approval_label = "Vetoed"
+    try:
+        llm_conf_val = float(data.get("llm_confidence"))
+    except Exception:
+        llm_conf_val = None
+    try:
+        tech_score_val = float(data.get("technical_indicator_score"))
+    except Exception:
+        tech_score_val = None
+    exit_reason = data.get("exit_reason", "")
     return {
         "Symbol": symbol,
         "Direction": direction_raw if direction_raw is not None else ("short" if is_short else "long"),
@@ -705,30 +738,51 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
         "Strategy": data.get("strategy", data.get("pattern", "")),
         "Session": data.get("session", ""),
         "Status": status_str,
+        "LLM Decision": llm_signal or "",
+        "LLM Approval": approval_label,
+        "LLM Confidence Score": llm_conf_val,
+        "Technical Indicators": tech_score_val,
+        "Exit Reason": exit_reason,
     }
 
 
 def compute_llm_decision_stats() -> tuple[int, int, int]:
     """Return counts of LLM-approved, vetoed and error trades."""
     approved = vetoed = errors = 0
+    error_tokens = {"true", "1", "yes"}
     # Active trades
     for t in load_active_trades():
-        if t.get("llm_error"):
+        error_flag = str(t.get("llm_error")).lower() in error_tokens
+        if error_flag:
             errors += 1
-        elif t.get("llm_decision") is False:
+            continue
+        approval = t.get("llm_approval")
+        if approval is True:
+            approved += 1
+        elif approval is False:
             vetoed += 1
         else:
-            approved += 1
-    # Completed trades
-    df = load_trade_history_df()
-    if not df.empty:
-        for _, row in df.iterrows():
-            if str(row.get("llm_error")).lower() in {"true", "1"}:
-                errors += 1
-            elif str(row.get("llm_decision")).lower() in {"false", "0", "no"}:
+            decision_token = str(t.get("llm_decision", "")).strip().lower()
+            if decision_token in {"vetoed", "false", "0", "no"}:
                 vetoed += 1
             else:
                 approved += 1
+    # Completed trades
+    df = load_trade_history_df()
+    if not df.empty:
+        err_series = df.get("llm_error", pd.Series(dtype=str)).astype(str).str.lower()
+        approval_series = df.get("llm_approval")
+        if approval_series is not None:
+            ok_mask = ~err_series.isin(error_tokens)
+            approved += int((ok_mask & approval_series.eq(True).fillna(False)).sum())
+            vetoed += int((ok_mask & approval_series.eq(False).fillna(False)).sum())
+            errors += int(err_series.isin(error_tokens).sum())
+        else:
+            decisions = df.get("llm_decision", pd.Series(dtype=str)).astype(str).str.lower()
+            ok_mask = ~err_series.isin(error_tokens)
+            errors += int(err_series.isin(error_tokens).sum())
+            vetoed += int((ok_mask & decisions.isin({"false", "0", "no", "vetoed"})).sum())
+            approved += int((ok_mask & ~decisions.isin({"false", "0", "no", "vetoed"})).sum())
     # Rejected trades (LLM veto or error)
     if os.path.exists(REJECTED_TRADES_FILE) and os.path.getsize(REJECTED_TRADES_FILE) > 0:
         rej_df = pd.read_csv(REJECTED_TRADES_FILE)
@@ -812,6 +866,8 @@ def render_live_tab() -> None:
             "PnL ($)": _fmt_money,
             "PnL (%)": _fmt_percent,
             "Time in Trade (min)": _fmt_duration,
+            "LLM Confidence Score": _fmt_score,
+            "Technical Indicators": _fmt_score,
         }
         fmt_subset = {k: v for k, v in formatters.items() if k in df_display.columns}
         df_style = df_display.style.format(fmt_subset)
@@ -1319,6 +1375,21 @@ def render_live_tab() -> None:
         hist_display["PnL (%)"] = hist_df["PnL (%)"]
         hist_display["Fees (USDT)"] = fees
         hist_display["Slippage (USDT)"] = slippage
+        if "llm_decision" in hist_df.columns:
+            hist_display["LLM Decision"] = hist_df["llm_decision"].fillna("")
+        if "llm_approval" in hist_df.columns:
+            approval_labels = hist_df["llm_approval"].map({True: "Approved", False: "Vetoed"})
+            hist_display["LLM Approval"] = approval_labels.fillna("")
+        if "llm_confidence" in hist_df.columns:
+            hist_display["LLM Confidence Score"] = numcol(
+                hist_df, "llm_confidence"
+            )
+        if "technical_indicator_score" in hist_df.columns:
+            hist_display["Technical Indicators"] = numcol(
+                hist_df, "technical_indicator_score"
+            )
+        if "exit_reason" in hist_df.columns:
+            hist_display["Exit Reason"] = hist_df["exit_reason"].fillna("")
         if "Duration (min)" in hist_df.columns:
             hist_display["Duration (min)"] = hist_df["Duration (min)"]
         if "Outcome Description" in hist_df.columns:
@@ -1352,6 +1423,11 @@ def render_live_tab() -> None:
             "PnL (%)",
             "Fees (USDT)",
             "Slippage (USDT)",
+            "LLM Decision",
+            "LLM Approval",
+            "LLM Confidence Score",
+            "Technical Indicators",
+            "Exit Reason",
             "Duration (min)",
             "Outcome Description",
             *stage_display_order,
@@ -1403,6 +1479,10 @@ def render_live_tab() -> None:
             formatters["PnL (%)"] = _fmt_percent
         if "Duration (min)" in hist_display.columns:
             formatters["Duration (min)"] = _fmt_duration
+        if "LLM Confidence Score" in hist_display.columns:
+            formatters["LLM Confidence Score"] = _fmt_score
+        if "Technical Indicators" in hist_display.columns:
+            formatters["Technical Indicators"] = _fmt_score
         hist_display_style = hist_display.style.format(formatters)
         if "Outcome Description" in hist_display.columns:
             hist_display_style = hist_display_style.applymap(
