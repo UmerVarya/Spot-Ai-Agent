@@ -877,7 +877,18 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
         def _cost_increments(values: pd.Series) -> pd.Series:
             if values is None or values.empty:
                 return pd.Series(0.0, index=group.index)
+
             numeric = pd.to_numeric(values, errors="coerce").fillna(0.0)
+
+            has_final_row = False
+            if "outcome" in group:
+                outcomes = group["outcome"].astype(str)
+                has_final_row = (~outcomes.str.contains("_partial", na=False)).any()
+
+            if not has_final_row:
+                # Only partial rows are present; treat recorded values as per-leg costs.
+                return pd.Series(numeric.to_numpy(dtype=float), index=values.index)
+
             increments: list[float] = []
             cumulative_max = 0.0
             for idx, val in numeric.items():
@@ -888,6 +899,7 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
                     inc = val
                     cumulative_max += inc
                 increments.append(inc)
+
             return pd.Series(increments, index=values.index, dtype=float)
 
         fees_increments = (
