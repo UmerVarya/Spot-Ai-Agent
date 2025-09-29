@@ -860,17 +860,47 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
             pnl = (exit_price - entry) * qty
             if direction == "short":
                 pnl = (entry - exit_price) * qty
-            pnl -= float(row.get("fees", 0) or 0)
-            pnl -= float(row.get("slippage", 0) or 0)
             notional = float(row.get("notional", entry * qty if entry and qty else 0))
-            return pd.Series({"_pnl": pnl, "_size": qty, "_notional": notional})
+            return pd.Series(
+                {
+                    "_gross_pnl": pnl,
+                    "_size": qty,
+                    "_notional": notional,
+                }
+            )
         except Exception:
-            return pd.Series({"_pnl": 0.0, "_size": 0.0, "_notional": 0.0})
+            return pd.Series({"_gross_pnl": 0.0, "_size": 0.0, "_notional": 0.0})
 
     df = df.join(df.apply(_calc_fields, axis=1))
 
     def _collapse(group: pd.DataFrame) -> pd.Series:
-        pnl_total = group["_pnl"].sum()
+        def _cost_increments(values: pd.Series) -> pd.Series:
+            if values is None or values.empty:
+                return pd.Series(0.0, index=group.index)
+            numeric = pd.to_numeric(values, errors="coerce").fillna(0.0)
+            increments: list[float] = []
+            cumulative_max = 0.0
+            for idx, val in numeric.items():
+                if val >= cumulative_max:
+                    inc = val - cumulative_max
+                    cumulative_max = val
+                else:
+                    inc = val
+                    cumulative_max += inc
+                increments.append(inc)
+            return pd.Series(increments, index=values.index, dtype=float)
+
+        fees_increments = (
+            _cost_increments(group["fees"]) if "fees" in group else pd.Series(0.0, index=group.index)
+        )
+        slippage_increments = (
+            _cost_increments(group["slippage"])
+            if "slippage" in group
+            else pd.Series(0.0, index=group.index)
+        )
+
+        net_pnl_rows = group["_gross_pnl"] - fees_increments - slippage_increments
+        pnl_total = net_pnl_rows.sum()
         size_total = group["_size"].sum()
         notional_total = group["_notional"].sum()
         final = group[~group["outcome"].astype(str).str.contains("_partial", na=False)]
@@ -878,6 +908,14 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
             final = group.tail(1)
         row = final.iloc[0].copy()
         row["pnl"] = pnl_total
+        total_fees = float(fees_increments.sum()) if not fees_increments.empty else 0.0
+        total_slippage = (
+            float(slippage_increments.sum()) if not slippage_increments.empty else 0.0
+        )
+        if "fees" in row or total_fees:
+            row["fees"] = total_fees
+        if "slippage" in row or total_slippage:
+            row["slippage"] = total_slippage
         if "position_size" in row:
             row["position_size"] = size_total
         if "size" in row:
@@ -898,8 +936,8 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
         tp2_rows = group[group["outcome"].astype(str).str.contains("tp2_partial", na=False)]
         row["tp1_partial"] = not tp1_rows.empty
         row["tp2_partial"] = not tp2_rows.empty
-        row["pnl_tp1"] = tp1_rows["_pnl"].sum()
-        row["pnl_tp2"] = tp2_rows["_pnl"].sum()
+        row["pnl_tp1"] = net_pnl_rows.loc[tp1_rows.index].sum()
+        row["pnl_tp2"] = net_pnl_rows.loc[tp2_rows.index].sum()
         row["size_tp1"] = tp1_rows["_size"].sum()
         row["size_tp2"] = tp2_rows["_size"].sum()
         row["notional_tp1"] = tp1_rows["_notional"].sum()
@@ -909,7 +947,7 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
     collapsed = (
         df.groupby(key_cols, group_keys=False).apply(_collapse).reset_index(drop=True)
     )
-    return collapsed.drop(columns=["_pnl", "_size", "_notional"], errors="ignore")
+    return collapsed.drop(columns=["_gross_pnl", "_size", "_notional"], errors="ignore")
 
 
 def _read_history_frame(path: str) -> pd.DataFrame:

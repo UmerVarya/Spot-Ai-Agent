@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 import trade_storage
 
 
@@ -78,3 +79,55 @@ def test_deduplicate_history(tmp_path, monkeypatch):
     assert not bool(t2["tp1_partial"])
     assert not bool(t2["tp2_partial"])
 
+
+def test_deduplicate_history_cumulative_fees(tmp_path, monkeypatch):
+    data = [
+        {
+            "trade_id": "3",
+            "symbol": "ETHUSDT",
+            "direction": "long",
+            "entry_time": "2024-02-01T00:00:00Z",
+            "exit_time": "2024-02-01T01:00:00Z",
+            "entry": 100.0,
+            "exit": 110.0,
+            "size": 50.0,
+            "position_size": 0.5,
+            "strategy": "s2",
+            "outcome": "tp1_partial",
+            "fees": 0.2,
+            "slippage": 0.1,
+        },
+        {
+            "trade_id": "3",
+            "symbol": "ETHUSDT",
+            "direction": "long",
+            "entry_time": "2024-02-01T00:00:00Z",
+            "exit_time": "2024-02-01T02:00:00Z",
+            "entry": 100.0,
+            "exit": 120.0,
+            "size": 50.0,
+            "position_size": 0.5,
+            "strategy": "s2",
+            "outcome": "tp2",
+            "fees": 1.1,  # cumulative fees from both legs
+            "slippage": 0.25,  # cumulative slippage from both legs
+        },
+    ]
+    df = pd.DataFrame(data)
+    hist_file = tmp_path / "completed.csv"
+    df.to_csv(hist_file, index=False)
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(hist_file))
+
+    result = trade_storage.load_trade_history_df()
+    trade = result.iloc[0]
+
+    # Total net PnL subtracts cumulative costs only once
+    assert trade["pnl"] == pytest.approx(13.65)
+    assert trade["fees"] == pytest.approx(1.1)
+    assert trade["slippage"] == pytest.approx(0.25)
+
+    # Stage allocations use net contributions per leg
+    assert trade["tp1_partial"]
+    assert trade["pnl_tp1"] == pytest.approx(4.7)
+    # Remaining leg contribution equals total minus TP1 allocation
+    assert (trade["pnl"] - trade["pnl_tp1"]) == pytest.approx(8.95)
