@@ -454,9 +454,17 @@ def log_trade_result(
             return ERROR_VALUE
 
     entry_price = trade.get("entry")
-    size_val = trade.get("size", trade.get("position_size", 0))
     try:
-        size_val = float(size_val)
+        exit_price_val = float(exit_price)
+    except Exception:
+        try:
+            exit_price_val = float(trade.get("exit_price"))
+        except Exception:
+            exit_price_val = 0.0
+
+    raw_size = trade.get("size", trade.get("position_size", 0))
+    try:
+        size_val = float(raw_size)
     except Exception:
         size_val = 0.0
     try:
@@ -464,12 +472,51 @@ def log_trade_result(
     except Exception:
         entry_val = None
 
-    if SIZE_AS_NOTIONAL:
-        notional = size_val
-        quantity = (size_val / entry_val) if entry_val else 0.0
+    try:
+        initial_qty = float(trade.get("initial_size"))
+    except Exception:
+        initial_qty = None
+
+    raw_notional = trade.get("notional")
+    try:
+        notional = float(raw_notional)
+    except Exception:
+        notional = None
+
+    quantity = None
+    if initial_qty is not None:
+        quantity = initial_qty
     else:
-        quantity = size_val
-        notional = entry_val * size_val if entry_val else None
+        try:
+            quantity = float(trade.get("position_size"))
+        except Exception:
+            quantity = None
+
+    if SIZE_AS_NOTIONAL:
+        if quantity is not None and entry_val is not None:
+            notional = entry_val * quantity
+            size_val = notional
+        elif notional is None:
+            notional = size_val
+    else:
+        if quantity is not None:
+            size_val = quantity
+        if entry_val is not None and quantity is not None:
+            notional = entry_val * quantity
+        elif notional is None and entry_val is not None:
+            notional = entry_val * size_val
+
+    if quantity is None:
+        if SIZE_AS_NOTIONAL and entry_val:
+            quantity = size_val / entry_val if entry_val else 0.0
+        else:
+            quantity = size_val
+
+    if SIZE_AS_NOTIONAL:
+        notional = size_val if notional is None else notional
+    else:
+        if notional is None and entry_val is not None:
+            notional = entry_val * quantity if quantity is not None else None
 
     try:
         fees_val = float(fees)
@@ -480,15 +527,36 @@ def log_trade_result(
     except Exception:
         slippage_val = 0.0
 
+    fees_override = trade.get("total_fees", trade.get("realized_fees"))
+    if fees_override is not None:
+        try:
+            fees_val = float(fees_override)
+        except Exception:
+            pass
+    slippage_override = trade.get("total_slippage", trade.get("realized_slippage"))
+    if slippage_override is not None:
+        try:
+            slippage_val = float(slippage_override)
+        except Exception:
+            pass
+
     # Compute net PnL and percentage
     pnl_val = 0.0
-    if entry_val is not None:
+    if entry_val is not None and quantity is not None:
         if str(trade.get("direction", "")).lower() == "short":
-            pnl_val = (entry_val - exit_price) * quantity
+            pnl_val = (entry_val - exit_price_val) * quantity
         else:
-            pnl_val = (exit_price - entry_val) * quantity
+            pnl_val = (exit_price_val - entry_val) * quantity
     pnl_val -= fees_val
     pnl_val -= slippage_val
+
+    pnl_override = trade.get("total_pnl", trade.get("realized_pnl"))
+    if pnl_override is not None:
+        try:
+            pnl_val = float(pnl_override)
+        except Exception:
+            pass
+
     pnl_pct = None
     if isinstance(notional, (int, float)) and notional not in (0, 0.0):
         pnl_pct = (pnl_val / notional) * 100
@@ -565,8 +633,8 @@ def log_trade_result(
     score_val = trade.get("score", trade.get("strength"))
     outcome_text = str(outcome or "")
     outcome_lower = outcome_text.lower()
-    tp1_flag = "tp1_partial" in outcome_lower
-    tp2_flag = "tp2_partial" in outcome_lower
+    tp1_flag = bool(trade.get("tp1_partial")) or "tp1_partial" in outcome_lower
+    tp2_flag = bool(trade.get("tp2_partial")) or "tp2_partial" in outcome_lower
 
     row = {
         "trade_id": trade.get("trade_id", str(uuid.uuid4())),
@@ -620,13 +688,43 @@ def log_trade_result(
     }
 
     if tp1_flag:
-        row["pnl_tp1"] = _optional_numeric_field(pnl_val)
-        row["size_tp1"] = _optional_numeric_field(quantity)
-        row["notional_tp1"] = _optional_numeric_field(notional)
+        pnl_tp1_val = trade.get("pnl_tp1")
+        if pnl_tp1_val is None:
+            pnl_tp1_val = pnl_val
+        size_tp1_val = trade.get("size_tp1")
+        if size_tp1_val is None:
+            size_tp1_val = quantity
+        notional_tp1_val = trade.get("notional_tp1")
+        if notional_tp1_val is None and entry_val is not None and size_tp1_val is not None:
+            try:
+                notional_tp1_val = float(size_tp1_val) * entry_val
+            except Exception:
+                notional_tp1_val = None
+        if notional_tp1_val is None:
+            notional_tp1_val = notional
+        size_tp1_display = size_tp1_val
+        row["pnl_tp1"] = _optional_numeric_field(pnl_tp1_val)
+        row["size_tp1"] = _optional_numeric_field(size_tp1_display)
+        row["notional_tp1"] = _optional_numeric_field(notional_tp1_val)
     if tp2_flag:
-        row["pnl_tp2"] = _optional_numeric_field(pnl_val)
-        row["size_tp2"] = _optional_numeric_field(quantity)
-        row["notional_tp2"] = _optional_numeric_field(notional)
+        pnl_tp2_val = trade.get("pnl_tp2")
+        if pnl_tp2_val is None:
+            pnl_tp2_val = pnl_val
+        size_tp2_val = trade.get("size_tp2")
+        if size_tp2_val is None:
+            size_tp2_val = quantity
+        notional_tp2_val = trade.get("notional_tp2")
+        if notional_tp2_val is None and entry_val is not None and size_tp2_val is not None:
+            try:
+                notional_tp2_val = float(size_tp2_val) * entry_val
+            except Exception:
+                notional_tp2_val = None
+        if notional_tp2_val is None:
+            notional_tp2_val = notional
+        size_tp2_display = size_tp2_val
+        row["pnl_tp2"] = _optional_numeric_field(pnl_tp2_val)
+        row["size_tp2"] = _optional_numeric_field(size_tp2_display)
+        row["notional_tp2"] = _optional_numeric_field(notional_tp2_val)
     if DB_CURSOR:
         try:
             DB_CURSOR.execute(
