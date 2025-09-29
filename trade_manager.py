@@ -59,6 +59,123 @@ MAX_HOLDING_TIME = timedelta(hours=1)
 logger = setup_logger(__name__)
 rl_sizer = RLPositionSizer()
 
+
+def _calculate_leg_pnl(trade: dict, exit_price: float, quantity: float, fees: float, slippage: float) -> float:
+    """Return realised PnL for a single trade leg."""
+
+    try:
+        entry_val = float(trade.get("entry"))
+        exit_val = float(exit_price)
+        qty_val = float(quantity)
+    except Exception:
+        return 0.0
+    direction = str(trade.get("direction", "long")).lower()
+    if direction == "short":
+        pnl = (entry_val - exit_val) * qty_val
+    else:
+        pnl = (exit_val - entry_val) * qty_val
+    try:
+        pnl -= float(fees or 0.0)
+    except Exception:
+        pass
+    try:
+        pnl -= float(slippage or 0.0)
+    except Exception:
+        pass
+    return pnl
+
+
+def _record_partial_exit(
+    trade: dict,
+    label: str,
+    *,
+    exit_price: float,
+    quantity: float,
+    fees: float,
+    slippage: float,
+    exit_time: str,
+) -> None:
+    """Aggregate realised results from a partial exit on the trade object."""
+
+    try:
+        fee_val = float(fees or 0.0)
+    except Exception:
+        fee_val = 0.0
+    try:
+        slippage_val = float(slippage or 0.0)
+    except Exception:
+        slippage_val = 0.0
+    pnl = _calculate_leg_pnl(trade, exit_price, quantity, fee_val, slippage_val)
+    trade["realized_pnl"] = trade.get("realized_pnl", 0.0) + pnl
+    trade["realized_fees"] = trade.get("realized_fees", 0.0) + fee_val
+    trade["realized_slippage"] = trade.get("realized_slippage", 0.0) + slippage_val
+    trade["last_partial_exit"] = exit_time
+    trade["last_partial_pnl"] = pnl
+    try:
+        quantity_val = float(quantity)
+    except Exception:
+        quantity_val = None
+    try:
+        entry_val = float(trade.get("entry"))
+    except Exception:
+        entry_val = None
+
+    if label == "tp1":
+        trade["tp1_partial"] = True
+        trade["tp1_exit_price"] = exit_price
+        trade["pnl_tp1"] = pnl
+        if quantity_val is not None:
+            trade["size_tp1"] = quantity_val
+        if entry_val is not None and quantity_val is not None:
+            trade["notional_tp1"] = entry_val * quantity_val
+    elif label == "tp2":
+        trade["tp2_partial"] = True
+        trade["tp2_exit_price"] = exit_price
+        trade["pnl_tp2"] = pnl
+        if quantity_val is not None:
+            trade["size_tp2"] = quantity_val
+        if entry_val is not None and quantity_val is not None:
+            trade["notional_tp2"] = entry_val * quantity_val
+    else:
+        trade["trail_partial_pnl"] = trade.get("trail_partial_pnl", 0.0) + pnl
+        trade["trail_partial_count"] = trade.get("trail_partial_count", 0) + 1
+        trade["last_trail_partial_pnl"] = pnl
+
+
+def _finalize_trade_result(
+    trade: dict,
+    *,
+    exit_price: float,
+    quantity: float,
+    fees: float,
+    slippage: float,
+) -> tuple[float, float]:
+    """Combine partial leg results with the final exit leg."""
+
+    try:
+        fee_val = float(fees or 0.0)
+    except Exception:
+        fee_val = 0.0
+    try:
+        slippage_val = float(slippage or 0.0)
+    except Exception:
+        slippage_val = 0.0
+    final_leg_pnl = _calculate_leg_pnl(trade, exit_price, quantity, fee_val, slippage_val)
+    trade["final_leg_pnl"] = final_leg_pnl
+    trade["final_exit_size"] = quantity
+    total_pnl = trade.get("realized_pnl", 0.0) + final_leg_pnl
+    total_fees = trade.get("realized_fees", 0.0) + fee_val
+    total_slippage = trade.get("realized_slippage", 0.0) + slippage_val
+    trade["realized_pnl"] = total_pnl
+    trade["total_pnl"] = total_pnl
+    trade["realized_fees"] = total_fees
+    trade["total_fees"] = total_fees
+    trade["realized_slippage"] = total_slippage
+    trade["total_slippage"] = total_slippage
+    trade["tp1_partial"] = bool(trade.get("tp1_partial"))
+    trade["tp2_partial"] = bool(trade.get("tp2_partial"))
+    return total_fees, total_slippage
+
 def _update_rl(trade: dict, exit_price: float) -> None:
     """Update RL position sizer based on trade outcome."""
     try:
@@ -229,6 +346,11 @@ def manage_trades() -> None:
                 trade["initial_size"] = float(trade.get("position_size", 1))
             except Exception:
                 trade["initial_size"] = 1.0
+        trade.setdefault("realized_pnl", 0.0)
+        trade.setdefault("realized_fees", 0.0)
+        trade.setdefault("realized_slippage", 0.0)
+        trade.setdefault("tp1_partial", False)
+        trade.setdefault("tp2_partial", False)
         price_data = get_price_data(symbol)
         if price_data is None or price_data.empty:
             continue
@@ -286,13 +408,20 @@ def manage_trades() -> None:
             trade['exit_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             trade['outcome'] = "time_exit"
             trade['exit_reason'] = "max_holding_time"
+            total_fees, total_slippage = _finalize_trade_result(
+                trade,
+                exit_price=current_price,
+                quantity=qty,
+                fees=fees,
+                slippage=slippage,
+            )
             log_trade_result(
                 trade,
                 outcome="time_exit",
                 exit_price=current_price,
                 exit_time=trade['exit_time'],
-                fees=fees,
-                slippage=slippage,
+                fees=total_fees,
+                slippage=total_slippage,
             )
             _persist_active_snapshot(
                 updated_trades, active_trades, index, include_current=False
@@ -318,14 +447,21 @@ def manage_trades() -> None:
             trade['exit_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             trade['outcome'] = "early_exit"
             trade['exit_reason'] = reason
+            total_fees, total_slippage = _finalize_trade_result(
+                trade,
+                exit_price=current_price,
+                quantity=qty,
+                fees=fees,
+                slippage=slippage,
+            )
             # Log trade result with fees and slippage
             log_trade_result(
                 trade,
                 outcome="early_exit",
                 exit_price=current_price,
                 exit_time=trade['exit_time'],
-                fees=fees,
-                slippage=slippage,
+                fees=total_fees,
+                slippage=total_slippage,
             )
             _persist_active_snapshot(
                 updated_trades, active_trades, index, include_current=False
@@ -372,20 +508,15 @@ def manage_trades() -> None:
                 fees = tp1 * sell_qty * commission_rate
                 slip_price = simulate_slippage(tp1, direction=direction)
                 slippage_amt = abs(slip_price - tp1)
-                partial_trade = trade.copy()
-                partial_trade['position_size'] = sell_qty
-                partial_trade['size'] = sell_qty * entry
                 exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                partial_trade['exit_price'] = tp1
-                partial_trade['exit_time'] = exit_time
-                partial_trade['exit_reason'] = "TP1 hit"
-                log_trade_result(
-                    partial_trade,
-                    outcome="tp1_partial",
+                _record_partial_exit(
+                    trade,
+                    "tp1",
                     exit_price=tp1,
-                    exit_time=exit_time,
+                    quantity=sell_qty,
                     fees=fees,
                     slippage=slippage_amt,
+                    exit_time=exit_time,
                 )
                 remaining_qty = qty - sell_qty
                 trade['position_size'] = remaining_qty
@@ -401,7 +532,8 @@ def manage_trades() -> None:
                 )
                 send_email(
                     f"✅ TP1 Partial: {symbol}",
-                    f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
+                    f"Partial exit qty: {sell_qty:.6f} @ {tp1} (PnL: {trade.get('pnl_tp1', 0.0):.4f})\n\n"
+                    f"Narrative:\n{trade.get('narrative', 'N/A')}",
                 )
                 actions.append("tp1_partial")
 
@@ -415,20 +547,15 @@ def manage_trades() -> None:
                 fees = tp2 * sell_qty * commission_rate
                 slip_price = simulate_slippage(tp2, direction=direction)
                 slippage_amt = abs(slip_price - tp2)
-                partial_trade = trade.copy()
-                partial_trade['position_size'] = sell_qty
-                partial_trade['size'] = sell_qty * entry
                 exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                partial_trade['exit_price'] = tp2
-                partial_trade['exit_time'] = exit_time
-                partial_trade['exit_reason'] = "TP2 hit"
-                log_trade_result(
-                    partial_trade,
-                    outcome="tp2_partial",
+                _record_partial_exit(
+                    trade,
+                    "tp2",
                     exit_price=tp2,
-                    exit_time=exit_time,
+                    quantity=sell_qty,
                     fees=fees,
                     slippage=slippage_amt,
+                    exit_time=exit_time,
                 )
                 remaining_qty = qty - sell_qty
                 trade['position_size'] = remaining_qty
@@ -439,7 +566,8 @@ def manage_trades() -> None:
                 logger.info("%s hit TP2 — sold 30% and moved SL to TP1", symbol)
                 send_email(
                     f"✅ TP2 Partial: {symbol}",
-                    f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
+                    f"Partial exit qty: {sell_qty:.6f} @ {tp2} (PnL: {trade.get('pnl_tp2', 0.0):.4f})\n\n"
+                    f"Narrative:\n{trade.get('narrative', 'N/A')}",
                 )
                 actions.append("tp2_partial")
 
@@ -470,13 +598,20 @@ def manage_trades() -> None:
                     if trade.get("profit_riding")
                     else "Stop loss hit"
                 )
+                total_fees, total_slippage = _finalize_trade_result(
+                    trade,
+                    exit_price=sl,
+                    quantity=qty,
+                    fees=fees,
+                    slippage=slippage_amt,
+                )
                 log_trade_result(
                     trade,
                     outcome=trade['outcome'],
                     exit_price=sl,
                     exit_time=trade['exit_time'],
-                    fees=fees,
-                    slippage=slippage_amt,
+                    fees=total_fees,
+                    slippage=total_slippage,
                 )
                 _persist_active_snapshot(
                     updated_trades, active_trades, index, include_current=False
@@ -511,25 +646,20 @@ def manage_trades() -> None:
                         fees = next_tp * sell_qty * commission_rate
                         slip_price = simulate_slippage(next_tp, direction=direction)
                         slippage_amt = abs(slip_price - next_tp)
-                        partial_trade = trade.copy()
-                        partial_trade['position_size'] = sell_qty
-                        partial_trade['size'] = sell_qty * entry
                         exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                        partial_trade['exit_price'] = next_tp
-                        partial_trade['exit_time'] = exit_time
                         pct_reason = (
                             f"{trail_pct * 100:.1f}% trail"
                             if isinstance(trail_pct, (int, float))
                             else "Trail target"
                         )
-                        partial_trade['exit_reason'] = f"Trailing take profit ({pct_reason})"
-                        log_trade_result(
-                            partial_trade,
-                            outcome="tp_trail",
+                        _record_partial_exit(
+                            trade,
+                            "trail",
                             exit_price=next_tp,
-                            exit_time=exit_time,
+                            quantity=sell_qty,
                             fees=fees,
                             slippage=slippage_amt,
+                            exit_time=exit_time,
                         )
                         new_sl = max(trade.get('sl', 0), next_tp)
                         _update_stop_loss(trade, new_sl)
@@ -542,7 +672,8 @@ def manage_trades() -> None:
                         _persist_active_snapshot(updated_trades, active_trades, index)
                         send_email(
                             f"✅ TP Trail: {symbol}",
-                            f"{partial_trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
+                            f"Trailing partial qty: {sell_qty:.6f} @ {next_tp} (PnL: {trade.get('last_trail_partial_pnl', 0.0):.4f})\n\n"
+                            f"Narrative:\n{trade.get('narrative', 'N/A')}",
                         )
 
                 adx_drop = adx < 20 and adx < adx_prev
@@ -559,13 +690,20 @@ def manage_trades() -> None:
                     trade['exit_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                     trade['outcome'] = "tp4"
                     trade['exit_reason'] = "TP4 trailing exit"
+                    total_fees, total_slippage = _finalize_trade_result(
+                        trade,
+                        exit_price=current_price,
+                        quantity=qty,
+                        fees=fees,
+                        slippage=slippage_amt,
+                    )
                     log_trade_result(
                         trade,
                         outcome="tp4",
                         exit_price=current_price,
                         exit_time=trade['exit_time'],
-                        fees=fees,
-                        slippage=slippage_amt,
+                        fees=total_fees,
+                        slippage=total_slippage,
                     )
                     _persist_active_snapshot(
                         updated_trades, active_trades, index, include_current=False
