@@ -518,6 +518,39 @@ def manage_trades() -> None:
                     slippage=slippage_amt,
                     exit_time=exit_time,
                 )
+                partial_trade = trade.copy()
+                try:
+                    entry_price_val = float(entry) if entry is not None else None
+                except Exception:
+                    entry_price_val = None
+                partial_trade['position_size'] = sell_qty
+                partial_trade['initial_size'] = sell_qty
+                if entry_price_val is not None:
+                    partial_trade['size'] = sell_qty * entry_price_val
+                    partial_trade['notional'] = sell_qty * entry_price_val
+                else:
+                    partial_trade['size'] = sell_qty
+                partial_trade['exit_reason'] = "TP1 partial"
+                partial_trade['outcome'] = "tp1_partial"
+                partial_pnl = trade.get('last_partial_pnl')
+                if partial_pnl is not None:
+                    partial_trade['realized_pnl'] = partial_pnl
+                    partial_trade['total_pnl'] = partial_pnl
+                partial_trade['realized_fees'] = fees
+                partial_trade['total_fees'] = fees
+                partial_trade['realized_slippage'] = slippage_amt
+                partial_trade['total_slippage'] = slippage_amt
+                try:
+                    log_trade_result(
+                        partial_trade,
+                        outcome="tp1_partial",
+                        exit_price=tp1,
+                        exit_time=exit_time,
+                        fees=fees,
+                        slippage=slippage_amt,
+                    )
+                except Exception as error:
+                    logger.error("Failed to log TP1 partial for %s: %s", symbol, error)
                 remaining_qty = qty - sell_qty
                 trade['position_size'] = remaining_qty
                 trade['size'] = remaining_qty * entry
@@ -557,6 +590,39 @@ def manage_trades() -> None:
                     slippage=slippage_amt,
                     exit_time=exit_time,
                 )
+                partial_trade = trade.copy()
+                try:
+                    entry_price_val = float(entry) if entry is not None else None
+                except Exception:
+                    entry_price_val = None
+                partial_trade['position_size'] = sell_qty
+                partial_trade['initial_size'] = sell_qty
+                if entry_price_val is not None:
+                    partial_trade['size'] = sell_qty * entry_price_val
+                    partial_trade['notional'] = sell_qty * entry_price_val
+                else:
+                    partial_trade['size'] = sell_qty
+                partial_trade['exit_reason'] = "TP2 partial"
+                partial_trade['outcome'] = "tp2_partial"
+                partial_pnl = trade.get('last_partial_pnl')
+                if partial_pnl is not None:
+                    partial_trade['realized_pnl'] = partial_pnl
+                    partial_trade['total_pnl'] = partial_pnl
+                partial_trade['realized_fees'] = fees
+                partial_trade['total_fees'] = fees
+                partial_trade['realized_slippage'] = slippage_amt
+                partial_trade['total_slippage'] = slippage_amt
+                try:
+                    log_trade_result(
+                        partial_trade,
+                        outcome="tp2_partial",
+                        exit_price=tp2,
+                        exit_time=exit_time,
+                        fees=fees,
+                        slippage=slippage_amt,
+                    )
+                except Exception as error:
+                    logger.error("Failed to log TP2 partial for %s: %s", symbol, error)
                 remaining_qty = qty - sell_qty
                 trade['position_size'] = remaining_qty
                 trade['size'] = remaining_qty * entry
