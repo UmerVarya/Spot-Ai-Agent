@@ -131,3 +131,49 @@ def test_deduplicate_history_cumulative_fees(tmp_path, monkeypatch):
     assert trade["pnl_tp1"] == pytest.approx(4.7)
     # Remaining leg contribution equals total minus TP1 allocation
     assert (trade["pnl"] - trade["pnl_tp1"]) == pytest.approx(8.95)
+
+
+def test_deduplicate_history_partial_fees_without_final_exit(tmp_path, monkeypatch):
+    data = [
+        {
+            "trade_id": "4",
+            "symbol": "BTCUSDT",
+            "direction": "long",
+            "entry_time": "2024-03-01T00:00:00Z",
+            "exit_time": "2024-03-01T01:00:00Z",
+            "entry": 100.0,
+            "exit": 110.0,
+            "size": 50.0,
+            "position_size": 0.5,
+            "strategy": "s3",
+            "outcome": "tp1_partial",
+            "fees": 0.2,
+            "slippage": 0.0,
+        },
+        {
+            "trade_id": "4",
+            "symbol": "BTCUSDT",
+            "direction": "long",
+            "entry_time": "2024-03-01T00:00:00Z",
+            "exit_time": "2024-03-01T02:00:00Z",
+            "entry": 100.0,
+            "exit": 115.0,
+            "size": 50.0,
+            "position_size": 0.5,
+            "strategy": "s3",
+            "outcome": "tp2_partial",
+            "fees": 0.9,
+            "slippage": 0.0,
+        },
+    ]
+
+    df = pd.DataFrame(data)
+    hist_file = tmp_path / "completed.csv"
+    df.to_csv(hist_file, index=False)
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(hist_file))
+
+    result = trade_storage.load_trade_history_df()
+    trade = result.iloc[0]
+
+    assert trade["fees"] == pytest.approx(1.1)
+    assert trade["pnl"] == pytest.approx(11.4)
