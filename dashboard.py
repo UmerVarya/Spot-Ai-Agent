@@ -584,11 +584,24 @@ def get_price_history(
 
 
 def to_bool(val) -> bool:
-    """Convert common string/int representations to a boolean."""
+    """Convert ``val`` into a boolean, handling loose string inputs."""
+
     if isinstance(val, bool):
         return val
     if isinstance(val, str):
-        return val.lower() in {"true", "1", "yes"}
+        token = val.strip().lower()
+        return token in {
+            "true",
+            "1",
+            "yes",
+            "y",
+            "on",
+            "enabled",
+            "active",
+            "hit",
+            "triggered",
+            "reached",
+        }
     return bool(val)
 
 def format_active_row(symbol: str, data: dict) -> dict | None:
