@@ -25,6 +25,7 @@ import pandas as pd
 import numpy as np
 import csv
 import os
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 from log_utils import setup_logger, LOG_FILE
@@ -590,7 +591,9 @@ def to_bool(val) -> bool:
         return val
     if isinstance(val, str):
         token = val.strip().lower()
-        return token in {
+        if not token:
+            return False
+        truthy_tokens = {
             "true",
             "1",
             "yes",
@@ -601,7 +604,27 @@ def to_bool(val) -> bool:
             "hit",
             "triggered",
             "reached",
+            "filled",
+            "executed",
+            "done",
+            "achieved",
+            "target hit",
+            "target reached",
         }
+        if token in truthy_tokens:
+            return True
+        # Normalise composite status strings such as ``tp1_hit`` or ``TP Hit``
+        words = {w for w in re.split(r"[\s_:\-]+", token) if w}
+        keyword_hits = {
+            "hit",
+            "triggered",
+            "reached",
+            "filled",
+            "executed",
+            "done",
+            "achieved",
+        }
+        return bool(words & keyword_hits)
     return bool(val)
 
 def format_active_row(symbol: str, data: dict) -> dict | None:
