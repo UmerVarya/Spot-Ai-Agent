@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import os
 import json
+import time
 from datetime import datetime, timedelta
 from typing import Optional, Any, Mapping
 import traceback
@@ -33,10 +34,10 @@ SIGNAL_LOG_FILE = os.getenv("SIGNAL_LOG_FILE",
 logger = setup_logger(__name__)
 
 # Maximum allowed lag for higher‑timeframe (e.g. 1H) updates.
-# If the latest bar is older than this threshold relative to the
-# expected close time, the strategy will skip trading to avoid
-# acting on stale data.
-HOURLY_BAR_MAX_LAG = timedelta(minutes=1)
+# The latest completed 1H candle should print shortly after the top of the hour.
+# We allow a few extra minutes of slack on top of the expected one hour cadence
+# so that slightly delayed exchange updates do not stall the signal pipeline.
+HOURLY_BAR_MAX_LAG = timedelta(minutes=5)
 
 # Optional TA-Lib imports (with pandas fallbacks if unavailable)
 try:
@@ -330,16 +331,53 @@ except Exception:
 # Path to stored symbol scores
 SYMBOL_SCORES_FILE = os.path.join(os.path.dirname(__file__), "symbol_scores.json")
 
-# Initialize Binance client
-try:
-    client = Client()
-except Exception as e:
-    logger.warning(
-        "Failed to initialize Binance client: %s. Install the 'python-binance' package and ensure network/credentials are configured.",
-        e,
-        exc_info=True,
-    )
-    client = None
+_binance_client: Optional[Client] = None
+_client_init_error: Optional[str] = None
+# Backwards-compatible handle that can be monkeypatched in tests or other
+# modules.  When set, ``_get_binance_client`` will return this instance
+# without attempting to create a new SDK client.
+client: Optional[Client] = None
+
+
+def _get_binance_client(force_refresh: bool = False) -> Optional[Client]:
+    """Return a cached Binance client instance, refreshing on demand."""
+
+    global _binance_client, _client_init_error, client
+
+    if force_refresh:
+        # Preserve explicit monkeypatches/overrides.
+        if client is not None and client is not _binance_client:
+            return client
+        _binance_client = None
+        client = None
+
+    if client is not None and client is not _binance_client:
+        return client
+
+    if _binance_client is not None:
+        client = _binance_client
+        return _binance_client
+
+    try:
+        api_key = os.getenv("BINANCE_API_KEY")
+        api_secret = os.getenv("BINANCE_API_SECRET")
+        if api_key and api_secret:
+            _binance_client = Client(api_key, api_secret)
+        else:
+            _binance_client = Client()
+        _client_init_error = None
+        client = _binance_client
+        return _binance_client
+    except Exception as exc:  # pragma: no cover - depends on environment
+        message = str(exc)
+        if message != _client_init_error:
+            logger.warning(
+                "Failed to initialize Binance client: %s. Install the 'python-binance' package and ensure network/credentials are configured.",
+                exc,
+                exc_info=True,
+            )
+        _client_init_error = message
+        return None
 
 def get_market_session() -> str:
     """Return the current market session based on local time in Asia/Karachi."""
@@ -366,46 +404,69 @@ def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
     klines so that trade management logic can see the high and low of
     the most recent minute instead of only the 5‑minute close.
     """
+    client = _get_binance_client()
     if client is None:
         logger.warning("Binance client unavailable; cannot fetch data for %s.", symbol)
         return None
-    try:
-        mapped_symbol = map_symbol_for_binance(symbol)
-        # Use 1‑minute klines for higher‑resolution price checks
-        klines = client.get_klines(
-            symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_1MINUTE, limit=500
-        )
-        df = pd.DataFrame(klines, columns=[
-            "timestamp", "open", "high", "low", "close", "volume", "close_time",
-            "quote_asset_volume", "number_of_trades", "taker_buy_base", "taker_buy_quote", "ignore",
-        ])
-        df[["open", "high", "low", "close", "volume", "quote_asset_volume"]] = df[
-            ["open", "high", "low", "close", "volume", "quote_asset_volume"]
-        ].astype(float)
-        # Convert timestamp to datetime and set as index
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
-        df = df.set_index("timestamp")
-        df["quote_volume"] = df["quote_asset_volume"]
 
-        # Fetch the most recent 1‑hour kline and store it for higher timeframe checks
-        h_klines = client.get_klines(symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=2)
-        if h_klines:
-            h_df = pd.DataFrame([h_klines[-1]], columns=[
+    mapped_symbol = map_symbol_for_binance(symbol)
+    attempts = 2
+    last_exception: Optional[Exception] = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            # Use 1‑minute klines for higher‑resolution price checks
+            klines = client.get_klines(
+                symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_1MINUTE, limit=500
+            )
+            df = pd.DataFrame(klines, columns=[
                 "timestamp", "open", "high", "low", "close", "volume", "close_time",
                 "quote_asset_volume", "number_of_trades", "taker_buy_base", "taker_buy_quote", "ignore",
             ])
-            h_df[["open", "high", "low", "close", "volume", "quote_asset_volume"]] = h_df[
+            df[["open", "high", "low", "close", "volume", "quote_asset_volume"]] = df[
                 ["open", "high", "low", "close", "volume", "quote_asset_volume"]
             ].astype(float)
-            h_df["timestamp"] = pd.to_datetime(h_df["timestamp"], unit="ms", errors="coerce").dt.floor("H")
-            h_df = h_df.set_index("timestamp")
-            h_df["quote_volume"] = h_df["quote_asset_volume"]
-            df.attrs["hourly_bar"] = h_df[["open", "high", "low", "close", "volume", "quote_volume"]]
+            # Convert timestamp to datetime and set as index
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
+            df = df.set_index("timestamp")
+            df["quote_volume"] = df["quote_asset_volume"]
 
-        return df[["open", "high", "low", "close", "volume", "quote_volume"]]
-    except Exception as e:
-        logger.warning("Failed to fetch data for %s: %s", symbol, e, exc_info=True)
-        return None
+            # Fetch the most recent 1‑hour kline and store it for higher timeframe checks
+            h_klines = client.get_klines(symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=2)
+            if h_klines:
+                h_df = pd.DataFrame([h_klines[-1]], columns=[
+                    "timestamp", "open", "high", "low", "close", "volume", "close_time",
+                    "quote_asset_volume", "number_of_trades", "taker_buy_base", "taker_buy_quote", "ignore",
+                ])
+                h_df[["open", "high", "low", "close", "volume", "quote_asset_volume"]] = h_df[
+                    ["open", "high", "low", "close", "volume", "quote_asset_volume"]
+                ].astype(float)
+                h_df["timestamp"] = pd.to_datetime(h_df["timestamp"], unit="ms", errors="coerce").dt.floor("H")
+                h_df = h_df.set_index("timestamp")
+                h_df["quote_volume"] = h_df["quote_asset_volume"]
+                df.attrs["hourly_bar"] = h_df[["open", "high", "low", "close", "volume", "quote_volume"]]
+
+            return df[["open", "high", "low", "close", "volume", "quote_volume"]]
+        except Exception as e:
+            last_exception = e
+            logger.warning(
+                "Attempt %d/%d to fetch data for %s failed: %s",
+                attempt,
+                attempts,
+                symbol,
+                e,
+                exc_info=True,
+            )
+            # Force a client refresh before retrying in case the connection died.
+            client = _get_binance_client(force_refresh=True)
+            if client is None:
+                break
+            # Back off briefly to give the API a chance to recover (e.g. rate limits).
+            time.sleep(0.5)
+
+    if last_exception is not None:
+        logger.warning("Failed to fetch data for %s after %d attempts: %s", symbol, attempts, last_exception)
+    return None
 
 
 async def get_price_data_async(symbol: str) -> Optional[pd.DataFrame]:
@@ -415,6 +476,7 @@ async def get_price_data_async(symbol: str) -> Optional[pd.DataFrame]:
 
 def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
     """Fetch order book depth from Binance."""
+    client = _get_binance_client()
     if client is None:
         return None
     try:
@@ -458,6 +520,7 @@ def update_stop_loss_order(
         newly created order, or ``None`` if the client is unavailable or
         the request fails.
     """
+    client = _get_binance_client()
     if client is None:
         logger.warning(
             "Binance client unavailable; cannot update stop-loss for %s.",
@@ -614,6 +677,7 @@ def summarise_technical_score(
 
 def get_top_symbols(limit: int = 30) -> list:
     """Return the top quote-volume symbols trading against USDT."""
+    client = _get_binance_client()
     if client is None:
         logger.warning("Binance client unavailable; get_top_symbols returning empty list.")
         return []
@@ -884,14 +948,18 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
 
         hourly_bar = price_data.attrs.get("hourly_bar")
         if isinstance(hourly_bar, pd.DataFrame) and not hourly_bar.empty:
-            expected_hour = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+            now = datetime.utcnow()
             last_hour = hourly_bar.index[-1]
-            # Ensure the 1H bar is fresh – it should print shortly after the hour.
-            if expected_hour - last_hour > HOURLY_BAR_MAX_LAG:
+            # Ensure the last completed 1H candle is not too old. Binance timestamps
+            # are aligned to the candle *open* time, so the bar is considered fresh
+            # for up to one hour plus a small grace window.
+            max_age = timedelta(hours=1) + HOURLY_BAR_MAX_LAG
+            if now - last_hour > max_age:
                 logger.warning(
-                    "Skipping %s: latest 1H bar (%s) is stale.",
+                    "Skipping %s: latest 1H bar (%s) is stale (age=%s).",
                     symbol,
                     last_hour,
+                    now - last_hour,
                 )
                 return 0, None, 0, None
 
