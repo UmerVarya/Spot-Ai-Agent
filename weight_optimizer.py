@@ -24,6 +24,30 @@ def optimize_indicator_weights(base_weights: dict, lookback: int = 200) -> dict:
         trades = pd.read_csv(TRADE_HISTORY_FILE).tail(lookback)
         trades = normalise_history_columns(trades)
 
+        # ``normalise_history_columns`` only renames headers – it does not
+        # guarantee that the important ones actually exist.  Older trade logs
+        # (or partially written rows) sometimes omit ``timestamp`` or
+        # ``symbol`` which would make the ``merge`` below raise a ``KeyError``.
+        # Gracefully bail out instead of letting the exception bubble up so the
+        # caller keeps the default weights.
+        required_trade_cols = {"timestamp", "symbol", "outcome"}
+        missing_trade_cols = required_trade_cols - set(trades.columns)
+        if missing_trade_cols:
+            logger.warning(
+                "Skipping weight optimisation – missing trade columns: %s",
+                ", ".join(sorted(missing_trade_cols)),
+            )
+            return base_weights
+
+        required_signal_cols = {"timestamp", "symbol"}
+        missing_signal_cols = required_signal_cols - set(signals.columns)
+        if missing_signal_cols:
+            logger.warning(
+                "Skipping weight optimisation – missing signal columns: %s",
+                ", ".join(sorted(missing_signal_cols)),
+            )
+            return base_weights
+
         # Normalize keys consistently on both frames
         for df in (signals, trades):
             if "symbol" in df.columns:
