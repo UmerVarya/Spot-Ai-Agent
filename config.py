@@ -23,12 +23,15 @@ def get(key: str, default: str | None = None) -> str | None:
 # without manual intervention we map known, deprecated identifiers to the
 # latest compatible default.  Update the mapping whenever Groq announces a
 # replacement model.  The current production-ready choice is ``llama-3.3-70b-
-# versatile`` which Groq lists as the successor for the retired 3.1 models.
+# versatile`` which Groq lists as the successor for the retired 3.1 and 3.2
+# models.
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 _DEPRECATED_GROQ_MODELS = {
     "llama3-70b-8192": DEFAULT_GROQ_MODEL,
     "llama-3.1-70b": DEFAULT_GROQ_MODEL,
     "llama-3.1-70b-versatile": DEFAULT_GROQ_MODEL,
+    "llama-3.2-70b": DEFAULT_GROQ_MODEL,
+    "llama-3.2-70b-versatile": DEFAULT_GROQ_MODEL,
 }
 _DEPRECATED_LOOKUP = {key.lower(): value for key, value in _DEPRECATED_GROQ_MODELS.items()}
 
