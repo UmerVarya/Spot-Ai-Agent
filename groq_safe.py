@@ -22,6 +22,9 @@ _DECOMMISSIONED_HINTS = (
     "is no longer supported",
     "has been deprecated",
     "model has been retired",
+    "does not exist",
+    "not found",
+    "do not have access",
 )
 
 
@@ -63,7 +66,7 @@ def is_model_decommissioned_error(error: Any) -> bool:
     """Return ``True`` if ``error`` indicates the requested model is retired."""
 
     message, code = _extract_error_parts(error)
-    if code and code == "model_decommissioned":
+    if code and code in {"model_decommissioned", "model_not_found"}:
         return True
     lowered = _normalise_text(message)
     return any(hint in lowered for hint in _DECOMMISSIONED_HINTS)

@@ -61,7 +61,7 @@ def analyze_macro_news(news_text: str) -> dict:
     if not response.ok:
         error_detail = extract_error_payload(response)
         if (
-            response.status_code == 400
+            response.status_code in {400, 404}
             and payload["model"] != config.DEFAULT_GROQ_MODEL
             and is_model_decommissioned_error(error_detail)
         ):

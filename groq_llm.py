@@ -93,7 +93,7 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
         if response.status_code != 200:
             error_detail = extract_error_payload(response)
             if (
-                response.status_code == 400
+                response.status_code in {400, 404}
                 and model_used != config.DEFAULT_GROQ_MODEL
                 and is_model_decommissioned_error(error_detail)
             ):
@@ -173,7 +173,7 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
                     except Exception:
                         error_detail = error_text
                     if (
-                        resp.status == 400
+                        resp.status in {400, 404}
                         and data["model"] != config.DEFAULT_GROQ_MODEL
                         and is_model_decommissioned_error(error_detail)
                     ):
