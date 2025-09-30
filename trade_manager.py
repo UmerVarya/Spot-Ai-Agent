@@ -351,15 +351,17 @@ def manage_trades() -> None:
         trade.setdefault("realized_slippage", 0.0)
         trade.setdefault("tp1_partial", False)
         trade.setdefault("tp2_partial", False)
-        price_data = get_price_data(symbol)
-        if price_data is None or price_data.empty:
-            continue
-        # Use the latest candle's high/low in addition to the close so that
-        # intrabar moves that touch TP/SL levels are not missed if price
-        # reverses before the next polling cycle.
-        current_price = price_data['close'].iloc[-1]
-        recent_high = price_data['high'].iloc[-1]
-        recent_low = price_data['low'].iloc[-1]
+        fallback_exit_price: Optional[float] = None
+        for price_key in ("last_price", "current_price", "entry"):
+            price_val = trade.get(price_key)
+            if price_val is None:
+                continue
+            try:
+                fallback_exit_price = float(price_val)
+                break
+            except Exception:
+                continue
+
         direction = trade.get('direction')
         entry = trade.get('entry')
         sl = trade.get('sl')
@@ -367,19 +369,6 @@ def manage_trades() -> None:
         tp2 = trade.get('tp2')
         tp3 = trade.get('tp3')
         status_flags = trade.get('status', {})
-        logger.debug(
-            "Managing %s | Price=%s High=%s Low=%s SL=%s TP1=%s TP2=%s TP3=%s Status=%s ProfitRiding=%s",
-            symbol,
-            current_price,
-            recent_high,
-            recent_low,
-            sl,
-            tp1,
-            tp2,
-            tp3,
-            status_flags,
-            trade.get('profit_riding', False),
-        )
         actions = []
         # Time-based exit: close trades exceeding the maximum holding duration
         entry_time_str = trade.get('entry_time')
@@ -396,21 +385,35 @@ def manage_trades() -> None:
         # Convert to naive UTC for comparison
         if entry_dt is not None and entry_dt.tzinfo is not None:
             entry_dt = entry_dt.astimezone(timezone.utc).replace(tzinfo=None)
+        price_data = get_price_data(symbol)
+        has_price_data = price_data is not None and not getattr(price_data, "empty", False)
+        current_price: Optional[float] = None
+        if has_price_data:
+            try:
+                current_price = float(price_data['close'].iloc[-1])
+            except Exception:
+                current_price = None
+        price_for_exit = current_price if current_price is not None else fallback_exit_price
+
         if entry_dt and datetime.utcnow() - entry_dt >= MAX_HOLDING_TIME:
             actions.append("time_exit")
             logger.info("%s exceeded max holding time; exiting trade.", symbol)
             qty = float(trade.get('position_size', 1))
             commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
-            fees = current_price * qty * commission_rate
-            slip_price = simulate_slippage(current_price, direction=direction)
-            slippage = abs(slip_price - current_price)
-            trade['exit_price'] = current_price
+            price_for_fees = price_for_exit if price_for_exit is not None else 0.0
+            fees = price_for_fees * qty * commission_rate
+            if price_for_exit is not None:
+                slip_price = simulate_slippage(price_for_exit, direction=direction)
+                slippage = abs(slip_price - price_for_exit)
+            else:
+                slippage = 0.0
+            trade['exit_price'] = price_for_exit
             trade['exit_time'] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             trade['outcome'] = "time_exit"
             trade['exit_reason'] = "max_holding_time"
             total_fees, total_slippage = _finalize_trade_result(
                 trade,
-                exit_price=current_price,
+                exit_price=price_for_exit if price_for_exit is not None else 0.0,
                 quantity=qty,
                 fees=fees,
                 slippage=slippage,
@@ -418,7 +421,7 @@ def manage_trades() -> None:
             log_trade_result(
                 trade,
                 outcome="time_exit",
-                exit_price=current_price,
+                exit_price=price_for_exit,
                 exit_time=trade['exit_time'],
                 fees=total_fees,
                 slippage=total_slippage,
@@ -426,10 +429,33 @@ def manage_trades() -> None:
             _persist_active_snapshot(
                 updated_trades, active_trades, index, include_current=False
             )
-            _update_rl(trade, current_price)
+            if price_for_exit is not None:
+                _update_rl(trade, price_for_exit)
             send_email(f" Time Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
             logger.debug("%s actions: %s", symbol, actions)
             continue
+        if not has_price_data:
+            continue
+        # Use the latest candle's high/low in addition to the close so that
+        # intrabar moves that touch TP/SL levels are not missed if price
+        # reverses before the next polling cycle.
+        recent_high = price_data['high'].iloc[-1]
+        recent_low = price_data['low'].iloc[-1]
+        if current_price is None:
+            current_price = price_data['close'].iloc[-1]
+        logger.debug(
+            "Managing %s | Price=%s High=%s Low=%s SL=%s TP1=%s TP2=%s TP3=%s Status=%s ProfitRiding=%s",
+            symbol,
+            current_price,
+            recent_high,
+            recent_low,
+            sl,
+            tp1,
+            tp2,
+            tp3,
+            status_flags,
+            trade.get('profit_riding', False),
+        )
         # Evaluate early exit conditions using the candle low to capture
         # sharp drops within the interval
         exit_now, reason = should_exit_early(trade, recent_low, price_data)
