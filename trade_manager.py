@@ -268,12 +268,15 @@ def create_new_trade(trade: dict) -> bool:
     return store_trade(trade)
 
 
-def should_exit_early(trade: dict, observed_price: float, price_data) -> Tuple[bool, Optional[str]]:
+def should_exit_early(
+    trade: dict, observed_price: Optional[float], price_data
+) -> Tuple[bool, Optional[str]]:
     """Determine if a trade should exit early based on price and indicators.
 
     ``observed_price`` represents the most adverse price seen during the
     polling interval (e.g., the candle low for long trades) so that sharp
-    wicks can still trigger an exit.
+    wicks can still trigger an exit. When ``None`` the ATR-based drawdown
+    guard is bypassed for that evaluation cycle.
     """
     entry = trade.get('entry')
     direction = trade.get('direction')
@@ -285,7 +288,7 @@ def should_exit_early(trade: dict, observed_price: float, price_data) -> Tuple[b
     atr = indicators.get('atr', 0)
     if hasattr(atr, 'iloc'):
         atr = atr.iloc[-1]
-    if direction == "long" and atr:
+    if direction == "long" and atr and observed_price is not None:
         drawdown = entry - observed_price
         if drawdown > atr * ATR_MULTIPLIER:
             return True, f"Drawdown {drawdown:.4f} exceeds {ATR_MULTIPLIER} ATR ({atr:.4f})"
@@ -438,11 +441,40 @@ def manage_trades() -> None:
             continue
         # Use the latest candle's high/low in addition to the close so that
         # intrabar moves that touch TP/SL levels are not missed if price
-        # reverses before the next polling cycle.
-        recent_high = price_data['high'].iloc[-1]
-        recent_low = price_data['low'].iloc[-1]
+        # reverses before the next polling cycle. Restrict these values to
+        # post-entry candles so newly opened trades do not inherit
+        # pre-entry extremes.
         if current_price is None:
             current_price = price_data['close'].iloc[-1]
+        observed_price: Optional[float] = None
+        recent_high: float
+        recent_low: float
+        if entry_dt is not None:
+            recent_candles = price_data[price_data.index >= entry_dt]
+            if not recent_candles.empty:
+                recent_high = recent_candles['high'].iloc[-1]
+                recent_low = recent_candles['low'].iloc[-1]
+                try:
+                    observed_price = float(recent_low)
+                except Exception:
+                    observed_price = None
+            else:
+                fallback_price = current_price
+                if fallback_price is None:
+                    fallback_price = trade.get('entry')
+                try:
+                    fallback_price = float(fallback_price)
+                except Exception:
+                    fallback_price = 0.0
+                recent_high = fallback_price
+                recent_low = fallback_price
+        else:
+            recent_high = price_data['high'].iloc[-1]
+            recent_low = price_data['low'].iloc[-1]
+            try:
+                observed_price = float(recent_low)
+            except Exception:
+                observed_price = None
         logger.debug(
             "Managing %s | Price=%s High=%s Low=%s SL=%s TP1=%s TP2=%s TP3=%s Status=%s ProfitRiding=%s",
             symbol,
@@ -458,7 +490,7 @@ def manage_trades() -> None:
         )
         # Evaluate early exit conditions using the candle low to capture
         # sharp drops within the interval
-        exit_now, reason = should_exit_early(trade, recent_low, price_data)
+        exit_now, reason = should_exit_early(trade, observed_price, price_data)
         if exit_now:
             actions.append("early_exit")
             logger.info("Early exit triggered for %s: %s", symbol, reason)
