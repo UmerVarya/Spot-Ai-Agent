@@ -624,7 +624,72 @@ def to_bool(val) -> bool:
             "done",
             "achieved",
         }
-        return bool(words & keyword_hits)
+        if not words & keyword_hits:
+            return False
+        negation_terms = {
+            "not",
+            "no",
+            "never",
+            "none",
+            "without",
+            "pending",
+            "await",
+            "awaited",
+            "awaiting",
+            "wait",
+            "waited",
+            "waiting",
+            "miss",
+            "missed",
+            "missing",
+            "fail",
+            "failed",
+            "failing",
+            "cancel",
+            "canceled",
+            "cancelled",
+            "void",
+            "voided",
+            "skip",
+            "skipped",
+            "hold",
+            "holding",
+            "inactive",
+            "halt",
+            "halted",
+            "blocked",
+            "stopped",
+            "pause",
+            "paused",
+            "unfilled",
+            "untriggered",
+            "unhit",
+            "unreached",
+            "unmet",
+            "undo",
+            "undone",
+            "notfilled",
+            "nottriggered",
+            "nothit",
+            "notreached",
+            "partial",
+            "partially",
+            "partialfill",
+            "partialfilled",
+            "tbd",
+        }
+        if words & negation_terms:
+            return False
+        negation_pattern = re.compile(
+            r"(^|[^a-z])(" +
+            "|".join(
+                sorted((re.escape(term) for term in negation_terms), key=len, reverse=True)
+            ) +
+            r")([^a-z]|$)"
+        )
+        if negation_pattern.search(token):
+            return False
+        return True
     return bool(val)
 
 def format_active_row(symbol: str, data: dict) -> dict | None:
