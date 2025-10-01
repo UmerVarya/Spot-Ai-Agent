@@ -1,42 +1,15 @@
-"""
-Reinforcement‑learning based position sizing for the Spot‑AI Agent.
+"""Adaptive reinforcement-learning based position sizing for Spot-AI.
 
-This module implements a simple Q‑learning policy to adjust the
-position sizing multiplier based on recent trading outcomes.  The goal
-is to allocate more capital to high‑reward states and less to
-underperforming ones.  While the basic implementation uses only the
-previous trade outcome (``win``/``loss``/``neutral``) as the state, it
-also supports richer context such as volatility regimes.  The action
-space consists of discrete multipliers (e.g., ``[0.5, 1.0, 1.5, 2.0]``),
-each representing a fraction of the default position size computed by
-the agent.
-
-This lightweight RL approach is an approximation to more sophisticated
-actor–critic methods.  It learns a Q‑table mapping states and actions
-to expected rewards.  After each trade, the Q‑value for the
-corresponding state–action pair is updated.  Over time, the policy
-tends to favour the multiplier that yields higher returns.
-
-Usage::
-
-    from rl_policy import RLPositionSizer
-    from trade_utils import get_rl_state
-    rl_sizer = RLPositionSizer()
-    # during trade entry combine last outcome with volatility percentile
-    state = get_rl_state(vol_percentile)
-    multiplier = rl_sizer.select_multiplier(state)
-    position_size = base_size * multiplier
-    ...
-    # after trade exits
-    rl_sizer.update(state, multiplier, reward)  # reward = trade profit in percent
-
-The learned Q‑table is stored in ``rl_policy.json`` in the module
-directory, ensuring persistence across sessions.
+Compared to the original Q-learning stub this module now tracks
+state/action visit counts, adapts exploration based on recent reward
+history, and exposes human-readable policy summaries so the sizing
+layer can be monitored in production.
 """
 
 import os
 import json
-from typing import Dict, List
+from collections import defaultdict, deque
+from typing import Dict, List, Optional
 
 
 ROOT_DIR = os.path.dirname(__file__)
@@ -50,13 +23,21 @@ class RLPositionSizer:
                  actions: List[float] | None = None,
                  alpha: float = 0.1,
                  gamma: float = 0.9,
-                 epsilon: float = 0.1) -> None:
+                 epsilon: float = 0.1,
+                 epsilon_decay: float = 0.995,
+                 min_epsilon: float = 0.02,
+                 reward_clip: float = 5.0) -> None:
         # Allowed multipliers
         self.actions = actions or [0.5, 1.0, 1.5, 2.0]
         self.alpha = alpha  # learning rate
         self.gamma = gamma  # discount factor
         self.epsilon = epsilon  # exploration probability
+        self.epsilon_decay = epsilon_decay
+        self.min_epsilon = min_epsilon
+        self.reward_clip = reward_clip
         self.q_table: Dict[str, Dict[float, float]] = {}
+        self.state_action_visits: Dict[tuple[str, float], int] = defaultdict(int)
+        self.reward_history: deque[float] = deque(maxlen=200)
         self._load_policy()
 
     def _load_policy(self) -> None:
@@ -85,6 +66,15 @@ class RLPositionSizer:
         if state not in self.q_table:
             self.q_table[state] = {a: 0.0 for a in self.actions}
 
+    def _adaptive_epsilon(self) -> None:
+        if not self.reward_history:
+            return
+        avg_reward = sum(self.reward_history) / len(self.reward_history)
+        if avg_reward > 0.5:
+            self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
+        elif avg_reward < -0.5:
+            self.epsilon = min(0.9, self.epsilon / self.epsilon_decay)
+
     def select_multiplier(self, state: str) -> float:
         """
         Choose a position size multiplier given the current state.
@@ -98,9 +88,11 @@ class RLPositionSizer:
             return random.choice(self.actions)
         # Select the action with the maximum Q‑value
         action_values = self.q_table[state]
-        return max(action_values, key=action_values.get)
+        best_action = max(action_values, key=action_values.get)
+        self._adaptive_epsilon()
+        return best_action
 
-    def update(self, state: str, action: float, reward: float) -> None:
+    def update(self, state: str, action: float, reward: float, next_state: Optional[str] = None) -> None:
         """Update the Q‑table for the action actually taken.
 
         Parameters
@@ -111,12 +103,32 @@ class RLPositionSizer:
             The position size multiplier applied to the trade.
         reward : float
             The realised reward (e.g. PnL percentage).
+        next_state : str, optional
+            When provided the update bootstraps from the value of the next
+            observable state, enabling multi-step Q-learning in contexts
+            where state transitions are available.
         """
         self._init_state(state)
         if action not in self.q_table[state]:
             self.q_table[state][action] = 0.0
+        bounded_reward = max(-self.reward_clip, min(self.reward_clip, reward))
+        self.reward_history.append(bounded_reward)
         current_q = self.q_table[state][action]
-        next_max = max(self.q_table[state].values())
-        updated_q = current_q + self.alpha * (reward + self.gamma * next_max - current_q)
+        lookahead_state = next_state or state
+        self._init_state(lookahead_state)
+        next_max = max(self.q_table[lookahead_state].values())
+        updated_q = current_q + self.alpha * (bounded_reward + self.gamma * next_max - current_q)
         self.q_table[state][action] = updated_q
+        self.state_action_visits[(state, action)] += 1
+        if self.epsilon > self.min_epsilon:
+            self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
         self._save_policy()
+
+    def policy_summary(self, top_n: int = 3) -> Dict[str, List[tuple[float, float]]]:
+        """Return the top multipliers per state for introspection."""
+
+        summary: Dict[str, List[tuple[float, float]]] = {}
+        for state, actions in self.q_table.items():
+            ranked = sorted(actions.items(), key=lambda kv: kv[1], reverse=True)[:top_n]
+            summary[state] = ranked
+        return summary

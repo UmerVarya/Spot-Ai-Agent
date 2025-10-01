@@ -39,7 +39,8 @@ from __future__ import annotations
 
 import os
 import json
-from typing import List, Tuple, Dict, Any, Optional
+from dataclasses import dataclass
+from typing import List, Tuple, Dict, Any, Optional, Mapping
 
 import numpy as np
 import pandas as pd
@@ -53,8 +54,23 @@ try:
     from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
     from sklearn.neural_network import MLPClassifier
     from sklearn.preprocessing import StandardScaler
-    from sklearn.model_selection import GridSearchCV, StratifiedKFold
-    from sklearn.metrics import make_scorer, accuracy_score
+    from sklearn.model_selection import (
+        GridSearchCV,
+        StratifiedKFold,
+        StratifiedShuffleSplit,
+    )
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.metrics import (
+        make_scorer,
+        accuracy_score,
+        balanced_accuracy_score,
+        precision_recall_fscore_support,
+        roc_auc_score,
+        brier_score_loss,
+        log_loss,
+    )
+    from sklearn.base import clone
+    from sklearn.inspection import permutation_importance
     import joblib  # type: ignore
     SKLEARN_AVAILABLE = True
 except Exception:
@@ -64,6 +80,15 @@ except Exception:
     StandardScaler = None  # type: ignore
     GridSearchCV = None  # type: ignore
     StratifiedKFold = None  # type: ignore
+    StratifiedShuffleSplit = None  # type: ignore
+    CalibratedClassifierCV = None  # type: ignore
+    balanced_accuracy_score = None  # type: ignore
+    precision_recall_fscore_support = None  # type: ignore
+    roc_auc_score = None  # type: ignore
+    brier_score_loss = None  # type: ignore
+    log_loss = None  # type: ignore
+    clone = None  # type: ignore
+    permutation_importance = None  # type: ignore
     joblib = None  # type: ignore
     accuracy_score = None  # type: ignore
     SKLEARN_AVAILABLE = False
@@ -93,6 +118,54 @@ ROOT_DIR = os.path.dirname(__file__)
 LOG_FILE = TRADE_HISTORY_FILE
 MODEL_JSON = os.path.join(ROOT_DIR, "ml_model.json")
 MODEL_PKL = os.path.join(ROOT_DIR, "ml_model.pkl")
+
+
+@dataclass
+class TrainingDiagnostics:
+    """Rich training diagnostics returned by :func:`train_model`."""
+
+    model_type: str
+    best_params: Dict[str, Any]
+    validation_metrics: Dict[str, float]
+    calibrated: bool
+    calibration_method: Optional[str]
+    feature_importance: Dict[str, float]
+    samples: int
+
+
+_FEATURE_FALLBACKS: Dict[str, float] = {
+    'score': 0.0,
+    'confidence': 0.0,
+    'session_id': 3.0,
+    'btc_dom': 0.0,
+    'fear_greed': 0.5,
+    'sent_conf': 0.5,
+    'sent_bias': 0.0,
+    'pattern_len': 0.0,
+    'volatility': 0.0,
+    'htf_trend': 0.0,
+    'order_imbalance': 0.0,
+    'macro_indicator': 0.0,
+    'macd': 0.0,
+    'rsi': 0.5,
+    'sma': 0.0,
+    'atr': 0.0,
+    'volume': 0.0,
+    'macd_rsi': 0.0,
+    'llm_decision': 1.0,
+    'llm_confidence': 0.5,
+    'time_since_last': 0.0,
+    'recent_win_rate': 0.5,
+}
+
+
+def load_model_report() -> Dict[str, Any]:
+    """Return the persisted model metadata if training artefacts exist."""
+
+    metadata = _load_model_metadata()
+    if metadata and os.path.exists(MODEL_PKL):
+        metadata['model_path'] = MODEL_PKL
+    return metadata
 
 
 def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
@@ -200,7 +273,109 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-z))
 
 
-def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
+def _safe_predict_proba(model: Any, X: np.ndarray) -> Optional[np.ndarray]:
+    try:
+        if hasattr(model, 'predict_proba'):
+            proba = model.predict_proba(X)
+            proba_arr = np.asarray(proba, dtype=float)
+            if proba_arr.ndim == 2 and proba_arr.shape[1] >= 2:
+                return proba_arr[:, 1]
+        if hasattr(model, 'decision_function'):
+            decision = np.asarray(model.decision_function(X), dtype=float)
+            if decision.ndim == 1:
+                return _sigmoid(decision)
+    except Exception:
+        return None
+    return None
+
+
+def _compute_classification_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_prob: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    metrics: Dict[str, float] = {}
+    if accuracy_score is not None:
+        try:
+            metrics['accuracy'] = float(accuracy_score(y_true, y_pred))
+        except Exception:
+            metrics['accuracy'] = float('nan')
+    if balanced_accuracy_score is not None:
+        try:
+            metrics['balanced_accuracy'] = float(balanced_accuracy_score(y_true, y_pred))
+        except Exception:
+            metrics['balanced_accuracy'] = float('nan')
+    if precision_recall_fscore_support is not None:
+        try:
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                y_true,
+                y_pred,
+                average='binary',
+                zero_division=0,
+            )
+            metrics['precision'] = float(precision)
+            metrics['recall'] = float(recall)
+            metrics['f1'] = float(f1)
+        except Exception:
+            metrics.setdefault('precision', float('nan'))
+            metrics.setdefault('recall', float('nan'))
+            metrics.setdefault('f1', float('nan'))
+    if y_prob is not None and roc_auc_score is not None:
+        try:
+            metrics['roc_auc'] = float(roc_auc_score(y_true, y_prob))
+        except Exception:
+            metrics['roc_auc'] = float('nan')
+    if y_prob is not None and brier_score_loss is not None:
+        try:
+            metrics['brier'] = float(brier_score_loss(y_true, y_prob))
+        except Exception:
+            metrics['brier'] = float('nan')
+    if y_prob is not None and log_loss is not None:
+        try:
+            metrics['log_loss'] = float(log_loss(y_true, np.vstack([1 - y_prob, y_prob]).T))
+        except Exception:
+            metrics['log_loss'] = float('nan')
+    return metrics
+
+
+def _extract_base_estimator(model: Any) -> Any:
+    if hasattr(model, 'base_estimator_'):
+        return getattr(model, 'base_estimator_')
+    return model
+
+
+def _compute_feature_attribution(
+    model: Any,
+    feature_names: List[str],
+    X: np.ndarray,
+    y: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    feature_scores: Dict[str, float] = {}
+    estimator = _extract_base_estimator(model)
+    try:
+        if hasattr(estimator, 'feature_importances_'):
+            importances = np.asarray(estimator.feature_importances_, dtype=float)
+        elif hasattr(estimator, 'coef_'):
+            coef = np.asarray(estimator.coef_, dtype=float)
+            importances = np.abs(coef[0]) if coef.ndim > 1 else np.abs(coef)
+        elif permutation_importance is not None and y is not None:
+            perm = permutation_importance(estimator, X, y, n_repeats=10, random_state=42)
+            importances = perm.importances_mean
+        else:
+            return feature_scores
+        if importances.shape[0] != len(feature_names):
+            return feature_scores
+        total = float(np.sum(np.abs(importances)))
+        if total <= 0:
+            return feature_scores
+        for name, value in zip(feature_names, importances):
+            feature_scores[name] = float(value) / total
+    except Exception:
+        feature_scores = {}
+    return dict(sorted(feature_scores.items(), key=lambda kv: kv[1], reverse=True))
+
+
+def train_model(iterations: int = 200, learning_rate: float = 0.1) -> Optional[TrainingDiagnostics]:
     """
     Train and select the best classification model on the trade learning log.
 
@@ -225,19 +400,26 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
     # Ensure there is sufficient data
     if not os.path.exists(LOG_FILE):
         logger.warning("No trade learning log found. Cannot train ML model.")
-        return
+        return None
     try:
         df = pd.read_csv(LOG_FILE, engine="python", on_bad_lines="skip", encoding="utf-8")
     except Exception as e:
         logger.warning("Failed to read learning log: %s", e, exc_info=True)
-        return
+        return None
     if len(df) < 20:
         logger.warning("Not enough data to train ML model. Need at least 20 trades.")
-        return
+        return None
     X, y = _extract_features(df)
     if X.size == 0:
         logger.warning("No valid training samples extracted.")
-        return
+        return None
+    unique_classes = np.unique(y)
+    if unique_classes.size < 2:
+        logger.warning(
+            "Training data must contain at least two outcome classes. Found classes: %s",
+            unique_classes,
+        )
+        return None
     # Remove existing model artefacts before training a new one
     for artefact in (MODEL_PKL, MODEL_JSON):
         if os.path.exists(artefact):
@@ -246,12 +428,18 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
             except Exception:
                 pass
     if SKLEARN_AVAILABLE:
-        # ------------------------------------------------------------------
-        # Scikit‑learn pipeline: scale features and evaluate multiple models
-        # ------------------------------------------------------------------
+        splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        try:
+            train_idx, val_idx = next(splitter.split(X, y))
+        except Exception:
+            split_point = max(1, int(len(X) * 0.8))
+            train_idx = np.arange(0, split_point)
+            val_idx = np.arange(split_point, len(X))
+        X_train, X_val = X[train_idx], X[val_idx]
+        y_train, y_val = y[train_idx], y[val_idx]
         scaler = StandardScaler()
-        X_norm = scaler.fit_transform(X)
-        # Define model grid with reasonable hyper‑parameters
+        X_train_norm = scaler.fit_transform(X_train)
+        X_val_norm = scaler.transform(X_val)
         models: Dict[str, Any] = {
             'logistic': LogisticRegression(max_iter=1000, class_weight='balanced', solver='lbfgs'),
             'random_forest': RandomForestClassifier(class_weight='balanced'),
@@ -299,19 +487,18 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
                 'learning_rate': [0.01, 0.1, 0.2],
                 'max_depth': [3, 5, -1],
             }
-        # Use stratified K‑fold to preserve class distribution
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         best_model: Optional[Any] = None
         best_score: float = -np.inf
         best_type: str = 'logistic'
-        # Train each model type separately
+        best_params: Dict[str, Any] = {}
         for model_name, model in models.items():
             grid_params = param_grid.get(model_name, {})
             if not grid_params:
-                # If no grid specified (should not happen), skip grid search
-                estimator = model.fit(X_norm, y)
-                score = float(estimator.score(X_norm, y))
+                estimator = model.fit(X_train_norm, y_train)
                 candidate_model = estimator
+                score = float(estimator.score(X_val_norm, y_val))
+                params: Dict[str, Any] = {}
             else:
                 gs = GridSearchCV(
                     estimator=model,
@@ -320,38 +507,114 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
                     scoring=make_scorer(accuracy_score),
                     n_jobs=-1,
                 )
-                gs.fit(X_norm, y)
-                candidate_model = gs.best_estimator_
-                score = float(gs.best_score_)
-            logger.info("%s trained. CV accuracy: %.2f%%", model_name, score * 100)
+                try:
+                    gs.fit(X_train_norm, y_train)
+                    candidate_model = gs.best_estimator_
+                    score = float(candidate_model.score(X_val_norm, y_val))
+                    params = dict(gs.best_params_)
+                except Exception as exc:
+                    logger.warning("Grid search failed for %s: %s", model_name, exc, exc_info=True)
+                    candidate_model = model.fit(X_train_norm, y_train)
+                    score = float(candidate_model.score(X_val_norm, y_val))
+                    params = {}
+            logger.info("%s trained. Validation accuracy: %.2f%%", model_name, score * 100)
             if score > best_score:
                 best_score = score
                 best_model = candidate_model
                 best_type = model_name
+                best_params = params
         if best_model is None:
             logger.warning("Failed to select a best model. Falling back to logistic regression.")
-            best_model = models['logistic'].fit(X_norm, y)
+            best_model = models['logistic'].fit(X_train_norm, y_train)
             best_type = 'logistic'
-        # Persist the chosen model and scaling parameters
+            best_params = {}
+        calibration_method: Optional[str] = None
+        calibrated = False
+        final_model = best_model
+        if CalibratedClassifierCV is not None and clone is not None and hasattr(best_model, 'predict_proba'):
+            try:
+                calibration_method = 'sigmoid'
+                calibrator = CalibratedClassifierCV(
+                    base_estimator=clone(best_model),
+                    method=calibration_method,
+                    cv=3,
+                )
+                calibrator.fit(X_train_norm, y_train)
+                final_model = calibrator
+                calibrated = True
+            except Exception as exc:
+                logger.warning("Calibration failed: %s", exc, exc_info=True)
+                final_model = best_model
         try:
-            joblib.dump(best_model, MODEL_PKL)
+            y_pred = final_model.predict(X_val_norm)
+        except Exception:
+            y_pred = best_model.predict(X_val_norm)
+        y_prob = _safe_predict_proba(final_model, X_val_norm)
+        metrics = _compute_classification_metrics(y_val, y_pred, y_prob)
+        scaler_full = StandardScaler()
+        X_full_norm = scaler_full.fit_transform(X)
+        if calibrated and CalibratedClassifierCV is not None and clone is not None:
+            persisted_model = CalibratedClassifierCV(
+                base_estimator=clone(best_model),
+                method=calibration_method or 'sigmoid',
+                cv=3,
+            )
+            persisted_model.fit(X_full_norm, y)
+        else:
+            try:
+                persisted_model = clone(best_model) if clone is not None else best_model
+                persisted_model.fit(X_full_norm, y)
+            except Exception:
+                persisted_model = best_model.fit(X_full_norm, y)
+        feature_names = [
+            'score', 'confidence', 'session_id', 'btc_dom',
+            'fear_greed', 'sent_conf', 'sent_bias', 'pattern_len',
+            'volatility', 'htf_trend', 'order_imbalance', 'macro_indicator',
+            'macd', 'rsi', 'sma', 'atr', 'volume', 'macd_rsi',
+            'llm_decision', 'llm_confidence', 'time_since_last', 'recent_win_rate'
+        ]
+        feature_info = _compute_feature_attribution(persisted_model, feature_names, X_full_norm, y)
+        class_counts = {
+            str(int(cls)): int(np.sum(y == cls)) for cls in np.unique(y)
+        }
+        diagnostics = TrainingDiagnostics(
+            model_type=best_type,
+            best_params=best_params,
+            validation_metrics=metrics,
+            calibrated=calibrated,
+            calibration_method=calibration_method,
+            feature_importance=feature_info,
+            samples=len(y),
+        )
+        try:
+            joblib.dump(persisted_model, MODEL_PKL)
             model_metadata = {
                 'model_type': best_type,
-                'scaler_mean': scaler.mean_.tolist(),
-                'scaler_scale': scaler.scale_.tolist(),
-                'feature_names': [
-                    'score', 'confidence', 'session_id', 'btc_dom',
-                    'fear_greed', 'sent_conf', 'sent_bias', 'pattern_len',
-                    'volatility', 'htf_trend', 'order_imbalance', 'macro_indicator',
-                    'macd', 'rsi', 'sma', 'atr', 'volume', 'macd_rsi',
-                    'llm_decision', 'llm_confidence', 'time_since_last', 'recent_win_rate'
-                ],
+                'scaler_mean': scaler_full.mean_.tolist(),
+                'scaler_scale': scaler_full.scale_.tolist(),
+                'feature_names': feature_names,
+                'validation_metrics': metrics,
+                'calibration': {
+                    'applied': calibrated,
+                    'method': calibration_method,
+                },
+                'best_params': best_params,
+                'class_distribution': class_counts,
+                'validation_samples': int(len(y_val)),
+                'training_timestamp': datetime.utcnow().isoformat(),
+                'feature_importance': feature_info,
             }
             with open(MODEL_JSON, 'w') as f:
                 json.dump(model_metadata, f, indent=2)
-            logger.info("Best model (%s) saved to %s with metadata %s", best_type, MODEL_PKL, MODEL_JSON)
+            logger.info(
+                "Best model (%s) saved to %s with metadata %s",
+                best_type,
+                MODEL_PKL,
+                MODEL_JSON,
+            )
         except Exception as e:
             logger.warning("Failed to save model: %s", e, exc_info=True)
+        return diagnostics
     else:
         # ------------------------------------------------------------------
         # Fallback: manual logistic regression without sklearn
@@ -386,6 +649,23 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> None:
             logger.info("Manual model saved to %s", MODEL_JSON)
         except Exception as e:
             logger.warning("Failed to save manual model: %s", e, exc_info=True)
+        metrics = {}
+        try:
+            logits = X_aug @ weights
+            preds = (logits > 0).astype(float)
+            probs = _sigmoid(logits)
+            metrics = _compute_classification_metrics(y, preds, probs)
+        except Exception:
+            metrics = {}
+        return TrainingDiagnostics(
+            model_type='manual',
+            best_params={},
+            validation_metrics=metrics,
+            calibrated=False,
+            calibration_method=None,
+            feature_importance={},
+            samples=len(y),
+        )
 
 
 def _load_model_metadata() -> Dict[str, Any]:
@@ -436,19 +716,33 @@ def _prepare_feature_vector(
     session_map = {"Asia": 0, "Europe": 1, "US": 2, "New York": 2, "unknown": 3}
     session_id = session_map.get(session, 3)
     pattern_len = len(str(pattern))
-    return [
-        score,
-        confidence,
-        session_id,
-        btc_d / 100.0,
-        fg / 100.0,
-        sentiment_conf / 10.0,
-        pattern_len / 10.0,
-        1.0 if llm_approval else 0.0,
-        llm_confidence / 10.0,
-        time_since_last / 24.0,
-        recent_win_rate,
-    ]
+    return {
+        'score': float(score),
+        'confidence': float(confidence),
+        'session_id': float(session_id),
+        'btc_dom': float(btc_d) / 100.0,
+        'fear_greed': float(fg) / 100.0,
+        'sent_conf': float(sentiment_conf) / 10.0,
+        'pattern_len': float(pattern_len) / 10.0,
+        'llm_decision': 1.0 if llm_approval else 0.0,
+        'llm_confidence': float(llm_confidence) / 10.0,
+        'time_since_last': float(time_since_last) / 24.0,
+        'recent_win_rate': float(recent_win_rate),
+    }
+
+
+def _assemble_feature_vector(
+    feature_names: List[str],
+    provided: Mapping[str, float],
+    overrides: Optional[Mapping[str, float]] = None,
+) -> np.ndarray:
+    values: Dict[str, float] = dict(_FEATURE_FALLBACKS)
+    for key, value in provided.items():
+        values[key] = float(value)
+    if overrides:
+        for key, value in overrides.items():
+            values[key] = float(value)
+    return np.array([values.get(name, 0.0) for name in feature_names], dtype=float)
 
 
 def predict_success_probability(
@@ -461,6 +755,7 @@ def predict_success_probability(
     pattern: str,
     llm_approval: bool = True,
     llm_confidence: float = 5.0,
+    feature_overrides: Optional[Mapping[str, float]] = None,
 ) -> float:
     """
     Predict the probability of a trade succeeding based on current features.
@@ -504,21 +799,21 @@ def predict_success_probability(
                 recent_win_rate = len(wins) / len(outcomes)
         except Exception:
             pass
-    x = np.array(
-        _prepare_feature_vector(
-            score,
-            confidence,
-            session,
-            btc_d,
-            fg,
-            sentiment_conf,
-            pattern,
-            llm_approval,
-            llm_confidence,
-            time_since_last,
-            recent_win_rate,
-        )
+    base_features = _prepare_feature_vector(
+        score,
+        confidence,
+        session,
+        btc_d,
+        fg,
+        sentiment_conf,
+        pattern,
+        llm_approval,
+        llm_confidence,
+        time_since_last,
+        recent_win_rate,
     )
+    feature_names = metadata.get('feature_names') or list(_FEATURE_FALLBACKS.keys())
+    x = _assemble_feature_vector(feature_names, base_features, feature_overrides)
     model_type = metadata.get('model_type', 'manual')
     try:
         # Use sklearn model if available
