@@ -31,6 +31,7 @@ def test_log_trade_result_extended_fields(tmp_path, monkeypatch):
         "htf_trend": 10.0,
         "order_imbalance": 5.0,
         "macro_indicator": 20.0,
+        "pattern": "double_bottom",
     }
     trade_storage.log_trade_result(trade, outcome="tp1", exit_price=1100)
     with open(csv_path, newline="") as f:
@@ -51,6 +52,7 @@ def test_log_trade_result_extended_fields(tmp_path, monkeypatch):
     assert float(rows[0]["notional_tp2"]) == 0.0
     assert rows[0]["tp1_partial"] == "False"
     assert rows[0]["tp2_partial"] == "False"
+    assert rows[0]["pattern"] == "double_bottom"
 
 
 def test_log_trade_result_reassigns_misplaced_strategy_and_session(tmp_path, monkeypatch):
