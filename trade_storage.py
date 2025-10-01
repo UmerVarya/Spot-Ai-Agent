@@ -94,7 +94,9 @@ def _parse_header_columns(header_line: str) -> list[str]:
     return [segment.strip().strip('"') for segment in cleaned.split(",")]
 
 
-def _header_is_compatible(header_line: str, headers: Sequence[str]) -> bool:
+def _header_is_compatible(
+    header_line: str, headers: Sequence[str], *, require_essential: bool = False
+) -> bool:
     """Return ``True`` when ``header_line`` resembles a supported schema."""
 
     tokens = _normalise_header_line(header_line)
@@ -110,6 +112,9 @@ def _header_is_compatible(header_line: str, headers: Sequence[str]) -> bool:
         return False
 
     essential = set(_EXPECTED_HISTORY_KEYS)
+    if require_essential:
+        return essential.issubset(recognised)
+
     if recognised & essential:
         return True
 
@@ -755,7 +760,7 @@ def log_trade_result(
                 "Unable to inspect trade history header %s: %s", TRADE_HISTORY_FILE, exc
             )
             first_line = ""
-        if _header_is_compatible(first_line, headers):
+        if _header_is_compatible(first_line, headers, require_essential=True):
             header_needed = False
             existing_headers = _parse_header_columns(first_line)
             if existing_headers:
