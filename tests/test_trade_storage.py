@@ -169,6 +169,34 @@ def test_log_trade_result_archives_missing_header(tmp_path, monkeypatch):
     assert "BTCUSDT" not in rows[0].values()
 
 
+def test_log_trade_result_consolidates_duplicate_rows(tmp_path, monkeypatch):
+    csv_path = tmp_path / "log.csv"
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
+
+    trade = {
+        "trade_id": "abc123",
+        "symbol": "ETHUSDT",
+        "direction": "long",
+        "entry": 1000,
+        "size": 500,
+        "position_size": 0.5,
+        "strategy": "test",
+        "session": "Asia",
+    }
+
+    trade_storage.log_trade_result(trade, outcome="tp1_partial", exit_price=1100)
+    # A repeated log for the same trade should not produce duplicate rows in the
+    # consolidated history file.
+    trade_storage.log_trade_result(trade, outcome="tp1_partial", exit_price=1100)
+
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == "abc123"
+    assert rows[0]["tp1_partial"] == "True"
+
+
 def test_load_trade_history_df_skips_headerless_csv(tmp_path):
     legacy = tmp_path / "legacy.csv"
     legacy.write_text("BTCUSDT,1000,1100\n")

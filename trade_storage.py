@@ -819,6 +819,11 @@ def log_trade_result(
         index=False,
         quoting=csv.QUOTE_MINIMAL,
     )
+    try:
+        _consolidate_trade_history_file()
+    except Exception:  # pragma: no cover - consolidation best effort
+        logger.exception("Failed to consolidate trade history after append")
+
     _maybe_send_llm_performance_email()
 
 
@@ -960,6 +965,71 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
         df.groupby(key_cols, group_keys=False).apply(_collapse).reset_index(drop=True)
     )
     return collapsed.drop(columns=["_gross_pnl", "_size", "_notional"], errors="ignore")
+
+
+def _consolidate_trade_history_file(path: Optional[str] = None) -> None:
+    """Rewrite the trade history file with de-duplicated rows.
+
+    The live system occasionally records multiple rows for the same ``trade_id``
+    when partial exits or repeated status updates are logged. Dashboard readers
+    already collapse those duplicates during :func:`load_trade_history_df`, but
+    opening the raw CSV still shows the redundant entries. By reloading the file
+    with the same normalisation pipeline and writing it back we ensure the
+    persisted history matches what downstream tools display without requiring
+    every consumer to run de-duplication logic.
+    """
+
+    history_path = path or TRADE_HISTORY_FILE
+    if not history_path:
+        return
+
+    df = load_trade_history_df(path=history_path)
+    # ``load_trade_history_df`` returns an empty frame with the expected columns
+    # when the file is missing or unreadable. In that case we still want to
+    # ensure the on-disk file contains a header so future appends remain
+    # aligned.
+    ordered_cols = [col for col in TRADE_HISTORY_HEADERS if col in df.columns]
+    extra_cols = [col for col in df.columns if col not in ordered_cols]
+    all_columns = ordered_cols + extra_cols
+
+    time_columns = [
+        col
+        for col in ("timestamp", "entry_time", "exit_time")
+        if col in df.columns
+    ]
+    for col in time_columns:
+        try:
+            df[col] = df[col].apply(
+                lambda ts: (
+                    ts.isoformat().replace("+00:00", "Z")
+                    if hasattr(ts, "isoformat")
+                    else str(ts)
+                )
+                if pd.notna(ts)
+                else MISSING_VALUE
+            )
+        except Exception:
+            # If the column is not datetime-like we leave it untouched.
+            pass
+
+    tmp_path = f"{history_path}.tmp"
+    try:
+        if df.empty:
+            with open(tmp_path, "w", encoding="utf-8", newline="") as fh:
+                writer = csv.DictWriter(fh, fieldnames=all_columns or TRADE_HISTORY_HEADERS)
+                writer.writeheader()
+        else:
+            df = df.reindex(columns=all_columns)
+            df.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, history_path)
+    except FileNotFoundError:
+        # Nothing to consolidate yet; clean up any partial temp file.
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
 
 
 def _read_history_frame(path: str) -> pd.DataFrame:
