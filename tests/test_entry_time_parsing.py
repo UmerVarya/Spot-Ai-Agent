@@ -112,3 +112,51 @@ def test_manage_trades_time_exit_without_price_data(monkeypatch):
     assert captured["trade"].get("exit_price") == 205.0
     assert saved["trades"] == []
 
+
+def test_manage_trades_missing_entry_time_forces_timeout(monkeypatch):
+    """Trades without entry_time should still respect the max holding period."""
+
+    now = datetime.utcnow()
+    fallback_timestamp = (now - trade_manager.MAX_HOLDING_TIME - timedelta(minutes=2)).replace(microsecond=0)
+    trade = {
+        "symbol": "XRPUSDT",
+        "direction": "long",
+        "entry": 50.0,
+        "position_size": 1,
+        "status": {"tp1": False, "tp2": False, "tp3": False},
+        "timestamp": fallback_timestamp.isoformat() + "Z",
+    }
+
+    def fake_load_active_trades():
+        return [trade]
+
+    saved = {}
+
+    def fake_save_active_trades(trades):
+        saved["trades"] = trades
+
+    def fake_price_data(symbol):
+        return pd.DataFrame({"close": [50.0], "high": [50.0], "low": [49.5]})
+
+    monkeypatch.setattr(trade_manager, "load_active_trades", fake_load_active_trades)
+    monkeypatch.setattr(trade_manager, "save_active_trades", fake_save_active_trades)
+    monkeypatch.setattr(trade_manager, "get_price_data", fake_price_data)
+    monkeypatch.setattr(trade_manager, "estimate_commission", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(trade_manager, "simulate_slippage", lambda price, direction: price)
+
+    captured = {}
+
+    def fake_log_trade_result(trade_record, **kwargs):
+        captured["trade"] = trade_record.copy()
+        captured.update(kwargs)
+
+    monkeypatch.setattr(trade_manager, "log_trade_result", fake_log_trade_result)
+    monkeypatch.setattr(trade_manager, "_update_rl", lambda *args, **kwargs: None)
+    monkeypatch.setattr(trade_manager, "send_email", lambda *args, **kwargs: None)
+
+    trade_manager.manage_trades()
+
+    assert captured.get("outcome") == "time_exit"
+    assert saved["trades"] == []
+    assert captured["trade"].get("entry_time") is not None
+
