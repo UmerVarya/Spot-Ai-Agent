@@ -17,7 +17,7 @@ working directory.
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 
 from trade_utils import (
     get_price_data,
@@ -58,6 +58,41 @@ MAX_HOLDING_TIME = timedelta(hours=1)
 
 logger = setup_logger(__name__)
 rl_sizer = RLPositionSizer()
+
+
+def _coerce_to_utc_datetime(value: Union[str, float, int, datetime, None]) -> Optional[datetime]:
+    """Attempt to coerce a variety of timestamp formats into naive UTC datetimes."""
+
+    if value is None:
+        return None
+
+    dt_value: Optional[datetime] = None
+    if isinstance(value, datetime):
+        dt_value = value
+    elif isinstance(value, (int, float)):
+        try:
+            dt_value = datetime.utcfromtimestamp(value)
+        except Exception:
+            return None
+    else:
+        value_str = str(value).strip()
+        if not value_str:
+            return None
+        try:
+            dt_value = datetime.fromisoformat(value_str.replace("Z", "+00:00"))
+        except Exception:
+            try:
+                dt_value = datetime.strptime(value_str, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return None
+
+    if dt_value is None:
+        return None
+
+    if dt_value.tzinfo is not None:
+        dt_value = dt_value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    return dt_value
 
 
 def _calculate_leg_pnl(trade: dict, exit_price: float, quantity: float, fees: float, slippage: float) -> float:
@@ -374,20 +409,38 @@ def manage_trades() -> None:
         status_flags = trade.get('status', {})
         actions = []
         # Time-based exit: close trades exceeding the maximum holding duration
-        entry_time_str = trade.get('entry_time')
+        primary_entry_time = trade.get('entry_time')
+        entry_sources = []
+        if 'entry_time' in trade:
+            entry_sources.append(('entry_time', primary_entry_time))
+        for candidate_key in ("timestamp", "open_time", "created_at", "last_update"):
+            candidate_value = trade.get(candidate_key)
+            if candidate_value is not None:
+                entry_sources.append((candidate_key, candidate_value))
+
         entry_dt = None
-        if entry_time_str:
-            try:
-                # Attempt ISO 8601 parsing first (supports "Z" or offsets)
-                entry_dt = datetime.fromisoformat(entry_time_str.replace("Z", "+00:00"))
-            except Exception:
-                try:
-                    entry_dt = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    entry_dt = None
-        # Convert to naive UTC for comparison
-        if entry_dt is not None and entry_dt.tzinfo is not None:
-            entry_dt = entry_dt.astimezone(timezone.utc).replace(tzinfo=None)
+        entry_source_used: Optional[str] = None
+        for source_name, source_value in entry_sources:
+            entry_dt = _coerce_to_utc_datetime(source_value)
+            if entry_dt is not None:
+                entry_source_used = source_name
+                break
+
+        if entry_dt is None:
+            logger.warning(
+                "%s missing valid entry_time; forcing max holding time exit on next cycle.",
+                symbol,
+            )
+            entry_dt = datetime.utcnow() - MAX_HOLDING_TIME
+            trade['entry_time'] = entry_dt.strftime("%Y-%m-%d %H:%M:%S")
+        elif entry_source_used != 'entry_time':
+            logger.warning(
+                "%s entry_time unavailable; using %s for timeout check.",
+                symbol,
+                entry_source_used,
+            )
+            if not primary_entry_time:
+                trade['entry_time'] = entry_dt.strftime("%Y-%m-%d %H:%M:%S")
         price_data = get_price_data(symbol)
         has_price_data = price_data is not None and not getattr(price_data, "empty", False)
         current_price: Optional[float] = None
