@@ -56,7 +56,7 @@ ATR_MULTIPLIER = 1.0
 # Require fairly high confidence before exiting on bearish macro signals
 MACRO_CONFIDENCE_EXIT_THRESHOLD = 7
 # Maximum duration to hold a trade before forcing exit
-MAX_HOLDING_TIME = timedelta(hours=1)
+MAX_HOLDING_TIME = timedelta(hours=6)
 
 logger = setup_logger(__name__)
 rl_sizer = RLPositionSizer()
