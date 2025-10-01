@@ -94,12 +94,41 @@ def analyze_news_with_llm(events: List[Dict[str, str]]) -> Dict[str, str]:
             client,
             model=config.get_groq_model(),
             messages=[
-                {"role": "system", "content": "You are a crypto macro risk analyst."},
-                {"role": "user", "content": prompt},
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a crypto macro risk analyst. Respond ONLY with a JSON object "
+                        "containing the keys `safe` (boolean), `sensitivity` (number), and `reason` "
+                        "(string). Do not include any additional commentary."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Assess the market impact of the following events and respond with the "
+                        "required JSON structure:\n"
+                        f"{prompt}"
+                    ),
+                },
             ],
         )
         raw_reply = chat_completion.choices[0].message.content
-        return json.loads(raw_reply)
+        try:
+            parsed_reply = json.loads(raw_reply)
+        except json.JSONDecodeError:
+            logger.warning("LLM returned non-JSON response: %s", raw_reply)
+            return {"safe": True, "sensitivity": 0, "reason": "LLM non-JSON response"}
+
+        if not isinstance(parsed_reply, dict):
+            logger.warning("LLM JSON payload is not an object: %s", parsed_reply)
+            return {"safe": True, "sensitivity": 0, "reason": "LLM malformed JSON response"}
+
+        expected_keys = {"safe", "sensitivity", "reason"}
+        if not expected_keys.issubset(parsed_reply):
+            logger.warning("LLM JSON missing expected keys: %s", parsed_reply)
+            return {"safe": True, "sensitivity": 0, "reason": "LLM malformed JSON response"}
+
+        return parsed_reply
     except Exception as e:
         logger.error("Groq LLM analysis failed: %s", e, exc_info=True)
         return {"safe": True, "sensitivity": 0, "reason": "LLM error"}
