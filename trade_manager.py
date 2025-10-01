@@ -19,6 +19,8 @@ working directory.
 from datetime import datetime, timedelta, timezone
 from typing import List, Tuple, Optional, Union
 
+import pandas as pd
+
 from trade_utils import (
     get_price_data,
     calculate_indicators,
@@ -428,10 +430,10 @@ def manage_trades() -> None:
 
         if entry_dt is None:
             logger.warning(
-                "%s missing valid entry_time; forcing max holding time exit on next cycle.",
+                "%s missing valid entry_time; assigning current time for hold duration tracking.",
                 symbol,
             )
-            entry_dt = datetime.utcnow() - MAX_HOLDING_TIME
+            entry_dt = datetime.utcnow()
             trade['entry_time'] = entry_dt.strftime("%Y-%m-%d %H:%M:%S")
         elif entry_source_used != 'entry_time':
             logger.warning(
@@ -503,7 +505,10 @@ def manage_trades() -> None:
         recent_high: float
         recent_low: float
         if entry_dt is not None:
-            recent_candles = price_data[price_data.index >= entry_dt]
+            if isinstance(price_data.index, pd.DatetimeIndex):
+                recent_candles = price_data[price_data.index >= entry_dt]
+            else:
+                recent_candles = price_data
             if not recent_candles.empty:
                 recent_high = recent_candles['high'].iloc[-1]
                 recent_low = recent_candles['low'].iloc[-1]
