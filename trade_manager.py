@@ -755,14 +755,43 @@ def manage_trades() -> None:
 
             if trade['status'].get('tp2') and not trade['status'].get('tp3') and recent_high >= tp3:
                 trade['status']['tp3'] = True
-                trade['profit_riding'] = True  # enable TP4 mode
-                _update_stop_loss(trade, tp2)
-                _persist_active_snapshot(updated_trades, active_trades, index)
-                logger.info("%s hit TP3 — Entering TP4 Profit Riding Mode", symbol)
-                send_email(f"✅ TP3 Hit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
-                actions.append("tp3_hit")
+                qty = float(trade.get('position_size', trade.get('initial_size', 1)) or 0)
+                if qty <= 0:
+                    qty = float(trade.get('initial_size', 1) or 1)
+                commission_rate = estimate_commission(symbol, quantity=qty, maker=False)
+                fees = tp3 * qty * commission_rate
+                slip_price = simulate_slippage(tp3, direction=direction)
+                slippage_amt = abs(slip_price - tp3)
+                exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                trade['exit_price'] = tp3
+                trade['exit_time'] = exit_time
+                trade['outcome'] = "tp3"
+                trade['exit_reason'] = "tp3_hit"
+                total_fees, total_slippage = _finalize_trade_result(
+                    trade,
+                    exit_price=tp3,
+                    quantity=qty,
+                    fees=fees,
+                    slippage=slippage_amt,
+                )
+                log_trade_result(
+                    trade,
+                    outcome="tp3",
+                    exit_price=tp3,
+                    exit_time=exit_time,
+                    fees=total_fees,
+                    slippage=total_slippage,
+                )
+                _persist_active_snapshot(
+                    updated_trades, active_trades, index, include_current=False
+                )
+                _update_rl(trade, tp3)
+                send_email(
+                    f"✅ TP3 Exit: {symbol}",
+                    f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
+                )
+                actions.append("tp3_exit")
                 logger.debug("%s actions: %s", symbol, actions)
-                updated_trades.append(trade)
                 continue
             if recent_low <= sl:
                 # Stop loss hit (use intrabar low so quick wicks trigger)
