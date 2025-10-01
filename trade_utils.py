@@ -719,12 +719,21 @@ def _extract_trade_returns(df: pd.DataFrame) -> pd.Series:
     return returns
 
 
+_DEFAULT_PERFORMANCE_METRICS = {
+    "sharpe": float("nan"),
+    "calmar": float("nan"),
+    "max_drawdown": float("nan"),
+    "var": float("nan"),
+    "es": float("nan"),
+}
+
+
 def compute_performance_metrics(log_file: str = TRADE_HISTORY_FILE, lookback: int = 100) -> dict:
     """Return risk-adjusted performance metrics from the trade log."""
 
     use_default_source = log_file == TRADE_HISTORY_FILE
     if not use_default_source and (not log_file or not os.path.exists(log_file)):
-        return {}
+        return dict(_DEFAULT_PERFORMANCE_METRICS)
 
     try:
         if use_default_source:
@@ -733,7 +742,7 @@ def compute_performance_metrics(log_file: str = TRADE_HISTORY_FILE, lookback: in
             df = load_trade_history_df(log_file)
 
         if df.empty:
-            return {}
+            return dict(_DEFAULT_PERFORMANCE_METRICS)
 
         sort_cols = [col for col in ("exit_time", "timestamp") if col in df.columns]
         if sort_cols:
@@ -743,7 +752,7 @@ def compute_performance_metrics(log_file: str = TRADE_HISTORY_FILE, lookback: in
 
         returns = _extract_trade_returns(df)
         if returns.empty:
-            return {}
+            return dict(_DEFAULT_PERFORMANCE_METRICS)
 
         equity_curve = (1 + returns).cumprod()
         metrics = {
@@ -758,7 +767,7 @@ def compute_performance_metrics(log_file: str = TRADE_HISTORY_FILE, lookback: in
         logger.exception(
             "Failed to compute performance metrics from %s: %s", log_file, exc
         )
-        return {}
+        return dict(_DEFAULT_PERFORMANCE_METRICS)
 
 
 def get_last_trade_outcome(log_file: str = TRADE_HISTORY_FILE) -> str | None:
