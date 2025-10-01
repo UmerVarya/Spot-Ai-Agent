@@ -764,6 +764,55 @@ def log_trade_result(
                     header_rename_map = build_rename_map(existing_headers)
                 except Exception:
                     header_rename_map = {col: col for col in existing_headers}
+                canonical_headers = {
+                    header_rename_map.get(col, col) for col in existing_headers
+                }
+                if "pattern" not in canonical_headers:
+                    try:
+                        _consolidate_trade_history_file()
+                    except Exception:  # pragma: no cover - best effort repair
+                        logger.exception(
+                            "Failed to backfill missing pattern column in %s", TRADE_HISTORY_FILE
+                        )
+                    else:
+                        try:
+                            with open(TRADE_HISTORY_FILE, "r", encoding="utf-8") as f:
+                                first_line = f.readline()
+                        except OSError as exc:  # pragma: no cover - filesystem specific
+                            logger.warning(
+                                "Unable to re-read trade history header %s after consolidation: %s",
+                                TRADE_HISTORY_FILE,
+                                exc,
+                            )
+                            first_line = ""
+                        if _header_is_compatible(first_line, TRADE_HISTORY_HEADERS):
+                            existing_headers = _parse_header_columns(first_line)
+                            headers = existing_headers
+                            try:
+                                header_rename_map = build_rename_map(existing_headers)
+                            except Exception:
+                                header_rename_map = {col: col for col in existing_headers}
+                            canonical_headers = {
+                                header_rename_map.get(col, col) for col in existing_headers
+                            }
+                        else:
+                            canonical_headers = set()
+                    if "pattern" not in canonical_headers:
+                        backup_path = _archive_legacy_history_file(TRADE_HISTORY_FILE)
+                        if backup_path is None:
+                            try:
+                                with open(TRADE_HISTORY_FILE, "w", encoding="utf-8") as f:
+                                    f.truncate(0)
+                            except OSError as exc:  # pragma: no cover - filesystem specific
+                                logger.exception(
+                                    "Failed to reset legacy trade log %s: %s", TRADE_HISTORY_FILE, exc
+                                )
+                                raise
+                        file_exists = False
+                        header_needed = True
+                        headers = list(TRADE_HISTORY_HEADERS)
+                        existing_headers = []
+                        header_rename_map = {}
         else:
             backup_path = _archive_legacy_history_file(TRADE_HISTORY_FILE)
             if backup_path is None:

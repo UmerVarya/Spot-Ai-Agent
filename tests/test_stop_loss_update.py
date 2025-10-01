@@ -1,5 +1,7 @@
 import trade_manager
 import trade_utils
+from datetime import datetime, timedelta
+
 import pandas as pd
 import pytest
 
@@ -65,6 +67,7 @@ def test_profit_riding_trails_stop_loss(monkeypatch):
         'profit_riding': True,
         'trail_tp_pct': 0.05,
         'next_trail_tp': 150.0,
+        'entry_time': datetime.utcnow().isoformat() + 'Z',
     }
 
     def fake_load():
@@ -76,7 +79,11 @@ def test_profit_riding_trails_stop_loss(monkeypatch):
         saved['trades'] = trades
 
     def fake_price_data(symbol):
-        return pd.DataFrame({'close': [151.0], 'high': [151.0], 'low': [151.0]})
+        now = datetime.utcnow()
+        idx = pd.DatetimeIndex([now - timedelta(minutes=1)])
+        return pd.DataFrame(
+            {'close': [151.0], 'high': [151.0], 'low': [151.0]}, index=idx
+        )
 
     def fake_commission(symbol, quantity, maker):
         return 0.0

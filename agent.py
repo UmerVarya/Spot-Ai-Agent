@@ -600,6 +600,25 @@ def run_agent_loop() -> None:
                             else -100.0 if sentiment_bias == "bearish" else 0.0
                         )
                         risk_amount = position_size * sl_dist
+                        # Determine the high-level strategy label.  The
+                        # historical trade log expects ``strategy`` to describe
+                        # the approach (e.g. purely technical vs. LLM filtered)
+                        # while ``pattern`` captures the specific signal.  The
+                        # previous implementation copied ``pattern_name`` into
+                        # both fields which obscured whether an LLM gate was
+                        # involved.  We now derive a descriptive label that
+                        # preserves that distinction.
+                        strategy_label = "PatternTrade"
+                        llm_decision_token = str(llm_signal or "").strip().lower()
+                        if llm_approval is True:
+                            strategy_label = "PatternTrade+LLM"
+                        elif llm_approval is False:
+                            strategy_label = "PatternTrade-LLM"
+                        elif llm_decision_token in {"approved", "greenlight", "yes"}:
+                            strategy_label = "PatternTrade+LLM"
+                        elif llm_decision_token in {"vetoed", "rejected", "no"}:
+                            strategy_label = "PatternTrade-LLM"
+
                         # Compose the new trade dictionary with extra metadata
                         new_trade = {
                             "symbol": symbol,
@@ -630,7 +649,7 @@ def run_agent_loop() -> None:
                             "order_imbalance": order_imb,
                             "macro_indicator": macro_ind,
                             "pattern": pattern_name,
-                            "strategy": pattern_name,  # tag strategy by pattern
+                            "strategy": strategy_label,
                             "narrative": narrative,
                             "ml_prob": ml_prob,
                             "llm_decision": llm_signal,
