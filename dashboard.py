@@ -790,14 +790,47 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     # Status flags for each take-profit level and SL
     status_flags: list[str] = []
 
+    def tp_hit(key: str, target_price) -> bool:
+        """Determine whether a TP level has been reached or executed."""
+
+        if target_price in (None, ""):
+            return False
+        try:
+            target_value = float(target_price)
+        except Exception:
+            # Fall back to the stored status flag when the target price cannot
+            # be parsed (should not normally happen but keeps the UI resilient)
+            return to_bool(status.get(key))
+        # Explicit status/partial flags take precedence so the indicator stays
+        # green once a partial execution is logged even if price retraces.
+        if to_bool(status.get(key)):
+            return True
+        partial_flag = data.get(f"{key}_partial")
+        if partial_flag is not None and to_bool(partial_flag):
+            return True
+        # Use the current price to infer live status when no explicit flag is
+        # present.  A small tolerance keeps float precision noise from causing
+        # flickering indicators.
+        if current_price is None:
+            return False
+        try:
+            price_value = float(current_price)
+        except Exception:
+            return False
+        tolerance = max(abs(target_value) * 1e-6, 1e-8)
+        if not is_short:
+            return price_value >= target_value - tolerance
+        return price_value <= target_value + tolerance
+
     def tp_flag(hit: bool | None, label: str) -> str:
         """Return an emoji tag indicating whether a TP level was hit."""
+
         return ("🟢" if hit else "🔵") + f" {label}"
 
     for key, label in [("tp1", "TP1"), ("tp2", "TP2"), ("tp3", "TP3")]:
         # Only show flags for targets that exist in the trade data
         if data.get(key) is not None:
-            hit = to_bool(status.get(key))
+            hit = tp_hit(key, data.get(key))
             status_flags.append(tp_flag(hit, label))
 
     if to_bool(status.get("sl")):
