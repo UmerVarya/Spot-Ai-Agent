@@ -32,6 +32,7 @@ from log_utils import setup_logger, LOG_FILE
 from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
 from backtest import compute_buy_and_hold_pnl, generate_trades_from_ohlcv
 from ml_model import train_model
+import requests
 
 BINANCE_FEE_RATE = 0.00075
 
@@ -508,6 +509,202 @@ from trade_logger import TRADE_LEARNING_LOG_FILE
 # "false".
 SIZE_AS_NOTIONAL = os.getenv("SIZE_AS_NOTIONAL", "true").lower() == "true"
 
+# Endpoint for live position data.  ``LIVE_POSITIONS_ENDPOINT`` takes
+# precedence, otherwise we attempt to build the endpoint from several
+# commonly used base URL variables.
+LIVE_POSITIONS_ENDPOINT = os.getenv("LIVE_POSITIONS_ENDPOINT")
+if not LIVE_POSITIONS_ENDPOINT:
+    for env_name in (
+        "TRADE_API_BASE_URL",
+        "TRADE_API_URL",
+        "BACKEND_API_URL",
+        "BACKEND_URL",
+        "API_BASE_URL",
+    ):
+        base_url = os.getenv(env_name)
+        if base_url:
+            LIVE_POSITIONS_ENDPOINT = base_url.rstrip("/") + "/api/trade/positions/live"
+            break
+
+try:
+    LIVE_POSITIONS_TIMEOUT = float(os.getenv("LIVE_POSITIONS_TIMEOUT", "5"))
+except (TypeError, ValueError):
+    LIVE_POSITIONS_TIMEOUT = 5.0
+
+
+def _normalise_live_positions_payload(payload) -> list[dict]:
+    """Return a list of trade dictionaries from ``payload``.
+
+    The live positions API can return the positions directly as a list or
+    wrapped under a variety of keys (``data``, ``positions``, ``items``).
+    Some backends expose a mapping of ``symbol -> data``.  This helper
+    normalises those cases into a uniform ``list[dict]``.
+    """
+
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        # Common nesting patterns: {"data": {...}}, {"positions": [...]}, etc.
+        possible_keys = ("positions", "data", "items", "results")
+        for key in possible_keys:
+            if key not in payload:
+                continue
+            value = payload[key]
+            # Some APIs wrap the actual list under ``data`` again
+            if isinstance(value, dict):
+                nested = _normalise_live_positions_payload(value)
+                if nested:
+                    return nested
+                continue
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        # If the response itself is a mapping of symbol -> trade data.
+        dict_values = [v for v in payload.values() if isinstance(v, dict)]
+        if dict_values:
+            return dict_values
+    return []
+
+
+def _status_token_is_closed(value) -> bool:
+    """Return ``True`` when ``value`` represents a closed trade state."""
+
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        # Numerical status codes of zero commonly indicate inactivity
+        return float(value) == 0.0
+    token = str(value).strip().lower()
+    if not token:
+        return False
+    closed_tokens = {
+        "closed",
+        "complete",
+        "completed",
+        "exited",
+        "exit",
+        "flat",
+        "inactive",
+        "inactive_position",
+        "inactive-trade",
+        "stopped",
+        "cancelled",
+        "canceled",
+        "finished",
+        "done",
+        "closed_out",
+        "hit_sl",
+        "stop_hit",
+    }
+    open_tokens = {"open", "active", "running", "live", "entered"}
+    if token in closed_tokens:
+        return True
+    if token in open_tokens:
+        return False
+    for marker in closed_tokens:
+        if marker in token:
+            return True
+    return False
+
+
+def _is_trade_closed(trade: dict) -> bool:
+    """Return ``True`` if ``trade`` should be considered closed."""
+
+    if not isinstance(trade, dict):
+        return True
+    # Direct boolean hints
+    for key in ("is_open", "open", "active"):
+        if key in trade:
+            hint = trade[key]
+            if isinstance(hint, str):
+                hint_bool = to_bool(hint)
+                # ``to_bool`` only returns True for positive affirmations.  When
+                # it returns False we need to differentiate between an explicit
+                # negative and "unknown".  A non-empty token implies an explicit
+                # negation.
+                if not hint_bool and hint.strip():
+                    return True
+                if hint_bool:
+                    return False
+            elif hint is False:
+                return True
+            elif hint is True:
+                return False
+    status_field = trade.get("status")
+    if isinstance(status_field, dict):
+        for key, value in status_field.items():
+            if _status_token_is_closed(key) and to_bool(value):
+                return True
+            if _status_token_is_closed(value):
+                return True
+        # Nested state hints
+        for nested_key in ("state", "status", "trade_status"):
+            if nested_key in status_field and _status_token_is_closed(
+                status_field[nested_key]
+            ):
+                return True
+    elif _status_token_is_closed(status_field):
+        return True
+    # Additional explicit status fields commonly emitted by the agent
+    for alt_key in ("state", "position_status", "trade_status", "status_name"):
+        if _status_token_is_closed(trade.get(alt_key)):
+            return True
+    return False
+
+
+def _trade_identity(trade: dict) -> str:
+    """Return a stable identifier for ``trade`` used to track UI changes."""
+
+    if not isinstance(trade, dict):
+        return "unknown"
+    for key in ("trade_id", "id", "uuid", "order_id"):
+        if trade.get(key):
+            return str(trade[key])
+    symbol = str(trade.get("symbol", "?"))
+    entry_time = trade.get("entry_time") or trade.get("timestamp") or "?"
+    return f"{symbol}|{entry_time}"
+
+
+def fetch_live_positions() -> tuple[list[dict], str, str | None]:
+    """Return live position data, preferring the API over local storage."""
+
+    if LIVE_POSITIONS_ENDPOINT:
+        try:
+            response = requests.get(LIVE_POSITIONS_ENDPOINT, timeout=LIVE_POSITIONS_TIMEOUT)
+            response.raise_for_status()
+            payload = response.json()
+            trades = _normalise_live_positions_payload(payload)
+            if trades:
+                return trades, "api", None
+            return trades, "api", None
+        except Exception as exc:  # pragma: no cover - network dependent
+            logger.warning("Live positions API unavailable: %s", exc)
+            error = (
+                "Live positions API unavailable; falling back to local cache. "
+                "Check TRADE_API_BASE_URL or LIVE_POSITIONS_ENDPOINT."
+            )
+            return load_active_trades(), "storage", error
+    return load_active_trades(), "storage", None
+
+
+def load_open_trades() -> tuple[list[dict], str, str | None, int]:
+    """Return active trades with closed entries filtered out."""
+
+    trades, source, error = fetch_live_positions()
+    open_trades: list[dict] = []
+    filtered_closed = 0
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        if _is_trade_closed(trade):
+            filtered_closed += 1
+            continue
+        open_trades.append(trade)
+    return open_trades, source, error, filtered_closed
+
 
 def _env_float(name: str, default: float) -> float:
     """Return environment variable ``name`` parsed as ``float`` with fallback."""
@@ -847,12 +1044,12 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     }
 
 
-def compute_llm_decision_stats() -> tuple[int, int, int]:
+def compute_llm_decision_stats(active_trades: list[dict]) -> tuple[int, int, int]:
     """Return counts of LLM-approved, vetoed and error trades."""
     approved = vetoed = errors = 0
     error_tokens = {"true", "1", "yes"}
     # Active trades
-    for t in load_active_trades():
+    for t in active_trades:
         error_flag = str(t.get("llm_error")).lower() in error_tokens
         if error_flag:
             errors += 1
@@ -907,15 +1104,40 @@ def render_live_tab() -> None:
     # Auto refresh
     st_autorefresh(interval=refresh_interval * 1000, key="refresh")
     # Load active trades and format into rows
-    trades = load_active_trades()
-    active_rows: list[dict] = []
+    trades, source, error_message, filtered_closed = load_open_trades()
+    if error_message:
+        if st.session_state.get("live_positions_error") != error_message:
+            st.warning(error_message)
+        st.session_state["live_positions_error"] = error_message
+    else:
+        st.session_state.pop("live_positions_error", None)
+    trade_entries: list[tuple[str, dict]] = []
     for data in trades:
         sym = data.get("symbol", "")
         row = format_active_row(sym, data)
         if row:
-            active_rows.append(row)
+            trade_entries.append((_trade_identity(data), row))
+    active_rows = [row for _, row in trade_entries]
+    # Detect closures for realtime feedback
+    previous_rows: dict[str, dict] = st.session_state.get("prev_active_rows", {})
+    current_rows = {key: row for key, row in trade_entries}
+    closed_keys = sorted(set(previous_rows) - set(current_rows))
+    for key in closed_keys:
+        last_snapshot = previous_rows.get(key, {})
+        symbol = last_snapshot.get("Symbol", key)
+        pnl_pct = last_snapshot.get("PnL (%)")
+        pnl_note = ""
+        if pnl_pct is not None and not pd.isna(pnl_pct):
+            pnl_note = f" ({pnl_pct:+.2f}%)"
+        status_note = last_snapshot.get("Status")
+        if status_note and status_note != "Running":
+            pnl_note += f" – {status_note}"
+        st.success(f"Trade {symbol} closed{pnl_note}.")
+    st.session_state["prev_active_rows"] = current_rows
+    prev_count = st.session_state.get("prev_active_count")
+    st.session_state["prev_active_count"] = len(active_rows)
     # LLM decision statistics
-    approved, vetoed, errors = compute_llm_decision_stats()
+    approved, vetoed, errors = compute_llm_decision_stats(trades)
     total_decisions = approved + vetoed + errors
     if total_decisions:
         st.subheader("🤖 LLM Decision Outcomes")
@@ -925,11 +1147,19 @@ def render_live_tab() -> None:
         c3.metric("Errors", f"{errors} ({errors / total_decisions:.0%})")
     # Display live PnL section
     st.subheader("📈 Live PnL – Active Trades")
+    source_label = "live API" if source == "api" else "local cache"
+    caption_parts = [f"Active positions source: {source_label}."]
+    if filtered_closed:
+        caption_parts.append(f"Filtered {filtered_closed} closed trade(s) from feed.")
+    st.caption(" ".join(caption_parts))
     if active_rows:
         df_active = pd.DataFrame(active_rows)
         # Summary metrics for active trades
         col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("Active Trades", len(df_active))
+        metric_kwargs = {}
+        if prev_count is not None:
+            metric_kwargs["delta"] = len(df_active) - prev_count
+        col1.metric("Active Trades", len(df_active), **metric_kwargs)
         avg_pnl_pct = df_active["PnL (%)"].mean() if not df_active.empty else 0.0
         prev_avg = st.session_state.get("prev_avg_pnl", avg_pnl_pct)
         delta_avg = avg_pnl_pct - prev_avg
@@ -1212,6 +1442,47 @@ def render_live_tab() -> None:
             hist_df["Duration (min)"] = (
                 exit_times - entry_times
             ).dt.total_seconds() / 60
+        # Preview the most recent closed trades to reassure users the trades
+        # are logged even after disappearing from the active table.
+        sort_field = next(
+            (col for col in ("exit_time", "timestamp") if col in hist_df.columns),
+            None,
+        )
+        if sort_field:
+            recent_closed = hist_df.sort_values(sort_field, ascending=False).head(10)
+        else:
+            recent_closed = hist_df.tail(10)
+        if not recent_closed.empty:
+            st.markdown("#### ✅ Recently Closed Trades")
+            display_cols: list[str] = []
+            rename_map: dict[str, str] = {}
+            for src, dst in (
+                ("symbol", "Symbol"),
+                ("exit_time", "Exit Time"),
+                ("PnL (net $)", "PnL (net $)"),
+                ("PnL (%)", "PnL (%)"),
+                ("outcome", "Outcome"),
+            ):
+                if src in recent_closed.columns:
+                    display_cols.append(src)
+                    rename_map[src] = dst
+            if not display_cols:
+                display_cols = list(recent_closed.columns)
+            recent_display = recent_closed[display_cols].rename(columns=rename_map).copy()
+            if "Exit Time" in recent_display.columns:
+                exit_series = pd.to_datetime(
+                    recent_display["Exit Time"], errors="coerce", utc=True
+                )
+                recent_display["Exit Time"] = exit_series.dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            recent_safe = arrow_safe_dataframe(recent_display)
+            recent_formatters = {}
+            if "PnL (net $)" in recent_safe.columns:
+                recent_formatters["PnL (net $)"] = _fmt_money
+            if "PnL (%)" in recent_safe.columns:
+                recent_formatters["PnL (%)"] = _fmt_percent
+            st.dataframe(
+                recent_safe.style.format(recent_formatters), use_container_width=True
+            )
         # Summary metrics
         total_trades = len(hist_df)
         wins = (hist_df["PnL (net $)"] > 0).sum()
