@@ -573,7 +573,12 @@ def _status_token_is_closed(value) -> bool:
     if value is None:
         return False
     if isinstance(value, bool):
-        return bool(value)
+        # Boolean flags alone do not convey whether a trade is closed.  Some backends
+        # expose ``status.open`` or ``status.active`` booleans where ``True`` means the
+        # trade is running, while others provide ``status.closed``.  The surrounding
+        # heuristics inspect the key names to interpret these values, so treat the bare
+        # boolean as "unknown" here to avoid false positives.
+        return False
     if isinstance(value, (int, float)):
         # Numerical status codes of zero commonly indicate inactivity
         return float(value) == 0.0
