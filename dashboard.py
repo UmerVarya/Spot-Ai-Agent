@@ -573,7 +573,7 @@ def _status_token_is_closed(value) -> bool:
     if value is None:
         return False
     if isinstance(value, bool):
-        return not value
+        return bool(value)
     if isinstance(value, (int, float)):
         # Numerical status codes of zero commonly indicate inactivity
         return float(value) == 0.0
