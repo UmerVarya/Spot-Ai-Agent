@@ -1041,6 +1041,7 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         low = price_data['low']
         volume = price_data['volume']
         atr_p = atr_percentile(high, low, close)
+        high_vol_countertrend = bool(np.isfinite(atr_p) and atr_p >= 0.9)
         volatility_regime, indicator_params = _select_indicator_params(atr_p)
 
         ema_short = EMAIndicator(close, window=indicator_params["ema_short"]).ema_indicator()
@@ -1208,11 +1209,30 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         ema_latest = float(ema_short.iloc[-1]) if not ema_short.empty else float("nan")
         ema_long_latest = float(ema_long.iloc[-1]) if not ema_long.empty else float("nan")
         ema_diff = ema_latest - ema_long_latest
+        rsi_val = float(rsi.iloc[-1]) if not rsi.empty else float("nan")
+        bb_lower_val = float(bb_lower.iloc[-1]) if not bb_lower.empty else float("nan")
+        counter_trend_mode = False
         ema_flag = 0.0
         if ema_condition and np.isfinite(ema_diff) and ema_diff > 0 and price_now > 0:
             ema_flag = _linear_score(ema_diff / price_now, 0.0, 0.02)
             if ema_flag > 0:
                 trend_score += w["ema"] * ema_flag
+        else:
+            oversold_context = (
+                (np.isfinite(rsi_val) and rsi_val < 35.0)
+                or (np.isfinite(bb_lower_val) and price_now <= bb_lower_val)
+            )
+            if (
+                high_vol_countertrend
+                and oversold_context
+                and np.isfinite(ema_diff)
+                and ema_diff < 0
+                and price_now > 0
+            ):
+                counter_trend_mode = True
+                ema_flag = _linear_score(abs(ema_diff) / price_now, 0.0, 0.02)
+                if ema_flag > 0:
+                    mean_rev_score += w["ema"] * 0.6 * ema_flag
 
         macd_latest = float(macd_line.iloc[-1]) if not macd_line.empty else float("nan")
         macd_flag = 0.0
@@ -1225,7 +1245,6 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             if macd_flag > 0:
                 trend_score += w["macd"] * macd_flag
 
-        rsi_val = float(rsi.iloc[-1]) if not rsi.empty else float("nan")
         rsi_condition = (
             rsi_1h is None
             or rsi_1h != rsi_1h
@@ -1344,9 +1363,13 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         normalized_score = max(trend_norm, mean_rev_norm)
         TREND_THRESHOLD = 5.0
         MEAN_REV_THRESHOLD = 4.5
+        COUNTER_TREND_THRESHOLD = 4.0
         if trend_norm >= TREND_THRESHOLD and trend_norm >= mean_rev_norm:
             normalized_score = trend_norm
             setup_type = "trend"
+        elif counter_trend_mode and mean_rev_norm >= COUNTER_TREND_THRESHOLD:
+            normalized_score = mean_rev_norm
+            setup_type = "counter_trend"
         elif mean_rev_norm >= MEAN_REV_THRESHOLD:
             normalized_score = mean_rev_norm
             setup_type = "mean_reversion"
