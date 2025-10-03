@@ -939,6 +939,70 @@ def estimate_commission(symbol: str, quantity: float = 1.0, maker: bool = False)
     """Estimate the commission fee rate for a given trade."""
     return 0.0004 if maker else 0.001
 
+def _select_indicator_params(vol_percentile: float | None) -> tuple[str, dict[str, int | float]]:
+    """Return tuned indicator parameters for the current volatility regime."""
+
+    base_params: dict[str, int | float] = {
+        "ema_short": 20,
+        "ema_long": 50,
+        "dema_short": 20,
+        "dema_long": 50,
+        "macd_fast": 12,
+        "macd_slow": 26,
+        "macd_signal": 9,
+        "stoch_window": 14,
+        "stoch_smooth": 3,
+        "cci_window": 20,
+        "bb_window": 20,
+        "bb_dev": 2,
+        "vwma_window": 20,
+    }
+
+    if vol_percentile is None or np.isnan(vol_percentile):
+        return "mid", base_params
+
+    low_params = {
+        "ema_short": 26,
+        "ema_long": 65,
+        "dema_short": 26,
+        "dema_long": 65,
+        "macd_fast": 10,
+        "macd_slow": 30,
+        "macd_signal": 9,
+        "stoch_window": 21,
+        "stoch_smooth": 3,
+        "cci_window": 30,
+        "bb_window": 24,
+        "vwma_window": 30,
+    }
+
+    high_params = {
+        "ema_short": 8,
+        "ema_long": 21,
+        "dema_short": 8,
+        "dema_long": 21,
+        "macd_fast": 5,
+        "macd_slow": 13,
+        "macd_signal": 8,
+        "stoch_window": 5,
+        "stoch_smooth": 3,
+        "cci_window": 14,
+        "bb_window": 14,
+        "vwma_window": 14,
+    }
+
+    if vol_percentile > 0.75:
+        params = base_params.copy()
+        params.update(high_params)
+        return "high", params
+    if vol_percentile < 0.25:
+        params = base_params.copy()
+        params.update(low_params)
+        return "low", params
+
+    return "mid", base_params
+
+
 def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: str = "neutral"):
     """Evaluate a trading signal given a price DataFrame."""
     try:
@@ -976,25 +1040,48 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         high = price_data['high']
         low = price_data['low']
         volume = price_data['volume']
-        ema_short = EMAIndicator(close, window=20).ema_indicator()
-        ema_long = EMAIndicator(close, window=50).ema_indicator()
-        macd_line = MACD(close).macd_diff()
+        atr_p = atr_percentile(high, low, close)
+        volatility_regime, indicator_params = _select_indicator_params(atr_p)
+
+        ema_short = EMAIndicator(close, window=indicator_params["ema_short"]).ema_indicator()
+        ema_long = EMAIndicator(close, window=indicator_params["ema_long"]).ema_indicator()
+        macd_line = MACD(
+            close,
+            window_slow=indicator_params["macd_slow"],
+            window_fast=indicator_params["macd_fast"],
+            window_sign=indicator_params["macd_signal"],
+        ).macd_diff()
         rsi = RSIIndicator(close, window=14).rsi()
         with np.errstate(invalid='ignore', divide='ignore'):
             adx_series = ADXIndicator(high=high, low=low, close=close, window=14).adx()
         adx = adx_series.fillna(0)
-        bb = BollingerBands(close, window=20, window_dev=2)
-        vwma_calc = VolumeWeightedAveragePrice(high=high, low=low, close=close, volume=volume, window=20)
+        bb = BollingerBands(
+            close,
+            window=int(indicator_params["bb_window"]),
+            window_dev=float(indicator_params["bb_dev"]),
+        )
+        vwma_calc = VolumeWeightedAveragePrice(
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+            window=int(indicator_params["vwma_window"]),
+        )
         vwma = vwma_calc.volume_weighted_average_price()
         bb_upper = bb.bollinger_hband()
         bb_lower = bb.bollinger_lband()
-        dema_short = DEMAIndicator(close, window=20).dema_indicator()
-        dema_long = DEMAIndicator(close, window=50).dema_indicator()
-        stoch_obj = StochasticOscillator(high, low, close, window=14, smooth_window=3)
+        dema_short = DEMAIndicator(close, window=indicator_params["dema_short"]).dema_indicator()
+        dema_long = DEMAIndicator(close, window=indicator_params["dema_long"]).dema_indicator()
+        stoch_obj = StochasticOscillator(
+            high,
+            low,
+            close,
+            window=int(indicator_params["stoch_window"]),
+            smooth_window=int(indicator_params["stoch_smooth"]),
+        )
         stoch_k = stoch_obj.stoch()
         stoch_d = stoch_obj.stoch_signal()
-        cci = CCIIndicator(high, low, close, window=20).cci()
-        atr_p = atr_percentile(high, low, close)
+        cci = CCIIndicator(high, low, close, window=int(indicator_params["cci_window"])).cci()
         hurst = hurst_exponent(close)
         def _slope(series: pd.Series) -> float:
             x = np.arange(len(series))
@@ -1311,6 +1398,7 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             "hs": hs_flag,
             "double_bottom": double_flag,
             "cup_handle": cup_flag,
+            "volatility_regime": volatility_regime,
         }
         log_signal(symbol, session_name, normalized_score, direction, w, triggered_patterns, chart_pattern, indicator_flags)
         return normalized_score, direction, position_size, pattern_name
