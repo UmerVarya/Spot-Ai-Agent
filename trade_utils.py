@@ -1169,7 +1169,10 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             base_weights["stoch"] += 0.2
         w = optimize_indicator_weights(base_weights)
         reinforcement = 1.0
-        score = 0.0
+        trend_score = 0.0
+        mean_rev_score = 0.0
+        structure_score = 0.0
+        penalty_score = 0.0
         ema_condition = (
             (ema_trend_1h is None or ema_trend_1h != ema_trend_1h or ema_trend_1h > 0)
             and (ema_trend_4h is None or ema_trend_4h != ema_trend_4h or ema_trend_4h > 0)
@@ -1209,7 +1212,7 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         if ema_condition and np.isfinite(ema_diff) and ema_diff > 0 and price_now > 0:
             ema_flag = _linear_score(ema_diff / price_now, 0.0, 0.02)
             if ema_flag > 0:
-                score += w["ema"] * ema_flag
+                trend_score += w["ema"] * ema_flag
 
         macd_latest = float(macd_line.iloc[-1]) if not macd_line.empty else float("nan")
         macd_flag = 0.0
@@ -1220,7 +1223,7 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
                 macd_scale = max(abs(macd_latest), 1e-6)
             macd_flag = _tanh_score(macd_latest, macd_scale * 1.5)
             if macd_flag > 0:
-                score += w["macd"] * macd_flag
+                trend_score += w["macd"] * macd_flag
 
         rsi_val = float(rsi.iloc[-1]) if not rsi.empty else float("nan")
         rsi_condition = (
@@ -1232,55 +1235,55 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         if rsi_condition:
             rsi_flag = _linear_score(rsi_val, 50.0, 80.0)
             if rsi_flag > 0:
-                score += w["rsi"] * rsi_flag
+                trend_score += w["rsi"] * rsi_flag
 
         adx_val = float(adx.iloc[-1]) if not adx.empty else float("nan")
         adx_flag = _linear_score(adx_val, 20.0, 40.0)
         if adx_flag > 0:
-            score += w["adx"] * adx_flag
+            trend_score += w["adx"] * adx_flag
         vwma_value = vwma.iloc[-1]
         vwma_dev = abs(price_now - vwma_value) / price_now if price_now != 0 else 0.0
         vwma_flag = 0
         if price_now > vwma_value:
             if vwma_dev <= 0.05:
                 vwma_flag = 1
-                score += w["vwma"]
+                trend_score += w["vwma"]
             elif vwma_dev < 0.10:
                 vwma_flag = (0.10 - vwma_dev) / 0.05
-                score += w["vwma"] * vwma_flag
+                trend_score += w["vwma"] * vwma_flag
         bb_flag = int(bb_lower.iloc[-1] and bb_lower.iloc[-1] < price_now < bb_upper.iloc[-1])
         if bb_flag:
-            score += w["bb"]
+            mean_rev_score += w["bb"]
         dema_flag = int(dema_short.iloc[-1] > dema_long.iloc[-1])
         if dema_flag:
-            score += w["dema"]
+            trend_score += w["dema"]
         stoch_k_val = float(stoch_k.iloc[-1]) if not stoch_k.empty else float("nan")
         stoch_d_val = float(stoch_d.iloc[-1]) if not stoch_d.empty else float("nan")
         stoch_flag = 0.0
         if stoch_k_val == stoch_k_val and stoch_d_val == stoch_d_val and stoch_k_val < 80:
             stoch_flag = _linear_score(stoch_k_val - stoch_d_val, 0.0, 15.0)
             if stoch_flag > 0:
-                score += w["stoch"] * stoch_flag
+                mean_rev_score += w["stoch"] * stoch_flag
         cci_val = float(cci.iloc[-1]) if not cci.empty else float("nan")
         cci_flag = _linear_score(cci_val, 0.0, 100.0)
         if cci_flag > 0:
-            score += w["cci"] * cci_flag
+            mean_rev_score += w["cci"] * cci_flag
         atr_flag = 0
         if atr_p == atr_p:
             if atr_p > 0.75:
                 atr_flag = 1
-                score += w["atr"]
+                trend_score += w["atr"]
             elif atr_p < 0.25:
                 atr_flag = -1
-                score -= w["atr"]
+                penalty_score += w["atr"]
         hurst_flag = 0
         if hurst == hurst:
             if hurst > 0.55:
                 hurst_flag = 1
-                score += w["hurst"]
+                trend_score += w["hurst"]
             elif hurst < 0.45:
                 hurst_flag = -1
-                score -= w["hurst"]
+                penalty_score += w["hurst"]
         candle_patterns = detect_candlestick_patterns(price_data)
         # Normalize candlestick pattern output to a list
         if isinstance(candle_patterns, dict):
@@ -1299,20 +1302,20 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         cup_handle, cup_vol = detect_cup_and_handle(price_data)
         cup_flag = int(bool(cup_handle))
         if candle_flag:
-            score += w["candle"]
+            structure_score += w["candle"]
         if chart_flag:
-            score += w["chart"]
+            structure_score += w["chart"]
         if flag_flag:
-            score += w["flag"]
+            structure_score += w["flag"]
         if hs_flag:
-            score -= w["hs"]
+            penalty_score += w["hs"]
         if double_flag:
-            score += w["double_bottom"] * (1.2 if db_vol else 1.0)
+            structure_score += w["double_bottom"] * (1.2 if db_vol else 1.0)
         if cup_flag:
-            score += w["cup_handle"] * (1.2 if cup_vol else 1.0)
+            structure_score += w["cup_handle"] * (1.2 if cup_vol else 1.0)
         confluence_flag = int(all(v > 0 for v in confluence.values() if v == v))
         if confluence_flag:
-            score += w["confluence"]
+            trend_score += w["confluence"]
         if spread == spread and price_now > 0 and spread / price_now > 0.001:
             logger.warning("Skipping %s: spread %.6f is >0.1%% of price.", symbol, spread)
             return 0, None, 0, None
@@ -1323,18 +1326,36 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         flow_flag = 0
         if aggression == "buyers in control":
             flow_flag = 1
-            score += w["flow"]
+            trend_score += w["flow"]
         elif aggression == "sellers in control":
             flow_flag = -1
-            score -= w["flow"]
-        max_possible = sum(w.values())
-        normalized_score = round((score / max_possible) * 10 * reinforcement, 2)
-        if sentiment_bias == "bullish" and normalized_score < 5.0:
+            penalty_score += w["flow"]
+        trend_weight_keys = ["ema", "macd", "rsi", "adx", "vwma", "dema", "flow", "confluence", "atr", "hurst"]
+        mean_rev_weight_keys = ["bb", "stoch", "cci"]
+        structure_weight_keys = ["candle", "chart", "flag", "double_bottom", "cup_handle"]
+        trend_max = sum(w[k] for k in trend_weight_keys if k in w)
+        mean_rev_max = sum(w[k] for k in mean_rev_weight_keys if k in w)
+        structure_max = sum(w[k] for k in structure_weight_keys if k in w)
+        trend_total = max(trend_score + structure_score - penalty_score, 0.0)
+        mean_rev_total = max(mean_rev_score + structure_score - penalty_score, 0.0)
+        trend_norm = round(((trend_total / max(trend_max + structure_max, 1e-6)) * 10 * reinforcement), 2)
+        mean_rev_norm = round(((mean_rev_total / max(mean_rev_max + structure_max, 1e-6)) * 10 * reinforcement), 2)
+        setup_type = None
+        normalized_score = max(trend_norm, mean_rev_norm)
+        TREND_THRESHOLD = 5.0
+        MEAN_REV_THRESHOLD = 4.5
+        if trend_norm >= TREND_THRESHOLD and trend_norm >= mean_rev_norm:
+            normalized_score = trend_norm
+            setup_type = "trend"
+        elif mean_rev_norm >= MEAN_REV_THRESHOLD:
+            normalized_score = mean_rev_norm
+            setup_type = "mean_reversion"
+        if sentiment_bias == "bullish" and normalized_score < 5.0 and setup_type:
             normalized_score += 0.8
-        elif sentiment_bias == "bearish" and normalized_score > 7.5:
+        elif sentiment_bias == "bearish" and normalized_score > 7.5 and setup_type:
             normalized_score -= 0.8
         normalized_score = round(normalized_score, 2)
-        direction = "long" if normalized_score >= 4.5 else None
+        direction = "long" if setup_type and normalized_score >= 4.5 else None
         position_size = get_position_size(normalized_score)
         zones = detect_support_resistance_zones(price_data)
         zones = zones.to_dict() if isinstance(zones, pd.Series) else (zones or {"support": [], "resistance": []})
@@ -1373,6 +1394,9 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
                 "direction": direction,
                 "position_size": position_size,
                 "pattern": pattern_name,
+                "setup": setup_type or "none",
+                "trend_score": trend_norm,
+                "mean_reversion_score": mean_rev_norm,
             }
             with open(SYMBOL_SCORES_FILE, "w") as f:
                 json.dump(scores, f, indent=2)
@@ -1399,6 +1423,9 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             "double_bottom": double_flag,
             "cup_handle": cup_flag,
             "volatility_regime": volatility_regime,
+            "trend_norm": trend_norm,
+            "mean_reversion_norm": mean_rev_norm,
+            "setup_type": setup_type or "none",
         }
         log_signal(symbol, session_name, normalized_score, direction, w, triggered_patterns, chart_pattern, indicator_flags)
         return normalized_score, direction, position_size, pattern_name
