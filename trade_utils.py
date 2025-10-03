@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import json
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional, Any, Mapping
 import traceback
@@ -270,10 +271,18 @@ except Exception:
 
 # Order flow detection fallback
 try:
-    from orderflow import detect_aggression  # type: ignore
+    from orderflow import detect_aggression, OrderFlowAnalysis  # type: ignore
 except Exception:
-    def detect_aggression(df):
-        return "neutral"
+    @dataclass
+    class OrderFlowAnalysis:  # type: ignore
+        state: str = "neutral"
+        features: dict = field(default_factory=dict)
+
+        def __str__(self) -> str:
+            return self.state
+
+    def detect_aggression(df, order_book=None, symbol=None, depth: int = 5):  # type: ignore
+        return OrderFlowAnalysis()
 
 # Microstructure metrics fallback
 try:
@@ -423,13 +432,32 @@ def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
                 "timestamp", "open", "high", "low", "close", "volume", "close_time",
                 "quote_asset_volume", "number_of_trades", "taker_buy_base", "taker_buy_quote", "ignore",
             ])
-            df[["open", "high", "low", "close", "volume", "quote_asset_volume"]] = df[
-                ["open", "high", "low", "close", "volume", "quote_asset_volume"]
-            ].astype(float)
+            df[[
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "quote_asset_volume",
+                "taker_buy_base",
+                "taker_buy_quote",
+            ]] = df[[
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "quote_asset_volume",
+                "taker_buy_base",
+                "taker_buy_quote",
+            ]].astype(float)
+            df["number_of_trades"] = pd.to_numeric(df["number_of_trades"], errors="coerce")
             # Convert timestamp to datetime and set as index
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
             df = df.set_index("timestamp")
             df["quote_volume"] = df["quote_asset_volume"]
+            df["taker_sell_base"] = (df["volume"] - df["taker_buy_base"]).clip(lower=0.0)
+            df["taker_sell_quote"] = (df["quote_volume"] - df["taker_buy_quote"]).clip(lower=0.0)
 
             # Fetch the most recent 1‑hour kline and store it for higher timeframe checks
             h_klines = client.get_klines(symbol=mapped_symbol, interval=Client.KLINE_INTERVAL_1HOUR, limit=2)
@@ -446,7 +474,19 @@ def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
                 h_df["quote_volume"] = h_df["quote_asset_volume"]
                 df.attrs["hourly_bar"] = h_df[["open", "high", "low", "close", "volume", "quote_volume"]]
 
-            return df[["open", "high", "low", "close", "volume", "quote_volume"]]
+            return df[[
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "quote_volume",
+                "taker_buy_base",
+                "taker_buy_quote",
+                "taker_sell_base",
+                "taker_sell_quote",
+                "number_of_trades",
+            ]]
         except Exception as e:
             last_exception = e
             logger.warning(
@@ -1338,17 +1378,51 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         if spread == spread and price_now > 0 and spread / price_now > 0.001:
             logger.warning("Skipping %s: spread %.6f is >0.1%% of price.", symbol, spread)
             return 0, None, 0, None
-        if imbalance == imbalance and abs(imbalance) > 0.7:
-            logger.warning("Skipping %s: order book imbalance %.2f exceeds threshold.", symbol, imbalance)
+        imbalance_to_check = imbalance
+        aggression = detect_aggression(price_data, order_book=order_book, symbol=symbol)
+        flow_features = getattr(aggression, "features", {}) or {}
+        feature_imbalance = flow_features.get("order_book_imbalance")
+        if feature_imbalance == feature_imbalance:
+            imbalance_to_check = feature_imbalance
+        if imbalance_to_check == imbalance_to_check and abs(imbalance_to_check) > 0.7:
+            logger.warning(
+                "Skipping %s: order book imbalance %.2f exceeds threshold.",
+                symbol,
+                imbalance_to_check,
+            )
             return 0, None, 0, None
-        aggression = detect_aggression(price_data)
+        flow_score = 0.0
+        for key, weight in (
+            ("trade_imbalance", 0.45),
+            ("order_book_imbalance", 0.35),
+            ("cvd_change", 0.2),
+            ("taker_buy_ratio", 0.15),
+            ("aggressive_trade_rate", 0.1),
+            ("spoofing_intensity", 0.1),
+        ):
+            value = flow_features.get(key)
+            if value == value:
+                flow_score += weight * value
+        if "volume" in price_data:
+            recent = price_data["volume"].tail(5)
+            avg_vol = float(recent.mean()) if not recent.empty else float("nan")
+            last_vol = float(recent.iloc[-1]) if not recent.empty else float("nan")
+            if avg_vol == avg_vol and last_vol == last_vol and avg_vol > 0:
+                vol_ratio = (last_vol / avg_vol) - 1.0
+                flow_score += 0.2 * max(-1.0, min(1.0, vol_ratio))
+        price_change = float(price_data["close"].iloc[-1] - price_data["open"].iloc[-5]) if len(price_data) >= 5 else 0.0
+        if price_change > 0:
+            flow_score += 0.1
+        elif price_change < 0:
+            flow_score -= 0.1
+        flow_score = max(-1.0, min(1.0, flow_score))
         flow_flag = 0
-        if aggression == "buyers in control":
+        if aggression.state == "buyers in control" or flow_score > 0.2:
             flow_flag = 1
-            trend_score += w["flow"]
-        elif aggression == "sellers in control":
+            trend_score += w["flow"] * max(flow_score, 0.0)
+        elif aggression.state == "sellers in control" or flow_score < -0.2:
             flow_flag = -1
-            penalty_score += w["flow"]
+            penalty_score += w["flow"] * max(-flow_score, 0.0)
         trend_weight_keys = ["ema", "macd", "rsi", "adx", "vwma", "dema", "flow", "confluence", "atr", "hurst"]
         mean_rev_weight_keys = ["bb", "stoch", "cci"]
         structure_weight_keys = ["candle", "chart", "flag", "double_bottom", "cup_handle"]

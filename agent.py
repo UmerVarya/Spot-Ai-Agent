@@ -418,7 +418,8 @@ def run_agent_loop() -> None:
                             score,
                         )
                         continue
-                    flow_status = detect_aggression(price_data)
+                    flow_analysis = detect_aggression(price_data, symbol=symbol)
+                    flow_status = getattr(flow_analysis, "state", "neutral")
                     if flow_status == "sellers in control":
                         logger.warning(
                             "Bearish order flow detected in %s. Proceeding with caution (penalized score handled in evaluate_signal).",
@@ -432,6 +433,7 @@ def run_agent_loop() -> None:
                             "position_size": position_size,
                             "pattern": pattern_name,
                             "price_data": price_data,
+                            "orderflow": flow_analysis,
                         }
                     )
                     logger.info(
@@ -478,7 +480,10 @@ def run_agent_loop() -> None:
                     pass
                 indicators['next_return'] = next_ret
                 # Precompute order flow once for reuse
-                of_state = detect_aggression(price_data)
+                flow_analysis = trade_candidate.get("orderflow")
+                if flow_analysis is None:
+                    flow_analysis = detect_aggression(price_data, symbol=symbol)
+                of_state = getattr(flow_analysis, "state", "neutral")
                 orderflow = (
                     "buyers" if of_state == "buyers in control" else
                     "sellers" if of_state == "sellers in control" else
@@ -588,10 +593,12 @@ def run_agent_loop() -> None:
                             htf_trend = ((ema20 - ema50) / entry_price) * 100.0
                         except Exception:
                             htf_trend = 0.0
-                        if of_state == "buyers in control":
-                            order_imb = 100.0
-                        elif of_state == "sellers in control":
-                            order_imb = -100.0
+                        flow_features = getattr(flow_analysis, "features", {}) or {}
+                        order_imb_feature = flow_features.get("order_book_imbalance")
+                        if order_imb_feature != order_imb_feature or order_imb_feature is None:
+                            order_imb_feature = flow_features.get("trade_imbalance")
+                        if order_imb_feature == order_imb_feature and order_imb_feature is not None:
+                            order_imb = float(order_imb_feature) * 100.0
                         else:
                             order_imb = 0.0
                         macro_ind = (
