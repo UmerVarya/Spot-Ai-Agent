@@ -1088,24 +1088,69 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             and (ema_trend_4h is None or ema_trend_4h != ema_trend_4h or ema_trend_4h > 0)
             and (ema_trend_1d is None or ema_trend_1d != ema_trend_1d or ema_trend_1d > 0)
         )
-        ema_flag = int(ema_short.iloc[-1] > ema_long.iloc[-1] and ema_condition)
-        if ema_flag:
-            score += w["ema"]
-        macd_flag = int(macd_line.iloc[-1] > 0)
-        if macd_flag:
-            score += w["macd"]
-        rsi_val = rsi.iloc[-1]
+        def _linear_score(value: float, lower: float, upper: float) -> float:
+            """Return a linear 0-1 score for ``value`` within ``[lower, upper]``."""
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return 0.0
+            if not np.isfinite(value):
+                return 0.0
+            if upper <= lower:
+                return 0.0
+            if value <= lower:
+                return 0.0
+            if value >= upper:
+                return 1.0
+            return (value - lower) / (upper - lower)
+
+        def _tanh_score(value: float, scale: float) -> float:
+            """Smoothly squash ``value``/``scale`` into ``[0, 1]`` using ``tanh``."""
+            try:
+                value = float(value)
+                scale = float(scale)
+            except (TypeError, ValueError):
+                return 0.0
+            if not np.isfinite(value) or not np.isfinite(scale) or scale <= 0:
+                return 0.0
+            return float(np.clip(np.tanh(value / scale), 0.0, 1.0))
+
+        ema_latest = float(ema_short.iloc[-1]) if not ema_short.empty else float("nan")
+        ema_long_latest = float(ema_long.iloc[-1]) if not ema_long.empty else float("nan")
+        ema_diff = ema_latest - ema_long_latest
+        ema_flag = 0.0
+        if ema_condition and np.isfinite(ema_diff) and ema_diff > 0 and price_now > 0:
+            ema_flag = _linear_score(ema_diff / price_now, 0.0, 0.02)
+            if ema_flag > 0:
+                score += w["ema"] * ema_flag
+
+        macd_latest = float(macd_line.iloc[-1]) if not macd_line.empty else float("nan")
+        macd_flag = 0.0
+        if np.isfinite(macd_latest) and macd_latest > 0:
+            macd_window = macd_line.iloc[-20:].dropna()
+            macd_scale = float(macd_window.abs().mean()) if not macd_window.empty else abs(macd_latest)
+            if not np.isfinite(macd_scale) or macd_scale <= 1e-8:
+                macd_scale = max(abs(macd_latest), 1e-6)
+            macd_flag = _tanh_score(macd_latest, macd_scale * 1.5)
+            if macd_flag > 0:
+                score += w["macd"] * macd_flag
+
+        rsi_val = float(rsi.iloc[-1]) if not rsi.empty else float("nan")
         rsi_condition = (
             rsi_1h is None
             or rsi_1h != rsi_1h
             or rsi_1h > 40
         )
-        rsi_flag = int(rsi_val > 50 and rsi_condition)
-        if rsi_flag:
-            score += w["rsi"]
-        adx_flag = int(adx.iloc[-1] > 20)
-        if adx_flag:
-            score += w["adx"]
+        rsi_flag = 0.0
+        if rsi_condition:
+            rsi_flag = _linear_score(rsi_val, 50.0, 80.0)
+            if rsi_flag > 0:
+                score += w["rsi"] * rsi_flag
+
+        adx_val = float(adx.iloc[-1]) if not adx.empty else float("nan")
+        adx_flag = _linear_score(adx_val, 20.0, 40.0)
+        if adx_flag > 0:
+            score += w["adx"] * adx_flag
         vwma_value = vwma.iloc[-1]
         vwma_dev = abs(price_now - vwma_value) / price_now if price_now != 0 else 0.0
         vwma_flag = 0
@@ -1122,12 +1167,17 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         dema_flag = int(dema_short.iloc[-1] > dema_long.iloc[-1])
         if dema_flag:
             score += w["dema"]
-        stoch_flag = int(stoch_k.iloc[-1] > stoch_d.iloc[-1] and stoch_k.iloc[-1] < 80)
-        if stoch_flag:
-            score += w["stoch"]
-        cci_flag = int(cci.iloc[-1] > 0)
-        if cci_flag:
-            score += w["cci"]
+        stoch_k_val = float(stoch_k.iloc[-1]) if not stoch_k.empty else float("nan")
+        stoch_d_val = float(stoch_d.iloc[-1]) if not stoch_d.empty else float("nan")
+        stoch_flag = 0.0
+        if stoch_k_val == stoch_k_val and stoch_d_val == stoch_d_val and stoch_k_val < 80:
+            stoch_flag = _linear_score(stoch_k_val - stoch_d_val, 0.0, 15.0)
+            if stoch_flag > 0:
+                score += w["stoch"] * stoch_flag
+        cci_val = float(cci.iloc[-1]) if not cci.empty else float("nan")
+        cci_flag = _linear_score(cci_val, 0.0, 100.0)
+        if cci_flag > 0:
+            score += w["cci"] * cci_flag
         atr_flag = 0
         if atr_p == atr_p:
             if atr_p > 0.75:
