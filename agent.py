@@ -497,6 +497,25 @@ def run_agent_loop() -> None:
                     "sellers" if of_state == "sellers in control" else
                     "neutral"
                 )
+                signal_snapshot = price_data.attrs.get("signal_features", {}) or {}
+                flow_features = getattr(flow_analysis, "features", {}) or {}
+                order_imb_feature = signal_snapshot.get("order_book_imbalance")
+                if order_imb_feature is None:
+                    order_imb_feature = flow_features.get("order_book_imbalance")
+                if order_imb_feature != order_imb_feature or order_imb_feature is None:
+                    order_imb_feature = flow_features.get("trade_imbalance")
+                try:
+                    order_imb_ratio = float(order_imb_feature)
+                except (TypeError, ValueError):
+                    order_imb_ratio = 0.0
+                if order_imb_ratio != order_imb_ratio:
+                    order_imb_ratio = 0.0
+                order_imb = float(order_imb_ratio) * 100.0
+                macro_ind = (
+                    100.0
+                    if sentiment_bias == "bullish"
+                    else -100.0 if sentiment_bias == "bearish" else 0.0
+                )
                 # Symbol-specific volatility
                 try:
                     sym_vol_pct = atr_percentile(
@@ -506,6 +525,35 @@ def run_agent_loop() -> None:
                 except Exception:
                     sym_vol_pct = float("nan")
                     sym_vol = 0.0
+                try:
+                    ema20 = indicators_df['ema_20'].iloc[-1]
+                    ema50 = indicators_df['ema_50'].iloc[-1]
+                    last_close_price = float(price_data['close'].iloc[-1])
+                    if last_close_price:
+                        htf_trend_pct = ((ema20 - ema50) / last_close_price) * 100.0
+                    else:
+                        htf_trend_pct = 0.0
+                except Exception:
+                    htf_trend_pct = 0.0
+                micro_feature_payload = {
+                    'volatility': sym_vol,
+                    'htf_trend': htf_trend_pct,
+                    'order_imbalance': order_imb,
+                    'macro_indicator': macro_ind,
+                    'sent_bias': sentiment_bias,
+                    'order_flow_score': signal_snapshot.get('order_flow_score'),
+                    'order_flow_flag': signal_snapshot.get('order_flow_flag'),
+                    'cvd': signal_snapshot.get('cvd'),
+                    'cvd_change': signal_snapshot.get('cvd_change'),
+                    'taker_buy_ratio': signal_snapshot.get('taker_buy_ratio'),
+                    'trade_imbalance': signal_snapshot.get('trade_imbalance'),
+                    'aggressive_trade_rate': signal_snapshot.get('aggressive_trade_rate'),
+                    'spoofing_intensity': signal_snapshot.get('spoofing_intensity'),
+                    'spoofing_alert': signal_snapshot.get('spoofing_alert'),
+                    'volume_ratio': signal_snapshot.get('volume_ratio'),
+                    'price_change_pct': signal_snapshot.get('price_change_pct'),
+                    'spread_bps': signal_snapshot.get('spread_bps'),
+                }
                 # Ask the brain whether to take the trade
                 # Call the brain with error handling.  If the brain throws an
                 # exception, record it as the reason for skipping so users
@@ -561,6 +609,7 @@ def run_agent_loop() -> None:
                     pattern=pattern_name,
                     llm_approval=bool(llm_approval) if llm_approval is not None else True,
                     llm_confidence=decision_obj.get("llm_confidence", 5.0),
+                    micro_features=micro_feature_payload,
                 )
                 if ml_prob < 0.5:
                     logger.info(
@@ -595,28 +644,7 @@ def run_agent_loop() -> None:
                         tp1 = round(entry_price + atr_val * 1.0, 6)
                         tp2 = round(entry_price + atr_val * 2.0, 6)
                         tp3 = round(entry_price + atr_val * 3.0, 6)
-                        try:
-                            ema20 = indicators_df['ema_20'].iloc[-1]
-                            ema50 = indicators_df['ema_50'].iloc[-1]
-                            htf_trend = ((ema20 - ema50) / entry_price) * 100.0
-                        except Exception:
-                            htf_trend = 0.0
-                        signal_snapshot = price_data.attrs.get("signal_features", {}) or {}
-                        flow_features = getattr(flow_analysis, "features", {}) or {}
-                        order_imb_feature = signal_snapshot.get("order_book_imbalance")
-                        if order_imb_feature is None:
-                            order_imb_feature = flow_features.get("order_book_imbalance")
-                        if order_imb_feature != order_imb_feature or order_imb_feature is None:
-                            order_imb_feature = flow_features.get("trade_imbalance")
-                        if order_imb_feature == order_imb_feature and order_imb_feature is not None:
-                            order_imb = float(order_imb_feature) * 100.0
-                        else:
-                            order_imb = 0.0
-                        macro_ind = (
-                            100.0
-                            if sentiment_bias == "bullish"
-                            else -100.0 if sentiment_bias == "bearish" else 0.0
-                        )
+                        htf_trend = htf_trend_pct
                         risk_amount = position_size * sl_dist
                         # Determine the high-level strategy label.  The
                         # historical trade log expects ``strategy`` to describe
