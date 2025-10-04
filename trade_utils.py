@@ -945,9 +945,17 @@ def get_rl_state(vol_percentile: float | None, log_file: str = TRADE_HISTORY_FIL
         vol_bucket = "mid_vol"
     return f"{outcome}_{vol_bucket}"
 
-def log_signal(symbol: str, session: str, score: float, direction: Optional[str], weights: dict,
-               candle_patterns: list, chart_pattern: Optional[str],
-               indicators: Optional[dict] = None) -> None:
+def log_signal(
+    symbol: str,
+    session: str,
+    score: float,
+    direction: Optional[str],
+    weights: dict,
+    candle_patterns: list,
+    chart_pattern: Optional[str],
+    indicators: Optional[dict] = None,
+    feature_values: Optional[dict] = None,
+) -> None:
     """Append a signal entry to the trades log."""
     log_entry = {
         "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
@@ -970,6 +978,9 @@ def log_signal(symbol: str, session: str, score: float, direction: Optional[str]
     if indicators:
         for name, val in indicators.items():
             log_entry[f"{name}_trigger"] = val
+    if feature_values:
+        for name, val in feature_values.items():
+            log_entry[name] = val
     df_entry = pd.DataFrame([log_entry])
     log_path = SIGNAL_LOG_FILE
     # ensure directory exists
@@ -1435,6 +1446,8 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             )
             return 0, None, 0, None
         flow_score = 0.0
+        volume_ratio = None
+        price_change_pct = None
         for key, weight in (
             ("trade_imbalance", 0.45),
             ("order_book_imbalance", 0.35),
@@ -1452,8 +1465,15 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             last_vol = float(recent.iloc[-1]) if not recent.empty else float("nan")
             if avg_vol == avg_vol and last_vol == last_vol and avg_vol > 0:
                 vol_ratio = (last_vol / avg_vol) - 1.0
-                flow_score += 0.2 * max(-1.0, min(1.0, vol_ratio))
-        price_change = float(price_data["close"].iloc[-1] - price_data["open"].iloc[-5]) if len(price_data) >= 5 else 0.0
+                volume_ratio = max(-1.0, min(1.0, vol_ratio))
+                flow_score += 0.2 * volume_ratio
+        price_change = 0.0
+        if len(price_data) >= 5:
+            open_ref = float(price_data["open"].iloc[-5])
+            close_latest = float(price_data["close"].iloc[-1])
+            price_change = close_latest - open_ref
+            if open_ref:
+                price_change_pct = price_change / open_ref
         if price_change > 0:
             flow_score += 0.1
         elif price_change < 0:
@@ -1542,6 +1562,46 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
                 json.dump(scores, f, indent=2)
         except Exception as e:
             logger.warning("[SYMBOL SCORES] Failed to update symbol_scores.json: %s", e, exc_info=True)
+        spread_bps = None
+        if spread == spread and price_now > 0:
+            spread_bps = (spread / price_now) * 10_000
+
+        def _safe_float(value: Any) -> Optional[float]:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not np.isfinite(number):
+                return None
+            return number
+
+        spoof_val = flow_features.get("spoofing_intensity")
+        spoof_alert = 0
+        if spoof_val == spoof_val and spoof_val is not None:
+            spoof_alert = int(abs(float(spoof_val)) >= 0.5)
+        flow_snapshot: dict[str, Any] = {
+            "order_flow_score": _safe_float(flow_score),
+            "order_flow_flag": float(flow_flag),
+            "order_flow_state": getattr(aggression, "state", "neutral") or "neutral",
+            "order_book_imbalance": _safe_float(imbalance_to_check),
+            "trade_imbalance": _safe_float(flow_features.get("trade_imbalance")),
+            "cvd": _safe_float(flow_features.get("cvd")),
+            "cvd_change": _safe_float(flow_features.get("cvd_change")),
+            "taker_buy_ratio": _safe_float(flow_features.get("taker_buy_ratio")),
+            "aggressive_trade_rate": _safe_float(flow_features.get("aggressive_trade_rate")),
+            "spoofing_intensity": _safe_float(spoof_val),
+            "spoofing_alert": spoof_alert,
+            "volume_ratio": _safe_float(volume_ratio),
+            "price_change_pct": _safe_float(price_change_pct),
+            "spread_bps": _safe_float(spread_bps),
+        }
+        signal_snapshot = {
+            "setup_type": setup_type or "none",
+            "trend_norm": _safe_float(trend_norm),
+            "mean_reversion_norm": _safe_float(mean_rev_norm),
+            **flow_snapshot,
+        }
+        price_data.attrs["signal_features"] = signal_snapshot
         indicator_flags = {
             "ema": ema_flag,
             "macd": macd_flag,
@@ -1555,7 +1615,11 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             "atr": atr_flag,
             "hurst": hurst_flag,
             "confluence": confluence_flag,
-            "flow": flow_flag,
+            "flow": flow_score,
+            "flow_flag": flow_flag,
+            "order_book_imbalance": flow_snapshot["order_book_imbalance"],
+            "cvd_change": flow_snapshot["cvd_change"],
+            "spoofing_intensity": flow_snapshot["spoofing_intensity"],
             "candle": candle_flag,
             "chart": chart_flag,
             "flag": flag_flag,
@@ -1567,7 +1631,17 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             "mean_reversion_norm": mean_rev_norm,
             "setup_type": setup_type or "none",
         }
-        log_signal(symbol, session_name, normalized_score, direction, w, triggered_patterns, chart_pattern, indicator_flags)
+        log_signal(
+            symbol,
+            session_name,
+            normalized_score,
+            direction,
+            w,
+            triggered_patterns,
+            chart_pattern,
+            indicator_flags,
+            signal_snapshot,
+        )
         return normalized_score, direction, position_size, pattern_name
     except Exception as e:
         logger.error("Signal evaluation error in %s: %s", symbol, e, exc_info=True)

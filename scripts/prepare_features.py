@@ -30,13 +30,19 @@ CANDIDATES_NUM = [
     "btc_dominance", "fear_greed",
     "sentiment_bias", "sentiment_confidence",
     "volatility", "htf_trend",
-    "order_imbalance", "macro_indicator",
+    "order_imbalance", "order_flow_score", "order_flow_flag",
+    "cvd", "cvd_change", "taker_buy_ratio",
+    "trade_imbalance", "aggressive_trade_rate",
+    "spoofing_intensity", "spoofing_alert",
+    "volume_ratio", "price_change_pct", "spread_bps",
+    "macro_indicator",
     "fees", "slippage",
     "size", "notional"   # keep if you want position-size info
 ]
 
 CANDIDATES_CAT = [
-    "symbol", "direction", "session", "strategy", "pattern", "llm_decision", "llm_approval"
+    "symbol", "direction", "session", "strategy", "pattern", "llm_decision", "llm_approval",
+    "order_flow_state"
 ]
 
 def load_split(name: str) -> pd.DataFrame:

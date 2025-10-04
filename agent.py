@@ -601,8 +601,11 @@ def run_agent_loop() -> None:
                             htf_trend = ((ema20 - ema50) / entry_price) * 100.0
                         except Exception:
                             htf_trend = 0.0
+                        signal_snapshot = price_data.attrs.get("signal_features", {}) or {}
                         flow_features = getattr(flow_analysis, "features", {}) or {}
-                        order_imb_feature = flow_features.get("order_book_imbalance")
+                        order_imb_feature = signal_snapshot.get("order_book_imbalance")
+                        if order_imb_feature is None:
+                            order_imb_feature = flow_features.get("order_book_imbalance")
                         if order_imb_feature != order_imb_feature or order_imb_feature is None:
                             order_imb_feature = flow_features.get("trade_imbalance")
                         if order_imb_feature == order_imb_feature and order_imb_feature is not None:
@@ -662,6 +665,19 @@ def run_agent_loop() -> None:
                             "volatility": sym_vol,
                             "htf_trend": htf_trend,
                             "order_imbalance": order_imb,
+                            "order_flow_score": signal_snapshot.get("order_flow_score"),
+                            "order_flow_flag": signal_snapshot.get("order_flow_flag"),
+                            "order_flow_state": signal_snapshot.get("order_flow_state"),
+                            "cvd": signal_snapshot.get("cvd"),
+                            "cvd_change": signal_snapshot.get("cvd_change"),
+                            "taker_buy_ratio": signal_snapshot.get("taker_buy_ratio"),
+                            "trade_imbalance": signal_snapshot.get("trade_imbalance"),
+                            "aggressive_trade_rate": signal_snapshot.get("aggressive_trade_rate"),
+                            "spoofing_intensity": signal_snapshot.get("spoofing_intensity"),
+                            "spoofing_alert": signal_snapshot.get("spoofing_alert"),
+                            "volume_ratio": signal_snapshot.get("volume_ratio"),
+                            "price_change_pct": signal_snapshot.get("price_change_pct"),
+                            "spread_bps": signal_snapshot.get("spread_bps"),
                             "macro_indicator": macro_ind,
                             "pattern": pattern_name,
                             "strategy": strategy_label,

@@ -111,14 +111,20 @@ class Backtester:
                 window = df.loc[:t].tail(100)  # use last 100 bars for context
                 if len(window) < 50:
                     continue
-                score, pattern, conf, extra = self.evaluate_signal(window, symbol)
-                if conf < conf_thresh:
+                evaluation = self.evaluate_signal(window, symbol)
+                if not isinstance(evaluation, tuple) or not evaluation:
                     continue
-                prob = self.predict_prob(score, conf, 'unknown', 0.0, 50.0, 5.0, str(pattern))
+                score = evaluation[0]
+                direction = evaluation[1] if len(evaluation) > 1 else None
+                position_hint = evaluation[2] if len(evaluation) > 2 else 0
+                pattern = evaluation[3] if len(evaluation) > 3 else None
+                if score < conf_thresh:
+                    continue
+                prob = self.predict_prob(score, score, 'unknown', 0.0, 50.0, 5.0, str(pattern))
                 if prob < prob_thresh:
                     continue
                 # Determine position size multiplier
-                position_mult = self.position_size_func(conf)
+                position_mult = self.position_size_func(score)
                 if position_mult <= 0:
                     continue
                 # Compute entry/exit using simple ATR stops
@@ -148,14 +154,22 @@ class Backtester:
                 equity *= (1 + trade_return)
                 equity_curve.append(equity)
                 trade_returns.append(trade_return)
-                trade_log.append({
+                feature_snapshot = window.attrs.get("signal_features")
+                trade_record = {
                     'timestamp': t,
                     'symbol': symbol,
                     'score': score,
-                    'confidence': conf,
+                    'confidence': score,
                     'prob': prob,
+                    'direction': direction,
+                    'position_hint': position_hint,
                     'return': trade_return,
-                })
+                }
+                if isinstance(feature_snapshot, dict) and feature_snapshot:
+                    trade_record['signal_features'] = feature_snapshot.copy()
+                if pattern is not None:
+                    trade_record['pattern'] = pattern
+                trade_log.append(trade_record)
         # Compute performance metrics
         performance = {
             'final_equity': equity,
