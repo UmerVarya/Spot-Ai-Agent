@@ -40,7 +40,7 @@ from __future__ import annotations
 import os
 import json
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Any, Optional, Mapping
+from typing import List, Tuple, Dict, Any, Optional, Mapping, Callable
 
 import numpy as np
 import pandas as pd
@@ -171,6 +171,64 @@ _FEATURE_FALLBACKS: Dict[str, float] = {
 }
 
 
+_FEATURE_NORMALIZATION: Dict[str, Callable[[float], float]] = {
+    'btc_dom': lambda v: v / 100.0,
+    'fear_greed': lambda v: v / 100.0,
+    'sent_conf': lambda v: v / 10.0,
+    'pattern_len': lambda v: v / 10.0,
+    'volatility': lambda v: v / 100.0,
+    'htf_trend': lambda v: v / 100.0,
+    'order_imbalance': lambda v: v / 100.0,
+    'macro_indicator': lambda v: v / 100.0,
+    'macd': lambda v: v / 100.0,
+    'rsi': lambda v: v / 100.0,
+    'sma': lambda v: v / 100.0,
+    'atr': lambda v: v / 100.0,
+    'volume': lambda v: v / 1_000_000.0,
+    'llm_confidence': lambda v: v / 10.0,
+    'time_since_last': lambda v: v / 24.0,
+    'spread_bps': lambda v: v / 100.0,
+}
+
+
+def _normalise_feature(name: str, value: Any) -> float:
+    """Convert raw feature values into the scale used during training."""
+
+    if value is None:
+        return 0.0
+    if name == 'sent_bias':
+        token = str(value).strip().lower()
+        if token == 'bullish':
+            return 1.0
+        if token == 'bearish':
+            return -1.0
+        try:
+            value = float(token)
+        except Exception:
+            return 0.0
+    elif isinstance(value, bool):
+        value = 1.0 if value else 0.0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not np.isfinite(number):
+        return 0.0
+    normaliser = _FEATURE_NORMALIZATION.get(name)
+    if normaliser is not None:
+        try:
+            return float(normaliser(number))
+        except Exception:
+            return 0.0
+    return float(number)
+
+
+def _normalise_feature_dict(data: Optional[Mapping[str, Any]]) -> Dict[str, float]:
+    if not data:
+        return {}
+    return {key: _normalise_feature(key, value) for key, value in data.items()}
+
+
 def load_model_report() -> Dict[str, Any]:
     """Return the persisted model metadata if training artefacts exist."""
 
@@ -182,8 +240,18 @@ def load_model_report() -> Dict[str, Any]:
 
 def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
     """Extract feature matrix X and label vector y from the learning log."""
+
     session_map = {"Asia": 0, "Europe": 1, "US": 2, "New York": 2, "unknown": 3}
     success_outcomes = {"tp1", "tp2", "tp3", "tp4", "tp4_sl", "win"}
+    feature_order = [
+        'score', 'confidence', 'session_id', 'btc_dom', 'fear_greed', 'sent_conf',
+        'sent_bias', 'pattern_len', 'volatility', 'htf_trend', 'order_imbalance',
+        'macro_indicator', 'macd', 'rsi', 'sma', 'atr', 'volume', 'macd_rsi',
+        'order_flow_score', 'order_flow_flag', 'cvd', 'cvd_change', 'taker_buy_ratio',
+        'trade_imbalance', 'aggressive_trade_rate', 'spoofing_intensity',
+        'spoofing_alert', 'volume_ratio', 'price_change_pct', 'spread_bps',
+        'llm_decision', 'llm_confidence', 'time_since_last', 'recent_win_rate',
+    ]
     feature_list: List[List[float]] = []
     labels: List[int] = []
     if "entry_time" in df.columns:
@@ -195,42 +263,7 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
     window = 5
     for _, row in df.iterrows():
         try:
-            score = float(row.get("score", 0))
-            conf = float(row.get("confidence", 0))
             session = row.get("session", "unknown")
-            btc_dom = float(row.get("btc_dominance", 0))
-            fg = float(row.get("fear_greed", 0))
-            sent_conf = row.get("sentiment_confidence", row.get("confidence", 5))
-            try:
-                sent_conf_val = float(sent_conf)
-            except Exception:
-                sent_conf_val = 5.0
-            sent_bias = row.get("sentiment_bias", "neutral")
-            sent_bias_val = {
-                "bullish": 1.0,
-                "bearish": -1.0,
-            }.get(str(sent_bias).lower(), 0.0)
-            pattern = row.get("pattern", "none")
-            pattern_len = len(str(pattern))
-            session_id = session_map.get(str(session), 3)
-            volatility = float(row.get("volatility", 0.0)) / 100.0
-            htf_trend = float(row.get("htf_trend", 0.0)) / 100.0
-            order_imbalance = float(row.get("order_imbalance", 0.0)) / 100.0
-            macro_indicator = float(row.get("macro_indicator", 0.0)) / 100.0
-            macd_val = float(row.get("macd", 0.0)) / 100.0
-            rsi_val = float(row.get("rsi", 50.0)) / 100.0
-            sma_val = float(row.get("sma", 0.0)) / 100.0
-            atr_val = float(row.get("atr", 0.0)) / 100.0
-            vol_val = float(row.get("volume", 0.0)) / 1_000_000.0
-            macd_rsi = macd_val * rsi_val  # interaction feature to filter noise
-            approval_raw = row.get("llm_approval", row.get("llm_decision"))
-            llm_decision_bool = _coerce_bool(approval_raw)
-            llm_decision = 1.0 if llm_decision_bool is not False else 0.0
-            llm_conf_raw = row.get("llm_confidence", 5.0)
-            try:
-                llm_conf_val = float(llm_conf_raw) / 10.0
-            except Exception:
-                llm_conf_val = 0.5
             entry_dt = pd.to_datetime(row.get("entry_time", row.get("timestamp")), errors="coerce")
             exit_dt = pd.to_datetime(row.get("exit_time", row.get("timestamp")), errors="coerce")
             if last_exit is not None and entry_dt is not None:
@@ -242,30 +275,48 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
                 recent_win_rate = win_count / len(recent_outcomes)
             else:
                 recent_win_rate = 0.5
-            features = [
-                score,
-                conf,
-                session_id,
-                btc_dom / 100.0,
-                fg / 100.0,
-                sent_conf_val / 10.0,
-                sent_bias_val,
-                pattern_len / 10.0,
-                volatility,
-                htf_trend,
-                order_imbalance,
-                macro_indicator,
-                macd_val,
-                rsi_val,
-                sma_val,
-                atr_val,
-                vol_val,
-                macd_rsi,
-                llm_decision,
-                llm_conf_val,
-                time_since_last / 24.0,
-                recent_win_rate,
-            ]
+            base_features = {
+                'score': row.get('score', 0.0),
+                'confidence': row.get('confidence', 0.0),
+                'session_id': session_map.get(str(session), 3),
+                'btc_dom': row.get('btc_dominance', 0.0),
+                'fear_greed': row.get('fear_greed', 0.0),
+                'sent_conf': row.get('sentiment_confidence', row.get('confidence', 5.0)),
+                'sent_bias': row.get('sentiment_bias', 'neutral'),
+                'pattern_len': len(str(row.get('pattern', 'none'))),
+                'volatility': row.get('volatility', 0.0),
+                'htf_trend': row.get('htf_trend', 0.0),
+                'order_imbalance': row.get('order_imbalance', 0.0),
+                'macro_indicator': row.get('macro_indicator', 0.0),
+                'macd': row.get('macd', 0.0),
+                'rsi': row.get('rsi', 50.0),
+                'sma': row.get('sma', 0.0),
+                'atr': row.get('atr', 0.0),
+                'volume': row.get('volume', 0.0),
+                'order_flow_score': row.get('order_flow_score', 0.0),
+                'order_flow_flag': row.get('order_flow_flag', 0.0),
+                'cvd': row.get('cvd', 0.0),
+                'cvd_change': row.get('cvd_change', 0.0),
+                'taker_buy_ratio': row.get('taker_buy_ratio', 0.0),
+                'trade_imbalance': row.get('trade_imbalance', 0.0),
+                'aggressive_trade_rate': row.get('aggressive_trade_rate', 0.0),
+                'spoofing_intensity': row.get('spoofing_intensity', 0.0),
+                'spoofing_alert': row.get('spoofing_alert', 0.0),
+                'volume_ratio': row.get('volume_ratio', 0.0),
+                'price_change_pct': row.get('price_change_pct', 0.0),
+                'spread_bps': row.get('spread_bps', 0.0),
+                'llm_confidence': row.get('llm_confidence', 5.0),
+                'time_since_last': time_since_last,
+                'recent_win_rate': recent_win_rate,
+            }
+            macd_norm = _normalise_feature('macd', base_features['macd'])
+            rsi_norm = _normalise_feature('rsi', base_features['rsi'])
+            base_features['macd_rsi'] = macd_norm * rsi_norm
+            approval_raw = row.get("llm_approval", row.get("llm_decision"))
+            llm_decision_bool = _coerce_bool(approval_raw)
+            base_features['llm_decision'] = 1.0 if llm_decision_bool is not False else 0.0
+            normalised = _normalise_feature_dict(base_features)
+            features = [normalised.get(name, 0.0) for name in feature_order]
             feature_list.append(features)
             outcome = str(row.get("outcome", "loss")).lower()
             labels.append(1 if outcome in success_outcomes else 0)
@@ -583,6 +634,10 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> Optional[T
             'fear_greed', 'sent_conf', 'sent_bias', 'pattern_len',
             'volatility', 'htf_trend', 'order_imbalance', 'macro_indicator',
             'macd', 'rsi', 'sma', 'atr', 'volume', 'macd_rsi',
+            'order_flow_score', 'order_flow_flag', 'cvd', 'cvd_change',
+            'taker_buy_ratio', 'trade_imbalance', 'aggressive_trade_rate',
+            'spoofing_intensity', 'spoofing_alert', 'volume_ratio',
+            'price_change_pct', 'spread_bps',
             'llm_decision', 'llm_confidence', 'time_since_last', 'recent_win_rate'
         ]
         feature_info = _compute_feature_attribution(persisted_model, feature_names, X_full_norm, y)
@@ -652,6 +707,10 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> Optional[T
                 'fear_greed', 'sent_conf', 'sent_bias', 'pattern_len',
                 'volatility', 'htf_trend', 'order_imbalance', 'macro_indicator',
                 'macd', 'rsi', 'sma', 'atr', 'volume', 'macd_rsi',
+                'order_flow_score', 'order_flow_flag', 'cvd', 'cvd_change',
+                'taker_buy_ratio', 'trade_imbalance', 'aggressive_trade_rate',
+                'spoofing_intensity', 'spoofing_alert', 'volume_ratio',
+                'price_change_pct', 'spread_bps',
                 'llm_decision', 'llm_confidence', 'time_since_last', 'recent_win_rate'
             ],
         }
@@ -724,23 +783,23 @@ def _prepare_feature_vector(
     llm_confidence: float,
     time_since_last: float,
     recent_win_rate: float,
-) -> List[float]:
+) -> Dict[str, float]:
     session_map = {"Asia": 0, "Europe": 1, "US": 2, "New York": 2, "unknown": 3}
     session_id = session_map.get(session, 3)
-    pattern_len = len(str(pattern))
-    return {
-        'score': float(score),
-        'confidence': float(confidence),
-        'session_id': float(session_id),
-        'btc_dom': float(btc_d) / 100.0,
-        'fear_greed': float(fg) / 100.0,
-        'sent_conf': float(sentiment_conf) / 10.0,
-        'pattern_len': float(pattern_len) / 10.0,
+    base = {
+        'score': score,
+        'confidence': confidence,
+        'session_id': session_id,
+        'btc_dom': btc_d,
+        'fear_greed': fg,
+        'sent_conf': sentiment_conf,
+        'pattern_len': len(str(pattern)),
         'llm_decision': 1.0 if llm_approval else 0.0,
-        'llm_confidence': float(llm_confidence) / 10.0,
-        'time_since_last': float(time_since_last) / 24.0,
-        'recent_win_rate': float(recent_win_rate),
+        'llm_confidence': llm_confidence,
+        'time_since_last': time_since_last,
+        'recent_win_rate': recent_win_rate,
     }
+    return _normalise_feature_dict(base)
 
 
 def _assemble_feature_vector(
@@ -768,6 +827,7 @@ def predict_success_probability(
     llm_approval: bool = True,
     llm_confidence: float = 5.0,
     feature_overrides: Optional[Mapping[str, float]] = None,
+    micro_features: Optional[Mapping[str, Any]] = None,
 ) -> float:
     """
     Predict the probability of a trade succeeding based on current features.
@@ -824,8 +884,15 @@ def predict_success_probability(
         time_since_last,
         recent_win_rate,
     )
+    overrides: Dict[str, float] = {}
+    if feature_overrides:
+        overrides.update({k: float(v) for k, v in feature_overrides.items()})
+    overrides.update(_normalise_feature_dict(micro_features))
     feature_names = metadata.get('feature_names') or list(_FEATURE_FALLBACKS.keys())
-    x = _assemble_feature_vector(feature_names, base_features, feature_overrides)
+    missing_features = [name for name in _FEATURE_FALLBACKS.keys() if name not in feature_names]
+    if missing_features:
+        feature_names = feature_names + missing_features
+    x = _assemble_feature_vector(feature_names, base_features, overrides)
     model_type = metadata.get('model_type', 'manual')
     try:
         # Use sklearn model if available
