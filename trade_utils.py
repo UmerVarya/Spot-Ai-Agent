@@ -34,6 +34,12 @@ SIGNAL_LOG_FILE = os.getenv("SIGNAL_LOG_FILE",
 
 logger = setup_logger(__name__)
 
+# Optional runtime dependency: live market data stream via WebSockets.
+try:  # pragma: no cover - import guarded for offline environments
+    from market_stream import get_market_stream  # type: ignore
+except Exception:  # pragma: no cover - fallback when streaming unavailable
+    get_market_stream = None  # type: ignore
+
 # Maximum allowed lag for higher‑timeframe (e.g. 1H) updates.
 # The latest completed 1H candle should print shortly after the top of the hour.
 # We allow a few extra minutes of slack on top of the expected one hour cadence
@@ -281,7 +287,13 @@ except Exception:
         def __str__(self) -> str:
             return self.state
 
-    def detect_aggression(df, order_book=None, symbol=None, depth: int = 5):  # type: ignore
+    def detect_aggression(  # type: ignore
+        df,
+        order_book=None,
+        symbol=None,
+        depth: int = 5,
+        live_trades=None,
+    ):
         return OrderFlowAnalysis()
 
 # Microstructure metrics fallback
@@ -514,8 +526,9 @@ async def get_price_data_async(symbol: str) -> Optional[pd.DataFrame]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, get_price_data, symbol)
 
-def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
-    """Fetch order book depth from Binance."""
+def _get_order_book_rest(symbol: str, limit: int = 50) -> Optional[dict]:
+    """Fallback REST request for the order book when streaming is unavailable."""
+
     client = _get_binance_client()
     if client is None:
         return None
@@ -528,6 +541,22 @@ def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
         }
     except Exception:
         return None
+
+
+def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
+    """Return a recent order book snapshot, preferring the WebSocket stream."""
+
+    if get_market_stream is not None:
+        try:
+            stream = get_market_stream()
+            snapshot = stream.get_order_book(symbol, depth=limit)
+            if snapshot:
+                bids = snapshot.get("bids", [])
+                asks = snapshot.get("asks", [])
+                return {"bids": bids[:limit], "asks": asks[:limit]}
+        except Exception as exc:
+            logger.debug("Live order book unavailable for %s: %s", symbol, exc, exc_info=True)
+    return _get_order_book_rest(symbol, limit=limit)
 
 
 def update_stop_loss_order(
@@ -1155,6 +1184,15 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         rsi_1h = higher_tf_1h.get('rsi')
         ema_trend_4h = indicator_alignment.get('4H', {}).get('ema_trend')
         ema_trend_1d = indicator_alignment.get('1D', {}).get('ema_trend')
+        live_trades = None
+        if get_market_stream is not None:
+            try:
+                live_trades = get_market_stream().get_trade_snapshot(symbol, window_seconds=90)
+                if live_trades:
+                    price_data.attrs["live_trades"] = live_trades
+            except Exception as exc:
+                logger.debug("Live trade stream unavailable for %s: %s", symbol, exc, exc_info=True)
+
         order_book = get_order_book(symbol)
         if order_book:
             spread = compute_spread(order_book)
@@ -1379,7 +1417,12 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             logger.warning("Skipping %s: spread %.6f is >0.1%% of price.", symbol, spread)
             return 0, None, 0, None
         imbalance_to_check = imbalance
-        aggression = detect_aggression(price_data, order_book=order_book, symbol=symbol)
+        aggression = detect_aggression(
+            price_data,
+            order_book=order_book,
+            symbol=symbol,
+            live_trades=live_trades,
+        )
         flow_features = getattr(aggression, "features", {}) or {}
         feature_imbalance = flow_features.get("order_book_imbalance")
         if feature_imbalance == feature_imbalance:

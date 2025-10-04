@@ -125,6 +125,7 @@ def compute_orderflow_features(
     order_book: Optional[OrderBook] = None,
     symbol: Optional[str] = None,
     depth: int = 5,
+    live_trades: Optional[Dict[str, float]] = None,
 ) -> Dict[str, float]:
     """Compute continuous microstructure features from candles and depth."""
 
@@ -149,6 +150,25 @@ def compute_orderflow_features(
         spoof = _estimate_spoofing_intensity(order_book, symbol=symbol, depth=depth)
         if math.isfinite(spoof):
             features["spoofing_intensity"] = spoof
+
+    if live_trades:
+        total_base = float(live_trades.get("total_base_volume", 0.0))
+        net_base = float(live_trades.get("net_base_volume", 0.0))
+        buy_base = float(live_trades.get("buy_base_volume", 0.0))
+        cumulative_total = float(live_trades.get("cumulative_total_base_volume", 0.0))
+        cumulative_net = float(live_trades.get("cumulative_net_base_volume", 0.0))
+        trade_rate = float(live_trades.get("trade_rate_per_sec", float("nan")))
+        if cumulative_total > 0:
+            features["cvd"] = _clip_unit(_safe_div(cumulative_net, cumulative_total))
+        elif total_base > 0:
+            features["cvd"] = _clip_unit(_safe_div(net_base, total_base))
+        if total_base > 0:
+            features["cvd_change"] = _clip_unit(_safe_div(net_base, total_base))
+            features["taker_buy_ratio"] = _clip_unit(2.0 * _safe_div(buy_base, total_base) - 1.0)
+            features["trade_imbalance"] = _clip_unit(_safe_div(net_base, total_base))
+        if math.isfinite(trade_rate):
+            # Normalise trade-rate to roughly [-1, 1] using tanh scaling.
+            features["aggressive_trade_rate"] = _clip_unit(math.tanh(trade_rate / 1.5))
 
     cols = set(df.columns)
     has_taker = {"volume", "taker_buy_base", "taker_buy_quote"}.issubset(cols)
@@ -188,13 +208,20 @@ def detect_aggression(
     order_book: Optional[OrderBook] = None,
     symbol: Optional[str] = None,
     depth: int = 5,
+    live_trades: Optional[Dict[str, float]] = None,
 ) -> OrderFlowAnalysis:
     """Classify order-flow pressure and expose supporting microstructure features."""
 
     if df is None or df.empty or len(df) < 5:
         return OrderFlowAnalysis()
 
-    features = compute_orderflow_features(df, order_book=order_book, symbol=symbol, depth=depth)
+    features = compute_orderflow_features(
+        df,
+        order_book=order_book,
+        symbol=symbol,
+        depth=depth,
+        live_trades=live_trades,
+    )
 
     recent = df.tail(5)
     avg_volume = float(recent["volume"].mean()) if "volume" in recent else float("nan")

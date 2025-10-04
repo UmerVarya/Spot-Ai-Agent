@@ -418,7 +418,11 @@ def run_agent_loop() -> None:
                             score,
                         )
                         continue
-                    flow_analysis = detect_aggression(price_data, symbol=symbol)
+                    flow_analysis = detect_aggression(
+                        price_data,
+                        symbol=symbol,
+                        live_trades=price_data.attrs.get("live_trades"),
+                    )
                     flow_status = getattr(flow_analysis, "state", "neutral")
                     if flow_status == "sellers in control":
                         logger.warning(
@@ -482,7 +486,11 @@ def run_agent_loop() -> None:
                 # Precompute order flow once for reuse
                 flow_analysis = trade_candidate.get("orderflow")
                 if flow_analysis is None:
-                    flow_analysis = detect_aggression(price_data, symbol=symbol)
+                    flow_analysis = detect_aggression(
+                        price_data,
+                        symbol=symbol,
+                        live_trades=price_data.attrs.get("live_trades"),
+                    )
                 of_state = getattr(flow_analysis, "state", "neutral")
                 orderflow = (
                     "buyers" if of_state == "buyers in control" else
