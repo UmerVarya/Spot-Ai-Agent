@@ -12,6 +12,7 @@ from log_utils import setup_logger
 from weight_optimizer import optimize_indicator_weights
 
 from trade_storage import TRADE_HISTORY_FILE, load_trade_history_df  # shared trade log path
+from market_data_stream import market_data_stream
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
 from multi_timeframe import (
@@ -474,8 +475,30 @@ async def get_price_data_async(symbol: str) -> Optional[pd.DataFrame]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, get_price_data, symbol)
 
-def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
-    """Fetch order book depth from Binance."""
+def get_order_book(symbol: str, limit: int = 50, prefer_stream: bool = True) -> Optional[dict]:
+    """Fetch order book depth from Binance.
+
+    Parameters
+    ----------
+    symbol : str
+        Trading pair using the agent's notation.
+    limit : int, optional
+        Maximum number of levels to return per side of the book.
+    prefer_stream : bool, optional
+        When ``True`` (default) the function will first attempt to read
+        the live cache maintained by :mod:`market_data_stream`.  If
+        streaming data is unavailable it gracefully falls back to a REST
+        snapshot.
+    """
+
+    if prefer_stream:
+        try:
+            stream_book = market_data_stream.get_order_book(symbol, depth=limit)
+        except Exception:
+            stream_book = None
+        if stream_book:
+            return stream_book
+
     client = _get_binance_client()
     if client is None:
         return None
@@ -1122,6 +1145,21 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         else:
             spread = float('nan')
             imbalance = float('nan')
+
+        trade_flow_metrics = None
+        cvd_ratio = None
+        trades_per_second = None
+        try:
+            trade_flow_metrics = market_data_stream.get_trade_flow(symbol, window_seconds=120)
+        except Exception:
+            trade_flow_metrics = None
+        if trade_flow_metrics:
+            buy_q = trade_flow_metrics.get('buy_quote_volume', 0.0)
+            sell_q = trade_flow_metrics.get('sell_quote_volume', 0.0)
+            trades_per_second = trade_flow_metrics.get('trades_per_second')
+            total_quote_flow = buy_q + sell_q
+            if total_quote_flow > 0:
+                cvd_ratio = trade_flow_metrics.get('net_quote_volume', 0.0) / total_quote_flow
         avg_quote_vol_20 = price_data['quote_volume'].iloc[-20:].mean() if 'quote_volume' in price_data else None
         latest_quote_vol = price_data['quote_volume'].iloc[-1] if 'quote_volume' in price_data else None
         price_now = close.iloc[-1]
@@ -1349,6 +1387,19 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         elif aggression == "sellers in control":
             flow_flag = -1
             penalty_score += w["flow"]
+
+        cvd_bias = 0.0
+        if cvd_ratio is not None:
+            bias_threshold = 0.05
+            scale = 0.15
+            if cvd_ratio > bias_threshold:
+                cvd_bias = min((cvd_ratio - bias_threshold) / scale, 1.0)
+                trend_score += w["flow"] * 0.6 * cvd_bias
+                flow_flag = max(flow_flag, 1)
+            elif cvd_ratio < -bias_threshold:
+                cvd_bias = -min((abs(cvd_ratio) - bias_threshold) / scale, 1.0)
+                penalty_score += w["flow"] * 0.6 * abs(cvd_bias)
+                flow_flag = min(flow_flag, -1)
         trend_weight_keys = ["ema", "macd", "rsi", "adx", "vwma", "dema", "flow", "confluence", "atr", "hurst"]
         mean_rev_weight_keys = ["bb", "stoch", "cci"]
         structure_weight_keys = ["candle", "chart", "flag", "double_bottom", "cup_handle"]
@@ -1420,6 +1471,10 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
                 "setup": setup_type or "none",
                 "trend_score": trend_norm,
                 "mean_reversion_score": mean_rev_norm,
+                "order_book_spread": float(spread) if spread == spread else None,
+                "order_book_imbalance": float(imbalance) if imbalance == imbalance else None,
+                "cvd_ratio": cvd_ratio,
+                "trades_per_second": trades_per_second,
             }
             with open(SYMBOL_SCORES_FILE, "w") as f:
                 json.dump(scores, f, indent=2)
@@ -1449,6 +1504,9 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             "trend_norm": trend_norm,
             "mean_reversion_norm": mean_rev_norm,
             "setup_type": setup_type or "none",
+            "cvd_bias": cvd_bias,
+            "cvd_ratio": cvd_ratio if cvd_ratio is not None else 0.0,
+            "trades_per_second": trades_per_second if trades_per_second is not None else 0.0,
         }
         log_signal(symbol, session_name, normalized_score, direction, w, triggered_patterns, chart_pattern, indicator_flags)
         return normalized_score, direction, position_size, pattern_name
