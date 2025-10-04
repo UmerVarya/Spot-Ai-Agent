@@ -41,6 +41,19 @@ Each row recorded by `trade_storage.log_trade_result` contains the following col
 | `volatility` | Measured volatility at entry. |
 | `htf_trend` | Higher time frame trend assessment. |
 | `order_imbalance` | Order flow imbalance metric. |
+| `order_flow_score` | Composite [-1, 1] order-flow score combining microstructure features. |
+| `order_flow_flag` | Legacy ±1/0 directional flag derived from the score (kept for compatibility). |
+| `order_flow_state` | Textual classification of order-flow pressure (e.g. `buyers in control`). |
+| `cvd` | Normalised cumulative volume delta observed over the recent window. |
+| `cvd_change` | Short-term change in cumulative volume delta (last bar vs. average). |
+| `taker_buy_ratio` | Normalised taker-buy to total volume ratio. |
+| `trade_imbalance` | Net taker flow imbalance for the latest bar. |
+| `aggressive_trade_rate` | Normalised rate of aggressive trades relative to recent history. |
+| `spoofing_intensity` | Spoofing detection score derived from order-book withdrawals. |
+| `spoofing_alert` | Binary flag (0/1) when spoofing intensity crosses the alert threshold. |
+| `volume_ratio` | Recent volume ratio versus the 5-bar average (bounded to [-1, 1]). |
+| `price_change_pct` | Percentage price change between the last close and the reference open. |
+| `spread_bps` | Bid/ask spread at decision time expressed in basis points. |
 | `macro_indicator` | Macro indicator value. |
 | `tp1_partial` | `true` when a TP1 partial exit occurred; otherwise `false`. |
 | `tp2_partial` | `true` when a TP2 partial exit occurred; otherwise `false`. |
@@ -79,7 +92,7 @@ Partial exits are denoted with a `_partial` suffix. Manual closures may appear a
 ## Example Header
 
 ```
-trade_id,timestamp,symbol,direction,entry_time,exit_time,entry,exit,size,notional,fees,slippage,pnl,pnl_pct,outcome,outcome_desc,exit_reason,strategy,session,confidence,btc_dominance,fear_greed,sentiment_bias,sentiment_confidence,score,pattern,narrative,llm_decision,llm_approval,llm_confidence,llm_error,technical_indicator_score,volatility,htf_trend,order_imbalance,macro_indicator,tp1_partial,tp2_partial,pnl_tp1,pnl_tp2,size_tp1,size_tp2,notional_tp1,notional_tp2
+trade_id,timestamp,symbol,direction,entry_time,exit_time,entry,exit,size,notional,fees,slippage,pnl,pnl_pct,outcome,outcome_desc,exit_reason,strategy,session,confidence,btc_dominance,fear_greed,sentiment_bias,sentiment_confidence,score,pattern,narrative,llm_decision,llm_approval,llm_confidence,llm_error,technical_indicator_score,volatility,htf_trend,order_imbalance,order_flow_score,order_flow_flag,order_flow_state,cvd,cvd_change,taker_buy_ratio,trade_imbalance,aggressive_trade_rate,spoofing_intensity,spoofing_alert,volume_ratio,price_change_pct,spread_bps,macro_indicator,tp1_partial,tp2_partial,pnl_tp1,pnl_tp2,size_tp1,size_tp2,notional_tp1,notional_tp2
 ```
 
 A single trade may produce multiple rows if partial take-profits occur. Rows are grouped by `trade_id` (falling back to `entry_time`, `symbol` and `strategy` when absent) and collapsed into one summary row by `_deduplicate_history`. PnL, size and notional values are summed for the whole trade, while per-stage fields such as `pnl_tp1`, `pnl_tp2`, `size_tp1`, `size_tp2`, `notional_tp1` and `notional_tp2` detail the contribution of each partial exit alongside the `tp1_partial`/`tp2_partial` flags.

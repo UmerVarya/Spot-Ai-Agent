@@ -38,6 +38,19 @@ HEADER_MAP = {
     "sentiment_bias": "sentiment_score", "sentiment_confidence": "sentiment_confidence",
     "Volatility": "volatility", "volatility": "volatility",
     "order_imbalance": "order_imbalance", "htf_trend": "htf_trend",
+    "order_flow_score": "order_flow_score",
+    "order_flow_flag": "order_flow_flag",
+    "order_flow_state": "order_flow_state",
+    "cvd": "cvd",
+    "cvd_change": "cvd_change",
+    "taker_buy_ratio": "taker_buy_ratio",
+    "trade_imbalance": "trade_imbalance",
+    "aggressive_trade_rate": "aggressive_trade_rate",
+    "spoofing_intensity": "spoofing_intensity",
+    "spoofing_alert": "spoofing_alert",
+    "volume_ratio": "volume_ratio",
+    "price_change_pct": "price_change_pct",
+    "spread_bps": "spread_bps",
     "macro_indicator": "macro_indicator", "btc_dominance": "btc_dominance",
     "fear_greed": "fear_greed",
     "pattern": "pattern", "narrative": "narrative",
@@ -54,7 +67,10 @@ HEADER_MAP = {
 REQUIRED_COLS_MIN = {"symbol", "entry_time", "exit_time", "entry_price", "exit_price"}
 POSSIBLE_FEATURES = [
     "score","technical_indicator_score","rsi","ema_diff","bb_width","volatility","volume_z",
-    "sentiment_score","session","spread_bps","slippage_bps"
+    "sentiment_score","session","spread_bps","slippage_bps",
+    "order_imbalance","order_flow_score","order_flow_flag","cvd","cvd_change","taker_buy_ratio",
+    "trade_imbalance","aggressive_trade_rate","spoofing_intensity","spoofing_alert",
+    "volume_ratio","price_change_pct"
 ]
 
 def load_history_df():
@@ -81,8 +97,12 @@ def coerce_types(df):
     for col in ["entry_time","exit_time"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
-    for col in ["entry_price","exit_price","size_quote","size_base","fees","pnl_quote","pnl_pct","score",
-                "rsi","ema_diff","bb_width","volatility","volume_z","spread_bps","slippage_bps","sentiment_score"]:
+    for col in [
+        "entry_price","exit_price","size_quote","size_base","fees","pnl_quote","pnl_pct","score",
+        "rsi","ema_diff","bb_width","volatility","volume_z","spread_bps","slippage_bps","sentiment_score",
+        "order_imbalance","order_flow_score","order_flow_flag","cvd","cvd_change","taker_buy_ratio","trade_imbalance",
+        "aggressive_trade_rate","spoofing_intensity","spoofing_alert","volume_ratio","price_change_pct"
+    ]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     if "side" in df.columns:
