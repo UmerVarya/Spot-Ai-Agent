@@ -37,6 +37,7 @@ from trade_utils import (
     calculate_indicators,
     compute_performance_metrics,
     summarise_technical_score,
+    get_order_book,
 )
 from trade_manager import manage_trades, create_new_trade  # trade logic
 from trade_storage import (
@@ -60,6 +61,7 @@ from drawdown_guard import is_trading_blocked
 import numpy as np
 from rl_policy import RLPositionSizer
 from trade_utils import get_rl_state
+from microstructure import plan_execution
 from volatility_regime import atr_percentile
 
 
@@ -624,7 +626,38 @@ def run_agent_loop() -> None:
                 # Proceed if we still have room for a new trade
                 if position_size > 0:
                     try:
-                        entry_price = round(price_data['close'].iloc[-1], 6)
+                        raw_entry_price = float(price_data['close'].iloc[-1])
+                        entry_price = round(raw_entry_price, 6)
+                        micro_plan = None
+                        order_book_snapshot = None
+                        try:
+                            order_book_snapshot = get_order_book(symbol, limit=20)
+                        except Exception as exc:
+                            logger.debug(
+                                "Order book snapshot unavailable for %s: %s",
+                                symbol,
+                                exc,
+                                exc_info=True,
+                            )
+                        if order_book_snapshot:
+                            try:
+                                micro_plan = plan_execution(
+                                    "buy",
+                                    raw_entry_price,
+                                    order_book_snapshot,
+                                    depth=15,
+                                )
+                                rec_price = micro_plan.get("recommended_price")
+                                if rec_price is not None:
+                                    entry_price = round(float(rec_price), 6)
+                            except Exception as exc:
+                                logger.debug(
+                                    "Failed to compute execution plan for %s: %s",
+                                    symbol,
+                                    exc,
+                                    exc_info=True,
+                                )
+                                micro_plan = None
                         try:
                             atr_val = indicators_df['atr'].iloc[-1] if 'atr' in indicators_df else None
                         except Exception:
@@ -638,6 +671,11 @@ def run_agent_loop() -> None:
                         state = get_rl_state(sym_vol_pct)
                         mult = rl_sizer.select_multiplier(state)
                         trade_usd *= mult
+                        if micro_plan and micro_plan.get("size_multiplier") is not None:
+                            try:
+                                trade_usd *= float(micro_plan.get("size_multiplier", 1.0))
+                            except (TypeError, ValueError):
+                                pass
                         trade_usd = max(MIN_TRADE_USD, min(MAX_TRADE_USD, trade_usd))
                         position_size = round(max(trade_usd / entry_price, 0), 6)
                         sl = round(entry_price - sl_dist, 6)
@@ -720,6 +758,9 @@ def run_agent_loop() -> None:
                             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "news_summary": decision_obj.get("news_summary", ""),
                         }
+                        if micro_plan:
+                            logger.debug("Microstructure plan for %s: %s", symbol, micro_plan)
+                            new_trade["microstructure_plan"] = micro_plan
                         logger.info("Narrative:\n%s\n", narrative)
                         logger.info(
                             "Trade Opened %s @ %s | Notional=%s USD | Qty=%s | TP1 %s / TP2 %s / TP3 %s",

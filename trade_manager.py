@@ -27,6 +27,7 @@ from trade_utils import (
     estimate_commission,
     simulate_slippage,
     update_stop_loss_order,
+    get_order_book,
 )
 from macro_sentiment import analyze_macro_sentiment
 from notifier import send_email
@@ -40,6 +41,7 @@ from trade_storage import (
     is_trade_active,
 )
 from rl_policy import RLPositionSizer
+from microstructure import plan_execution, detect_sell_pressure
 
 # === Constants ===
 
@@ -686,6 +688,47 @@ def manage_trades() -> None:
             status_flags,
             trade.get('profit_riding', False),
         )
+        execution_plan = None
+        sell_pressure_signal = None
+        order_book_snapshot = None
+        reference_price_for_plan = current_price if current_price is not None else fallback_exit_price
+        plan_side: Optional[str] = None
+        if direction == "long":
+            plan_side = "sell"
+        elif direction == "short":
+            plan_side = "buy"
+        if symbol:
+            try:
+                order_book_snapshot = get_order_book(symbol, limit=20)
+            except Exception as exc:
+                logger.debug("Order book lookup failed for %s: %s", symbol, exc, exc_info=True)
+        if order_book_snapshot is not None:
+            if plan_side:
+                try:
+                    execution_plan = plan_execution(
+                        plan_side,
+                        reference_price_for_plan,
+                        order_book_snapshot,
+                        depth=15,
+                    )
+                except Exception as exc:
+                    logger.debug("Failed to derive execution plan for %s: %s", symbol, exc, exc_info=True)
+                    execution_plan = None
+            try:
+                sell_pressure_signal = detect_sell_pressure(
+                    order_book_snapshot,
+                    reference_price=reference_price_for_plan,
+                    depth=15,
+                )
+            except Exception as exc:
+                logger.debug("Failed to evaluate sell pressure for %s: %s", symbol, exc, exc_info=True)
+                sell_pressure_signal = None
+        if execution_plan:
+            execution_plan["observed_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            trade["last_order_book_plan"] = execution_plan
+        if sell_pressure_signal:
+            sell_pressure_signal["observed_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            trade["last_order_book_signal"] = sell_pressure_signal
         # Evaluate early exit conditions using the candle low to capture
         # sharp drops within the interval
         exit_now, reason = should_exit_early(trade, observed_price, price_data)
@@ -693,12 +736,21 @@ def manage_trades() -> None:
             actions.append("early_exit")
             logger.info("Early exit triggered for %s: %s", symbol, reason)
             qty = _to_float(trade.get('position_size', 1)) or 0.0
-            exit_price_candidate = current_price
+            exit_price_candidate = None
+            if execution_plan is not None:
+                exit_price_candidate = _to_float(execution_plan.get("recommended_price"))
             if exit_price_candidate is None:
-                exit_price_candidate = fallback_exit_price
+                exit_price_candidate = _to_float(current_price)
             if exit_price_candidate is None:
-                exit_price_candidate = entry if entry is not None else 0.0
+                exit_price_candidate = _to_float(fallback_exit_price)
+            if exit_price_candidate is None and entry is not None:
+                exit_price_candidate = entry
+            if exit_price_candidate is None:
+                exit_price_candidate = 0.0
             exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            maker_flag = False
+            if execution_plan is not None:
+                maker_flag = execution_plan.get("aggressiveness") == "passive"
             execute_exit_trade(
                 trade,
                 exit_price=exit_price_candidate,
@@ -706,6 +758,7 @@ def manage_trades() -> None:
                 outcome="early_exit",
                 quantity=qty,
                 exit_time=exit_time,
+                maker=maker_flag,
             )
             _persist_active_snapshot(
                 updated_trades, active_trades, index, include_current=False
@@ -714,6 +767,63 @@ def manage_trades() -> None:
             send_email(f" Early Exit: {symbol}", f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}")
             logger.debug("%s actions: %s", symbol, actions)
             continue
+        if (
+            direction == "long"
+            and sell_pressure_signal
+            and sell_pressure_signal.get("sell_pressure")
+        ):
+            qty = _to_float(trade.get('position_size', 1)) or 0.0
+            if qty > 0:
+                reason_text = sell_pressure_signal.get("reason") or "Order book sell pressure"
+                exit_price_candidate = None
+                if execution_plan is not None:
+                    exit_price_candidate = _to_float(execution_plan.get("recommended_price"))
+                if exit_price_candidate is None:
+                    exit_price_candidate = _to_float(current_price)
+                if exit_price_candidate is None:
+                    exit_price_candidate = _to_float(price_for_exit)
+                if exit_price_candidate is None:
+                    exit_price_candidate = _to_float(fallback_exit_price)
+                if exit_price_candidate is None and entry is not None:
+                    exit_price_candidate = entry
+                if exit_price_candidate is None:
+                    exit_price_candidate = 0.0
+                proceed = True
+                if entry is not None and exit_price_candidate is not None:
+                    proceed = (
+                        exit_price_candidate >= entry
+                        or sell_pressure_signal.get("urgency") == "high"
+                    )
+                if proceed:
+                    actions.append("orderbook_exit")
+                    exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    maker_flag = False
+                    if execution_plan is not None:
+                        maker_flag = execution_plan.get("aggressiveness") == "passive"
+                    execute_exit_trade(
+                        trade,
+                        exit_price=exit_price_candidate,
+                        reason=reason_text,
+                        outcome="orderbook_exit",
+                        quantity=qty,
+                        exit_time=exit_time,
+                        maker=maker_flag,
+                    )
+                    _persist_active_snapshot(
+                        updated_trades, active_trades, index, include_current=False
+                    )
+                    _update_rl(trade, exit_price_candidate)
+                    send_email(
+                        f"⚠️ Order Book Exit: {symbol}",
+                        f"{trade}\n\nSignal: {sell_pressure_signal}\n\nNarrative:\n{trade.get('narrative', 'N/A')}",
+                    )
+                    logger.info(
+                        "%s exited due to order book pressure: %s",
+                        symbol,
+                        reason_text,
+                    )
+                    logger.debug("%s actions: %s", symbol, actions)
+                    continue
         # Compute updated indicators for trailing stops and TP
         indicators = calculate_indicators(price_data)
         adx_series = indicators.get('adx')
