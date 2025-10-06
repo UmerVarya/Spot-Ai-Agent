@@ -32,9 +32,11 @@ Usage::
 
 from __future__ import annotations
 
+import math
+from typing import Any, Callable, Dict, List, Tuple
+
 import numpy as np
 import pandas as pd
-from typing import Callable, Dict, Iterable, List, Tuple, Any
 
 from risk_metrics import sharpe_ratio, max_drawdown
 from log_utils import setup_logger
@@ -78,6 +80,153 @@ class Backtester:
         self.predict_prob = predict_prob
         self.macro_filter = macro_filter
         self.position_size_func = position_size_func
+
+    @staticmethod
+    def _direction_multiplier(direction: Any) -> int:
+        """Normalise signal direction into ``+1`` (long) or ``-1`` (short)."""
+
+        if direction is None:
+            return 1
+        if isinstance(direction, (int, float)):
+            if direction > 0:
+                return 1
+            if direction < 0:
+                return -1
+        if isinstance(direction, str):
+            lowered = direction.lower()
+            if "short" in lowered or "sell" in lowered:
+                return -1
+        return 1
+
+    @staticmethod
+    def _simulate_intrabar_path(bar: pd.Series) -> Dict[str, Any]:
+        """Create a plausible intrabar price path and flow imbalance."""
+
+        def _to_float(value: Any) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return float("nan")
+
+        open_price = _to_float(bar.get("open"))
+        high = _to_float(bar.get("high"))
+        low = _to_float(bar.get("low"))
+        close_price = _to_float(bar.get("close"))
+        volume = _to_float(bar.get("volume", float("nan")))
+        taker_buy = _to_float(bar.get("taker_buy_base", float("nan")))
+
+        prices: List[float] = []
+
+        def _append_price(value: float) -> None:
+            if not math.isfinite(value):
+                return
+            if prices and math.isclose(prices[-1], value, rel_tol=1e-9, abs_tol=1e-9):
+                return
+            prices.append(value)
+
+        _append_price(open_price)
+
+        if math.isfinite(high) and math.isfinite(low):
+            if math.isfinite(open_price) and math.isfinite(close_price):
+                bullish_bias = close_price >= open_price
+            else:
+                bullish_bias = True
+            wick_sequence = [low, high] if bullish_bias else [high, low]
+            for price in wick_sequence:
+                _append_price(price)
+
+        _append_price(close_price)
+
+        if not prices and math.isfinite(close_price):
+            prices = [close_price]
+
+        volume_delta = float("nan")
+        imbalance = float("nan")
+        taker_buy_ratio = float("nan")
+
+        if math.isfinite(volume) and volume > 0:
+            if math.isfinite(taker_buy):
+                taker_buy = max(min(taker_buy, volume), 0.0)
+                taker_sell = volume - taker_buy
+                volume_delta = taker_buy - taker_sell
+                imbalance = float(np.clip(volume_delta / volume, -1.0, 1.0))
+                taker_buy_ratio = float(np.clip((taker_buy / volume) * 2 - 1.0, -1.0, 1.0))
+            else:
+                direction_bias = 0.0
+                if math.isfinite(open_price) and math.isfinite(close_price):
+                    if close_price > open_price:
+                        direction_bias = 1.0
+                    elif close_price < open_price:
+                        direction_bias = -1.0
+                volume_delta = direction_bias * volume
+                imbalance = float(np.clip(direction_bias, -1.0, 1.0))
+
+        return {
+            "prices": prices,
+            "volume": volume if math.isfinite(volume) else float("nan"),
+            "taker_buy_volume": taker_buy if math.isfinite(taker_buy) else float("nan"),
+            "volume_delta": volume_delta,
+            "imbalance": imbalance,
+            "taker_buy_ratio": taker_buy_ratio,
+        }
+
+    @staticmethod
+    def _evaluate_intrabar_outcome(
+        prices: List[float],
+        entry_price: float,
+        direction_mult: int,
+        stop_price: float,
+        take_profits: List[float],
+    ) -> Tuple[float, str, float]:
+        """Determine trade PnL by walking the synthetic intrabar path."""
+
+        if not prices or not math.isfinite(entry_price):
+            return 0.0, "close", entry_price
+
+        tp_levels = take_profits[:]
+        if direction_mult > 0:
+            tp_levels.sort()
+        else:
+            tp_levels.sort(reverse=True)
+
+        exit_reason = "close"
+        exit_price = prices[-1]
+
+        for price in prices:
+            if direction_mult > 0:
+                if math.isfinite(stop_price) and price <= stop_price:
+                    exit_reason = "stop"
+                    exit_price = stop_price
+                    break
+                for target in tp_levels:
+                    if math.isfinite(target) and price >= target:
+                        exit_reason = "take_profit"
+                        exit_price = target
+                        break
+                if exit_reason != "close":
+                    break
+            else:
+                if math.isfinite(stop_price) and price >= stop_price:
+                    exit_reason = "stop"
+                    exit_price = stop_price
+                    break
+                for target in tp_levels:
+                    if math.isfinite(target) and price <= target:
+                        exit_reason = "take_profit"
+                        exit_price = target
+                        break
+                if exit_reason != "close":
+                    break
+
+        if exit_reason == "close" and math.isfinite(prices[-1]):
+            exit_price = prices[-1]
+
+        if direction_mult > 0:
+            pnl = (exit_price - entry_price) / entry_price
+        else:
+            pnl = (entry_price - exit_price) / entry_price
+
+        return pnl, exit_reason, exit_price
 
     def run(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -127,28 +276,31 @@ class Backtester:
                 position_mult = self.position_size_func(score)
                 if position_mult <= 0:
                     continue
+                direction_mult = self._direction_multiplier(direction)
                 # Compute entry/exit using simple ATR stops
                 atr = (window['high'] - window['low']).rolling(14).mean().iloc[-1]
                 if atr != atr or atr == 0:
                     continue
-                stop = window['close'].iloc[-1] - stop_mult * atr
-                take_profits = [window['close'].iloc[-1] + m * atr for m in tp_mults]
                 entry_price = window['close'].iloc[-1]
-                # Simulate next bar outcome
-                # For demonstration we use actual next close price
-                try:
-                    next_price = df.loc[t:].iloc[1]['close']
-                except Exception:
-                    continue
-                pnl = (next_price - entry_price) / entry_price
-                # Apply stop/take profit logic
-                if pnl < -stop_mult * atr / entry_price:
-                    pnl = -stop_mult * atr / entry_price
+                if direction_mult > 0:
+                    stop_price = entry_price - stop_mult * atr
+                    take_profits = [entry_price + m * atr for m in tp_mults]
                 else:
-                    for tp_level in take_profits:
-                        if (tp_level - entry_price) / entry_price <= pnl:
-                            pnl = (tp_level - entry_price) / entry_price
-                            break
+                    stop_price = entry_price + stop_mult * atr
+                    take_profits = [entry_price - m * atr for m in tp_mults]
+                # Simulate next bar outcome
+                future = df.loc[df.index > t]
+                if future.empty:
+                    continue
+                next_bar = future.iloc[0]
+                microstructure = self._simulate_intrabar_path(next_bar)
+                pnl, exit_reason, exit_price = self._evaluate_intrabar_outcome(
+                    microstructure.get("prices", []),
+                    entry_price,
+                    direction_mult,
+                    stop_price,
+                    take_profits,
+                )
                 # Update equity
                 trade_return = position_mult * pnl
                 equity *= (1 + trade_return)
@@ -163,7 +315,10 @@ class Backtester:
                     'prob': prob,
                     'direction': direction,
                     'position_hint': position_hint,
+                    'exit_reason': exit_reason,
+                    'exit_price': exit_price,
                     'return': trade_return,
+                    'microstructure': microstructure,
                 }
                 if isinstance(feature_snapshot, dict) and feature_snapshot:
                     trade_record['signal_features'] = feature_snapshot.copy()
