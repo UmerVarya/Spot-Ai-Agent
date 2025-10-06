@@ -1679,9 +1679,27 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         zones = detect_support_resistance_zones(price_data)
         zones = zones.to_dict() if isinstance(zones, pd.Series) else (zones or {"support": [], "resistance": []})
         current_price = float(close.iloc[-1])
+        atr_pct = None
+        try:
+            atr_indicator = AverageTrueRange(price_data['high'], price_data['low'], price_data['close'], window=14)
+            atr_series = atr_indicator.average_true_range()
+            latest_atr = float(atr_series.iloc[-1]) if len(atr_series) else float('nan')
+            if np.isfinite(latest_atr) and latest_atr > 0 and current_price > 0:
+                atr_pct = latest_atr / current_price
+        except Exception:  # pragma: no cover - ATR fallback for missing columns
+            atr_pct = None
         if direction == "long":
-            near_resistance = is_price_near_zone(current_price, zones, 'resistance', 0.005)
-            near_support = is_price_near_zone(current_price, zones, 'support', 0.015 if sentiment_bias == "bullish" else 0.01)
+            resistance_base = 0.005
+            support_base = 0.015 if sentiment_bias == "bullish" else 0.01
+            if atr_pct is not None and np.isfinite(atr_pct):
+                # Use ATR multiples so that volatile symbols require wider buffers.
+                resistance_threshold = max(resistance_base, atr_pct * 0.8)
+                support_threshold = max(support_base, atr_pct * (1.2 if sentiment_bias == "bullish" else 1.0))
+            else:
+                resistance_threshold = resistance_base
+                support_threshold = support_base
+            near_resistance = is_price_near_zone(current_price, zones, 'resistance', resistance_threshold)
+            near_support = is_price_near_zone(current_price, zones, 'support', support_threshold)
             if near_resistance and normalized_score < 6.5:
                 logger.warning("Skipping %s: near resistance zone with score %.2f < 6.5", symbol, normalized_score)
                 return 0, None, 0, None
