@@ -1,5 +1,7 @@
 import importlib
+
 import pandas as pd
+import pytest
 
 def test_optimize_indicator_weights(monkeypatch, tmp_path):
     sig_file = tmp_path / "signal_log.csv"
@@ -21,6 +23,6 @@ def test_optimize_indicator_weights(monkeypatch, tmp_path):
     importlib.reload(trade_storage)
     weight_optimizer = importlib.reload(importlib.import_module("weight_optimizer"))
     base = {"ema": 1.0, "macd": 1.0}
-    optimized = weight_optimizer.optimize_indicator_weights(base)
-    assert optimized["ema"] != base["ema"]
+    optimized = weight_optimizer.optimize_indicator_weights(base, ema_span=2)
+    assert optimized["ema"] == pytest.approx(0.667, rel=1e-3)
     assert optimized["macd"] == base["macd"]
