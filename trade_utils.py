@@ -3,9 +3,10 @@ import pandas as pd
 import os
 import json
 import time
+import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional, Any, Mapping
+from typing import Optional, Any, Mapping, Callable, Tuple, TypeVar, Dict
 import traceback
 import asyncio
 from log_utils import setup_logger
@@ -33,6 +34,90 @@ SIGNAL_LOG_FILE = os.getenv("SIGNAL_LOG_FILE",
                             os.path.join(_MODULE_DIR, "signal_log.csv"))
 
 logger = setup_logger(__name__)
+
+# Maximum age (seconds) of WebSocket order book data before we consider it stale.
+_STREAM_STALENESS_MAX_SECONDS = 5.0
+# Cooldown period before re-attempting to use the WebSocket stream after a failure.
+_STREAM_BACKOFF_SECONDS = 10.0
+# Track symbols that should temporarily bypass the WebSocket stream due to recent issues.
+_stream_backoff_until: Dict[str, float] = {}
+
+_T = TypeVar("_T")
+
+_RATE_LIMIT_KEYWORDS = (
+    "Too many requests",
+    "too many requests",
+    "Too Many Requests",
+    "-1003",  # Binance rate limit error code
+    "IP banned",
+    "429",
+)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Return True if ``exc`` looks like a Binance rate limit error."""
+
+    message = getattr(exc, "message", None)
+    if not message:
+        message = str(exc)
+    if not message:
+        return False
+    return any(keyword in message for keyword in _RATE_LIMIT_KEYWORDS)
+
+
+def _call_binance_with_retries(
+    action: Callable[[], _T],
+    description: str,
+    max_attempts: int = 3,
+    base_delay: float = 0.5,
+) -> Tuple[bool, Optional[_T], Optional[Exception]]:
+    """Execute ``action`` with retries and exponential backoff.
+
+    Parameters
+    ----------
+    action : Callable
+        Callable executed with no arguments that performs the Binance API
+        request.
+    description : str
+        Human readable description for logging.
+    max_attempts : int, optional
+        Number of attempts before giving up, by default 3.
+    base_delay : float, optional
+        Initial backoff delay in seconds, by default 0.5 seconds.
+
+    Returns
+    -------
+    Tuple[bool, Optional[_T], Optional[Exception]]
+        Tuple of ``(success, result, exception)``.  ``result`` is populated
+        only when ``success`` is True.  When ``success`` is False the last
+        exception is returned for logging.
+    """
+
+    delay = max(base_delay, 0.1)
+    last_exception: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = action()
+            return True, result, None
+        except Exception as exc:  # pragma: no cover - network dependent
+            last_exception = exc
+            rate_limited = _is_rate_limit_error(exc)
+            logger.warning(
+                "Attempt %d/%d to %s failed%s: %s",
+                attempt,
+                max_attempts,
+                description,
+                " due to rate limit" if rate_limited else "",
+                exc,
+            )
+            if attempt >= max_attempts:
+                break
+            multiplier = 2.0 if rate_limited else 1.5
+            jitter = random.uniform(0.0, base_delay)
+            sleep_time = min(delay * multiplier + jitter, 15.0)
+            time.sleep(sleep_time)
+            delay = min(delay * multiplier, 15.0)
+    return False, None, last_exception
 
 # Optional runtime dependency: live market data stream via WebSockets.
 try:  # pragma: no cover - import guarded for offline environments
@@ -532,30 +617,65 @@ def _get_order_book_rest(symbol: str, limit: int = 50) -> Optional[dict]:
     client = _get_binance_client()
     if client is None:
         return None
-    try:
-        mapped_symbol = map_symbol_for_binance(symbol)
+    mapped_symbol = map_symbol_for_binance(symbol)
+
+    def _fetch() -> dict:
         book = client.get_order_book(symbol=mapped_symbol, limit=limit)
         return {
             "bids": [(float(p), float(q)) for p, q in book.get("bids", [])],
             "asks": [(float(p), float(q)) for p, q in book.get("asks", [])],
+            "last_update_id": float(book.get("lastUpdateId", 0.0)),
+            "last_event_ts": time.time(),
         }
-    except Exception:
-        return None
+
+    success, snapshot, error = _call_binance_with_retries(
+        _fetch,
+        f"fetch order book via REST for {symbol}",
+    )
+    if success and snapshot is not None:
+        return snapshot
+    if error is not None:
+        logger.debug("REST order book fetch failed for %s: %s", symbol, error)
+    return None
 
 
 def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
     """Return a recent order book snapshot, preferring the WebSocket stream."""
 
-    if get_market_stream is not None:
+    now = time.time()
+    backoff_until = _stream_backoff_until.get(symbol, 0.0)
+    use_stream = get_market_stream is not None and now >= backoff_until
+    if use_stream:
         try:
             stream = get_market_stream()
             snapshot = stream.get_order_book(symbol, depth=limit)
             if snapshot:
-                bids = snapshot.get("bids", [])
-                asks = snapshot.get("asks", [])
-                return {"bids": bids[:limit], "asks": asks[:limit]}
+                last_update_ts = float(snapshot.get("last_event_ts", 0.0) or 0.0)
+                is_stale = False
+                if last_update_ts:
+                    age = now - last_update_ts
+                    if age > _STREAM_STALENESS_MAX_SECONDS:
+                        logger.debug(
+                            "Live order book for %s is stale (%.2fs); falling back to REST.",
+                            symbol,
+                            age,
+                        )
+                        is_stale = True
+                else:
+                    is_stale = True
+                if not is_stale:
+                    bids = snapshot.get("bids", [])
+                    asks = snapshot.get("asks", [])
+                    return {
+                        "bids": bids[:limit],
+                        "asks": asks[:limit],
+                        "last_update_id": snapshot.get("last_update_id"),
+                        "last_event_ts": snapshot.get("last_event_ts"),
+                    }
+                _stream_backoff_until[symbol] = now + _STREAM_BACKOFF_SECONDS
         except Exception as exc:
             logger.debug("Live order book unavailable for %s: %s", symbol, exc, exc_info=True)
+            _stream_backoff_until[symbol] = now + _STREAM_BACKOFF_SECONDS
     return _get_order_book_rest(symbol, limit=limit)
 
 
@@ -596,22 +716,31 @@ def update_stop_loss_order(
             symbol,
         )
         return None
-    try:
-        mapped_symbol = map_symbol_for_binance(symbol)
-        if existing_order_id:
-            try:
-                if take_profit_price is not None and hasattr(client, "cancel_oco_order"):
-                    client.cancel_oco_order(symbol=mapped_symbol, orderListId=existing_order_id)
-                else:
-                    client.cancel_order(symbol=mapped_symbol, orderId=existing_order_id)
-            except Exception as exc:  # pragma: no cover - best effort
-                logger.warning(
-                    "Failed to cancel existing stop-loss order for %s: %s",
-                    symbol,
-                    exc,
-                )
+    mapped_symbol = map_symbol_for_binance(symbol)
+
+    if existing_order_id:
+        def _cancel_existing() -> bool:
+            if take_profit_price is not None and hasattr(client, "cancel_oco_order"):
+                client.cancel_oco_order(symbol=mapped_symbol, orderListId=existing_order_id)
+            else:
+                client.cancel_order(symbol=mapped_symbol, orderId=existing_order_id)
+            return True
+
+        success, _, error = _call_binance_with_retries(
+            _cancel_existing,
+            f"cancel existing stop-loss order for {symbol}",
+            max_attempts=2,
+        )
+        if not success and error is not None:
+            logger.warning(
+                "Failed to cancel existing stop-loss order for %s: %s",
+                symbol,
+                error,
+            )
+
+    def _place_order() -> dict:
         if take_profit_price is not None and hasattr(client, "create_oco_order"):
-            order = client.create_oco_order(
+            return client.create_oco_order(
                 symbol=mapped_symbol,
                 side=getattr(Client, "SIDE_SELL", "SELL"),
                 quantity=quantity,
@@ -620,8 +749,7 @@ def update_stop_loss_order(
                 stopLimitPrice=float(stop_price),
                 stopLimitTimeInForce=getattr(Client, "TIME_IN_FORCE_GTC", "GTC"),
             )
-            return order.get("orderListId")
-        order = client.create_order(
+        return client.create_order(
             symbol=mapped_symbol,
             side=getattr(Client, "SIDE_SELL", "SELL"),
             type=getattr(Client, "ORDER_TYPE_STOP_LOSS_LIMIT", "STOP_LOSS_LIMIT"),
@@ -630,14 +758,39 @@ def update_stop_loss_order(
             price=float(stop_price),
             timeInForce=getattr(Client, "TIME_IN_FORCE_GTC", "GTC"),
         )
-        return order.get("orderId")
-    except Exception as exc:  # pragma: no cover - network/API errors
+
+    success, response, error = _call_binance_with_retries(
+        _place_order,
+        f"place stop-loss order for {symbol}",
+    )
+    if not success or response is None:
+        if error is not None:
+            logger.warning("Failed to place stop-loss order for %s: %s", symbol, error)
+        return None
+
+    if take_profit_price is not None and hasattr(client, "create_oco_order"):
+        order_id = response.get("orderListId")
+    else:
+        order_id = response.get("orderId")
+
+    status = response.get("status") or response.get("listOrderStatus")
+    if status and isinstance(status, str) and status.upper() not in {"NEW", "ACCEPTED", "ACK"}:
         logger.warning(
-            "Failed to place stop-loss order for %s: %s",
+            "Stop-loss order for %s returned unexpected status %s: %s",
             symbol,
-            exc,
+            status,
+            response,
+        )
+
+    if not order_id:
+        logger.warning(
+            "Binance response missing order identifier for %s: %s",
+            symbol,
+            response,
         )
         return None
+
+    return order_id
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Compute a suite of technical indicators on a price DataFrame."""
