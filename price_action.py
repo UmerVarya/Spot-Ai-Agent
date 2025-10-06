@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from typing import Optional
 
 def detect_support_resistance_zones(df, window=20, tolerance=0.003):
     support_zones = []
@@ -38,11 +39,29 @@ def detect_support_resistance_zones(df, window=20, tolerance=0.003):
         "resistance": clean_zones(resistance_zones)
     }
 
-def is_price_near_zone(price, zones_dict, zone_type='support', proximity=0.005):
+def is_price_near_zone(
+    price,
+    zones_dict,
+    zone_type: str = 'support',
+    proximity: float = 0.005,
+    atr: Optional[float] = None,
+    atr_multiple: Optional[float] = None,
+):
     zones = zones_dict.get(zone_type, [])
     # Ensure zones is a list of floats
     if isinstance(zones, (pd.Series, np.ndarray)):
         zones = zones.tolist()
+
+    if atr is not None and atr_multiple is not None and atr > 0:
+        threshold = atr * atr_multiple
+        for zone in zones:
+            if abs(price - zone) <= threshold:
+                return True
+        return False
+
+    if price <= 0:
+        return False
+
     for zone in zones:
         if abs(price - zone) / price < proximity:
             return True

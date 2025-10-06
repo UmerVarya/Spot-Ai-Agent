@@ -364,7 +364,15 @@ try:
 except Exception:
     def detect_support_resistance_zones(df):
         return {"support": [], "resistance": []}
-    def is_price_near_zone(price: float, zones: dict, zone_type: str, tolerance: float) -> bool:
+
+    def is_price_near_zone(
+        price: float,
+        zones: dict,
+        zone_type: str,
+        tolerance: float = 0.005,
+        atr: Optional[float] = None,
+        atr_multiple: Optional[float] = None,
+    ) -> bool:
         return False
 
 # Order flow detection fallback
@@ -1702,9 +1710,40 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         zones = detect_support_resistance_zones(price_data)
         zones = zones.to_dict() if isinstance(zones, pd.Series) else (zones or {"support": [], "resistance": []})
         current_price = float(close.iloc[-1])
+        atr_value: Optional[float] = None
+        if "atr" in price_data:
+            try:
+                latest_atr = float(price_data["atr"].iloc[-1])
+                if np.isfinite(latest_atr) and latest_atr > 0:
+                    atr_value = latest_atr
+            except Exception:
+                atr_value = None
         if direction == "long":
-            near_resistance = is_price_near_zone(current_price, zones, 'resistance', 0.005)
-            near_support = is_price_near_zone(current_price, zones, 'support', 0.015 if sentiment_bias == "bullish" else 0.01)
+            if atr_value is not None:
+                resistance_multiple = 1.0
+                support_multiple = 1.5 if sentiment_bias == "bullish" else 1.0
+                near_resistance = is_price_near_zone(
+                    current_price,
+                    zones,
+                    'resistance',
+                    atr=atr_value,
+                    atr_multiple=resistance_multiple,
+                )
+                near_support = is_price_near_zone(
+                    current_price,
+                    zones,
+                    'support',
+                    atr=atr_value,
+                    atr_multiple=support_multiple,
+                )
+            else:
+                near_resistance = is_price_near_zone(current_price, zones, 'resistance', proximity=0.005)
+                near_support = is_price_near_zone(
+                    current_price,
+                    zones,
+                    'support',
+                    proximity=0.015 if sentiment_bias == "bullish" else 0.01,
+                )
             min_resistance_score = max(dynamic_threshold + 0.5, 6.5)
             min_support_score = max(dynamic_threshold - 0.5, 5.5)
             if near_resistance and normalized_score < min_resistance_score:
