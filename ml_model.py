@@ -29,6 +29,9 @@ Key enhancements
   appropriate artefacts and returns a probability between 0 and 1 for
   a prospective trade.  Tree‑based models automatically output a
   probability from their ``predict_proba`` method.
+* **Non‑linear microstructure features** – The pipeline augments
+  imbalance inputs with squared and extreme‑value flags so linear
+  models can still react to threshold effects observed in order flow.
 
 These changes allow the agent to capture non‑linear interactions
 between features and to adapt more flexibly to the historical trade
@@ -145,6 +148,8 @@ _FEATURE_FALLBACKS: Dict[str, float] = {
     'volatility': 0.0,
     'htf_trend': 0.0,
     'order_imbalance': 0.0,
+    'order_imbalance_sq': 0.0,
+    'extreme_imbalance_flag': 0.0,
     'order_flow_score': 0.0,
     'order_flow_flag': 0.0,
     'cvd': 0.0,
@@ -229,6 +234,16 @@ def _normalise_feature_dict(data: Optional[Mapping[str, Any]]) -> Dict[str, floa
     return {key: _normalise_feature(key, value) for key, value in data.items()}
 
 
+def _augment_nonlinear_features(features: Mapping[str, float]) -> Dict[str, float]:
+    """Enrich the feature dictionary with non-linear transforms."""
+
+    enriched = dict(features)
+    order_imbalance = enriched.get('order_imbalance', 0.0)
+    enriched['order_imbalance_sq'] = order_imbalance ** 2
+    enriched['extreme_imbalance_flag'] = 1.0 if order_imbalance >= 0.9 else 0.0
+    return enriched
+
+
 def load_model_report() -> Dict[str, Any]:
     """Return the persisted model metadata if training artefacts exist."""
 
@@ -246,6 +261,7 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
     feature_order = [
         'score', 'confidence', 'session_id', 'btc_dom', 'fear_greed', 'sent_conf',
         'sent_bias', 'pattern_len', 'volatility', 'htf_trend', 'order_imbalance',
+        'order_imbalance_sq', 'extreme_imbalance_flag',
         'macro_indicator', 'macd', 'rsi', 'sma', 'atr', 'volume', 'macd_rsi',
         'order_flow_score', 'order_flow_flag', 'cvd', 'cvd_change', 'taker_buy_ratio',
         'trade_imbalance', 'aggressive_trade_rate', 'spoofing_intensity',
@@ -316,6 +332,7 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
             llm_decision_bool = _coerce_bool(approval_raw)
             base_features['llm_decision'] = 1.0 if llm_decision_bool is not False else 0.0
             normalised = _normalise_feature_dict(base_features)
+            normalised = _augment_nonlinear_features(normalised)
             features = [normalised.get(name, 0.0) for name in feature_order]
             feature_list.append(features)
             outcome = str(row.get("outcome", "loss")).lower()
@@ -632,7 +649,8 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> Optional[T
         feature_names = [
             'score', 'confidence', 'session_id', 'btc_dom',
             'fear_greed', 'sent_conf', 'sent_bias', 'pattern_len',
-            'volatility', 'htf_trend', 'order_imbalance', 'macro_indicator',
+            'volatility', 'htf_trend', 'order_imbalance', 'order_imbalance_sq',
+            'extreme_imbalance_flag', 'macro_indicator',
             'macd', 'rsi', 'sma', 'atr', 'volume', 'macd_rsi',
             'order_flow_score', 'order_flow_flag', 'cvd', 'cvd_change',
             'taker_buy_ratio', 'trade_imbalance', 'aggressive_trade_rate',
@@ -705,7 +723,8 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> Optional[T
             'feature_names': [
                 'score', 'confidence', 'session_id', 'btc_dom',
                 'fear_greed', 'sent_conf', 'sent_bias', 'pattern_len',
-                'volatility', 'htf_trend', 'order_imbalance', 'macro_indicator',
+                'volatility', 'htf_trend', 'order_imbalance', 'order_imbalance_sq',
+                'extreme_imbalance_flag', 'macro_indicator',
                 'macd', 'rsi', 'sma', 'atr', 'volume', 'macd_rsi',
                 'order_flow_score', 'order_flow_flag', 'cvd', 'cvd_change',
                 'taker_buy_ratio', 'trade_imbalance', 'aggressive_trade_rate',
@@ -799,7 +818,8 @@ def _prepare_feature_vector(
         'time_since_last': time_since_last,
         'recent_win_rate': recent_win_rate,
     }
-    return _normalise_feature_dict(base)
+    normalised = _normalise_feature_dict(base)
+    return _augment_nonlinear_features(normalised)
 
 
 def _assemble_feature_vector(
@@ -887,7 +907,8 @@ def predict_success_probability(
     overrides: Dict[str, float] = {}
     if feature_overrides:
         overrides.update({k: float(v) for k, v in feature_overrides.items()})
-    overrides.update(_normalise_feature_dict(micro_features))
+    micro_norm = _normalise_feature_dict(micro_features)
+    overrides.update(_augment_nonlinear_features(micro_norm))
     feature_names = metadata.get('feature_names') or list(_FEATURE_FALLBACKS.keys())
     missing_features = [name for name in _FEATURE_FALLBACKS.keys() if name not in feature_names]
     if missing_features:
