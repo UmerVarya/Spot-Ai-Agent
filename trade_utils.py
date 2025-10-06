@@ -13,6 +13,13 @@ from log_utils import setup_logger
 
 from weight_optimizer import optimize_indicator_weights
 
+try:  # confidence guard is optional during unit tests
+    from confidence_guard import get_adaptive_conf_threshold  # type: ignore
+except Exception:
+    def get_adaptive_conf_threshold() -> float:  # type: ignore
+        """Fallback confidence threshold when adaptive guard is unavailable."""
+        return 6.0
+
 from trade_storage import TRADE_HISTORY_FILE, load_trade_history_df  # shared trade log path
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
@@ -1655,11 +1662,27 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         mean_rev_total = max(mean_rev_score + structure_score - penalty_score, 0.0)
         trend_norm = round(((trend_total / max(trend_max + structure_max, 1e-6)) * 10 * reinforcement), 2)
         mean_rev_norm = round(((mean_rev_total / max(mean_rev_max + structure_max, 1e-6)) * 10 * reinforcement), 2)
+
+        # Require a higher fraction of the aggregate weight budget before activating.
+        base_activation_ratio = 0.6
+        base_threshold = round(base_activation_ratio * 10, 2)
+        try:
+            adaptive_threshold = float(get_adaptive_conf_threshold())
+        except Exception:
+            adaptive_threshold = base_threshold
+        dynamic_threshold = max(base_threshold, adaptive_threshold)
+        if atr_p == atr_p:
+            if atr_p >= 0.85:
+                dynamic_threshold -= 0.4
+            elif atr_p <= 0.35:
+                dynamic_threshold += 0.4
+        dynamic_threshold = float(max(5.5, min(dynamic_threshold, 7.5)))
+
         setup_type = None
         normalized_score = max(trend_norm, mean_rev_norm)
-        TREND_THRESHOLD = 5.0
-        MEAN_REV_THRESHOLD = 4.5
-        COUNTER_TREND_THRESHOLD = 4.0
+        TREND_THRESHOLD = max(5.0, dynamic_threshold - 0.5)
+        MEAN_REV_THRESHOLD = max(4.5, dynamic_threshold - 1.0)
+        COUNTER_TREND_THRESHOLD = max(4.0, dynamic_threshold - 1.5)
         if trend_norm >= TREND_THRESHOLD and trend_norm >= mean_rev_norm:
             normalized_score = trend_norm
             setup_type = "trend"
@@ -1674,7 +1697,7 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         elif sentiment_bias == "bearish" and normalized_score > 7.5 and setup_type:
             normalized_score -= 0.8
         normalized_score = round(normalized_score, 2)
-        direction = "long" if setup_type and normalized_score >= 4.5 else None
+        direction = "long" if setup_type and normalized_score >= dynamic_threshold else None
         position_size = get_position_size(normalized_score)
         zones = detect_support_resistance_zones(price_data)
         zones = zones.to_dict() if isinstance(zones, pd.Series) else (zones or {"support": [], "resistance": []})
@@ -1682,11 +1705,23 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         if direction == "long":
             near_resistance = is_price_near_zone(current_price, zones, 'resistance', 0.005)
             near_support = is_price_near_zone(current_price, zones, 'support', 0.015 if sentiment_bias == "bullish" else 0.01)
-            if near_resistance and normalized_score < 6.5:
-                logger.warning("Skipping %s: near resistance zone with score %.2f < 6.5", symbol, normalized_score)
+            min_resistance_score = max(dynamic_threshold + 0.5, 6.5)
+            min_support_score = max(dynamic_threshold - 0.5, 5.5)
+            if near_resistance and normalized_score < min_resistance_score:
+                logger.warning(
+                    "Skipping %s: near resistance zone with score %.2f < %.2f",
+                    symbol,
+                    normalized_score,
+                    min_resistance_score,
+                )
                 return 0, None, 0, None
-            if not near_support and normalized_score < 5.5:
-                logger.warning("Skipping %s: away from support with score %.2f < 5.5", symbol, normalized_score)
+            if not near_support and normalized_score < min_support_score:
+                logger.warning(
+                    "Skipping %s: away from support with score %.2f < %.2f",
+                    symbol,
+                    normalized_score,
+                    min_support_score,
+                )
                 return 0, None, 0, None
         if triggered_patterns:
             pattern_name = triggered_patterns[0]
@@ -1758,6 +1793,7 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             "setup_type": setup_type or "none",
             "trend_norm": _safe_float(trend_norm),
             "mean_reversion_norm": _safe_float(mean_rev_norm),
+            "activation_threshold": _safe_float(dynamic_threshold),
             **flow_snapshot,
         }
         price_data.attrs["signal_features"] = signal_snapshot
@@ -1789,6 +1825,7 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             "trend_norm": trend_norm,
             "mean_reversion_norm": mean_rev_norm,
             "setup_type": setup_type or "none",
+            "activation_threshold": dynamic_threshold,
         }
         log_signal(
             symbol,
