@@ -61,6 +61,7 @@ import numpy as np
 from rl_policy import RLPositionSizer
 from trade_utils import get_rl_state
 from volatility_regime import atr_percentile
+from realtime_signal_cache import RealTimeSignalCache
 
 
 def handle_exception(exc_type, exc_value, exc_traceback):
@@ -74,8 +75,11 @@ sys.excepthook = handle_exception
 
 # Maximum concurrent open trades
 MAX_ACTIVE_TRADES = 2
-# Interval between scans (in seconds)
-SCAN_INTERVAL = 15
+# Interval between scans (in seconds).  Default lowered to tighten reaction time.
+SCAN_INTERVAL = float(os.getenv("SCAN_INTERVAL", "3"))
+# Background refresh cadence for the real-time signal cache.
+SIGNAL_REFRESH_INTERVAL = float(os.getenv("SIGNAL_REFRESH_INTERVAL", "2.0"))
+SIGNAL_STALE_AFTER = float(os.getenv("SIGNAL_STALE_AFTER", str(SIGNAL_REFRESH_INTERVAL * 3)))
 # Interval between news fetches (in seconds)
 NEWS_INTERVAL = 3600
 RUN_DASHBOARD = os.getenv("RUN_DASHBOARD", "0") == "1"
@@ -251,6 +255,13 @@ def run_agent_loop() -> None:
         with open("symbol_scores.json", "w") as f:
             json.dump({}, f)
         logger.info("Initialized empty symbol_scores.json")
+    signal_cache = RealTimeSignalCache(
+        price_fetcher=get_price_data_async,
+        evaluator=evaluate_signal,
+        refresh_interval=SIGNAL_REFRESH_INTERVAL,
+        stale_after=SIGNAL_STALE_AFTER,
+    )
+    signal_cache.start()
     while True:
         try:
             logger.info("=== Scan @ %s ===", time.strftime('%Y-%m-%d %H:%M:%S'))
@@ -298,6 +309,7 @@ def run_agent_loop() -> None:
             skip_all, skip_alt, macro_reasons = macro_filter_decision(
                 btc_d, fg, sentiment_bias, sentiment_confidence
             )
+            signal_cache.update_context(sentiment_bias=sentiment_bias)
             if skip_all:
                 reason_text = " + ".join(macro_reasons) if macro_reasons else "unfavorable conditions"
                 logger.warning("Market unfavorable (%s). Skipping scan.", reason_text)
@@ -362,34 +374,29 @@ def run_agent_loop() -> None:
             symbols_to_fetch = [
                 sym for sym in top_symbols if not any(t.get("symbol") == sym for t in active_trades)
             ]
-            if symbols_to_fetch:
-                async def fetch_batch(symbols):
-                    tasks = [get_price_data_async(s) for s in symbols]
-                    return await asyncio.gather(*tasks, return_exceptions=True)
-
-                price_results = asyncio.run(fetch_batch(symbols_to_fetch))
-                price_map = {}
-                for sym, res in zip(symbols_to_fetch, price_results):
-                    if isinstance(res, Exception):
-                        logger.error("Error fetching %s: %s", sym, res, exc_info=True)
-                    else:
-                        price_map[sym] = res
-            else:
-                price_map = {}
+            signal_cache.update_universe(symbols_to_fetch)
             for symbol in symbols_to_fetch:
                 try:
-                    price_data = price_map.get(symbol)
+                    cached_signal = signal_cache.get(symbol)
+                    if cached_signal is None:
+                        logger.debug("No fresh cache entry for %s yet; skipping this cycle.", symbol)
+                        continue
+                    price_data = cached_signal.price_data
                     if price_data is None or price_data.empty or len(price_data) < 40:
                         logger.warning("Skipping %s due to insufficient data.", symbol)
                         continue
-                    score, direction, position_size, pattern_name = evaluate_signal(price_data, symbol)
+                    score = cached_signal.score
+                    direction = cached_signal.direction
+                    position_size = cached_signal.position_size
+                    pattern_name = cached_signal.pattern
                     logger.info(
-                        "%s: Score=%.2f, Direction=%s, Pattern=%s, PosSize=%s",
+                        "%s: Score=%.2f, Direction=%s, Pattern=%s, PosSize=%s (age=%.2fs)",
                         symbol,
                         score,
                         direction,
                         pattern_name,
                         position_size,
+                        cached_signal.age(),
                     )
                     symbol_scores[symbol] = {"score": score, "direction": direction}
                     if direction is None and score >= 4.5:
