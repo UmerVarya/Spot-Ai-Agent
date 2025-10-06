@@ -650,7 +650,13 @@ def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
             stream = get_market_stream()
             snapshot = stream.get_order_book(symbol, depth=limit)
             if snapshot:
-                last_update_ts = float(snapshot.get("last_event_ts", 0.0) or 0.0)
+                raw_last_update_ts = float(snapshot.get("last_event_ts", 0.0) or 0.0)
+                # Convert millisecond timestamps (used after the first stream update)
+                # to seconds to align with ``time.time()`` for the staleness check.
+                if raw_last_update_ts > 1e11:  # ~3,000 years in seconds
+                    last_update_ts = raw_last_update_ts / 1000.0
+                else:
+                    last_update_ts = raw_last_update_ts
                 is_stale = False
                 if last_update_ts:
                     age = now - last_update_ts
