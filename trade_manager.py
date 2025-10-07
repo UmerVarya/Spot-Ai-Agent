@@ -42,6 +42,7 @@ from trade_storage import (
 )
 from rl_policy import RLPositionSizer
 from microstructure import plan_execution, detect_sell_pressure
+from orderflow import detect_aggression
 
 # === Constants ===
 
@@ -563,6 +564,7 @@ def manage_trades() -> None:
         if tp3 is not None:
             trade['tp3'] = tp3
         status_flags = trade.setdefault('status', {})
+        status_flags.setdefault('flow_break_even', False)
         actions = []
         # Time-based exit: close trades exceeding the maximum holding duration
         primary_entry_time = trade.get('entry_time')
@@ -729,6 +731,73 @@ def manage_trades() -> None:
         if sell_pressure_signal:
             sell_pressure_signal["observed_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             trade["last_order_book_signal"] = sell_pressure_signal
+        flow_analysis = None
+        flow_features: dict[str, Any] = {}
+        cvd_strength: Optional[float] = None
+        flow_imbalance: Optional[float] = None
+        strong_buying_flow = False
+        try:
+            flow_analysis = detect_aggression(
+                price_data,
+                order_book=order_book_snapshot,
+                symbol=symbol,
+                live_trades=price_data.attrs.get("live_trades"),
+            )
+        except Exception as exc:
+            logger.debug("Order-flow analysis failed for %s: %s", symbol, exc, exc_info=True)
+            flow_analysis = None
+        if flow_analysis is not None:
+            flow_features = flow_analysis.features or {}
+            trade["last_flow_state"] = flow_analysis.state
+            trade["last_flow_features"] = flow_features
+            cvd_strength = _to_float(flow_features.get("cvd_change"))
+            if cvd_strength is None:
+                cvd_strength = _to_float(flow_features.get("cvd"))
+            flow_imbalance = _to_float(flow_features.get("trade_imbalance"))
+            if flow_imbalance is None:
+                flow_imbalance = _to_float(flow_features.get("order_book_imbalance"))
+            strong_buying_flow = (
+                flow_analysis.state == "buyers in control"
+                and cvd_strength is not None
+                and cvd_strength >= 0.25
+                and flow_imbalance is not None
+                and flow_imbalance >= 0.2
+            )
+        if (
+            direction == "long"
+            and entry is not None
+            and strong_buying_flow
+            and not status_flags.get("flow_break_even")
+        ):
+            break_even_price = entry
+            current_sl = _to_float(trade.get("sl"))
+            if current_sl is None or current_sl < break_even_price:
+                _update_stop_loss(trade, break_even_price)
+                _persist_active_snapshot(updated_trades, active_trades, index)
+                actions.append("flow_break_even")
+                logger.info(
+                    "%s strong order-flow buying detected; SL moved to break even (%.6f)",
+                    symbol,
+                    break_even_price,
+                )
+                cvd_display = (
+                    f"{cvd_strength:.3f}" if cvd_strength is not None else "n/a"
+                )
+                flow_display = (
+                    f"{flow_imbalance:.3f}" if flow_imbalance is not None else "n/a"
+                )
+                try:
+                    send_email(
+                        f"🔒 Break-even SL: {symbol}",
+                        (
+                            f"Order-flow buyers in control — stop moved to {break_even_price:.6f}.\n"
+                            f"CVD strength: {cvd_display}\n"
+                            f"Flow imbalance: {flow_display}"
+                        ),
+                    )
+                except Exception:
+                    logger.debug("Failed to send break-even notification for %s", symbol, exc_info=True)
+            status_flags["flow_break_even"] = True
         # Evaluate early exit conditions using the candle low to capture
         # sharp drops within the interval
         exit_now, reason = should_exit_early(trade, observed_price, price_data)

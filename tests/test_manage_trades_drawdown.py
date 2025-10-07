@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -62,6 +63,11 @@ def test_manage_trades_waits_for_post_entry_candle(monkeypatch):
     monkeypatch.setattr(trade_manager, "_update_rl", lambda *args, **kwargs: None)
     monkeypatch.setattr(trade_manager, "send_email", lambda *args, **kwargs: None)
     monkeypatch.setattr(trade_manager, "log_trade_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        trade_manager,
+        "detect_aggression",
+        lambda *args, **kwargs: SimpleNamespace(state="neutral", features={}),
+    )
     monkeypatch.setattr(
         trade_manager,
         "analyze_macro_sentiment",
