@@ -72,6 +72,7 @@ from microstructure import plan_execution
 from volatility_regime import atr_percentile
 from realtime_signal_cache import RealTimeSignalCache
 from auction_state import get_auction_state
+from alternative_data import get_alternative_data
 
 
 BREAKOUT_PATTERNS = {
@@ -103,6 +104,9 @@ NEWS_INTERVAL = 3600
 RUN_DASHBOARD = os.getenv("RUN_DASHBOARD", "0") == "1"
 USE_RL_POSITION_SIZER = False
 rl_sizer = RLPositionSizer() if USE_RL_POSITION_SIZER else None
+
+# Time-to-live for alternative data fetches
+ALT_DATA_REFRESH_INTERVAL = float(os.getenv("ALT_DATA_REFRESH_INTERVAL", "300"))
 
 # Explicit USD bounds for trade sizing (fixed at 500 USD per trade)
 MIN_TRADE_USD = 500.0
@@ -391,6 +395,59 @@ def run_agent_loop() -> None:
                             exc_info=True,
                         )
                         auction_state = "unknown"
+                    alt_features: dict[str, object] = {}
+                    alt_adjustment = 0.0
+                    try:
+                        alt_bundle = get_alternative_data(
+                            symbol, ttl=ALT_DATA_REFRESH_INTERVAL
+                        )
+                    except Exception as alt_exc:
+                        logger.warning(
+                            "Alternative data fetch failed for %s: %s",
+                            symbol,
+                            alt_exc,
+                        )
+                        alt_bundle = None
+                    if alt_bundle is not None:
+                        direction_for_alt = direction or "long"
+                        alt_adjustment = alt_bundle.score_adjustment(direction_for_alt)
+                        score += alt_adjustment
+                        alt_features = alt_bundle.to_features(direction_for_alt)
+                        enriched_snapshot = dict(signal_snapshot)
+                        enriched_snapshot.update(
+                            {
+                                "social_sentiment_bias": alt_features.get(
+                                    "social_bias", "neutral"
+                                ),
+                                "social_sentiment_score": alt_features.get("social_score"),
+                                "social_sentiment_confidence": alt_features.get(
+                                    "social_confidence"
+                                ),
+                                "social_posts_analyzed": alt_features.get("social_posts"),
+                                "onchain_score": alt_features.get("onchain_score"),
+                                "onchain_net_exchange_flow": alt_features.get(
+                                    "onchain_net_flow"
+                                ),
+                                "onchain_whale_ratio": alt_features.get(
+                                    "onchain_whale_ratio"
+                                ),
+                                "alternative_score_adjustment": alt_features.get(
+                                    "score_adjustment"
+                                ),
+                            }
+                        )
+                        signal_snapshot = enriched_snapshot
+                        price_data.attrs["signal_features"] = enriched_snapshot
+                        logger.info(
+                            "%s alt-data -> social=%s (score=%.2f conf=%.2f posts=%s) | on-chain=%.2f | adj=%.2f",
+                            symbol,
+                            alt_features.get("social_bias", "neutral"),
+                            float(alt_features.get("social_score") or 0.0),
+                            float(alt_features.get("social_confidence") or 0.0),
+                            alt_features.get("social_posts"),
+                            float(alt_features.get("onchain_score") or 0.0),
+                            alt_adjustment,
+                        )
                     pattern_lower = (pattern_name or "").lower()
                     setup_lower = (setup_type or "").lower() if isinstance(setup_type, str) else ""
                     is_breakout_setup = False
@@ -407,9 +464,10 @@ def run_agent_loop() -> None:
                         )
                         continue
                     logger.info(
-                        "%s: Score=%.2f, Direction=%s, Pattern=%s, PosSize=%s, AuctionState=%s (age=%.2fs)",
+                        "%s: Score=%.2f (alt_adj=%.2f), Direction=%s, Pattern=%s, PosSize=%s, AuctionState=%s (age=%.2fs)",
                         symbol,
                         score,
+                        alt_adjustment,
                         direction,
                         pattern_name,
                         position_size,
@@ -420,6 +478,9 @@ def run_agent_loop() -> None:
                         "score": score,
                         "direction": direction,
                         "auction_state": auction_state,
+                        "alternative_adjustment": alt_adjustment,
+                        "onchain_score": alt_features.get("onchain_score"),
+                        "social_score": alt_features.get("social_score"),
                     }
                     if direction is None and score >= 4.5:
                         logger.warning(
@@ -537,6 +598,8 @@ def run_agent_loop() -> None:
                             "setup_type": setup_type,
                             "volume_profile": volume_profile_result,
                             "lvn_level": lvn_touch,
+                            "alternative_data": alt_features,
+                            "alternative_adjustment": alt_adjustment,
                         }
                     )
                     logger.info(
@@ -566,6 +629,8 @@ def run_agent_loop() -> None:
                 price_data = trade_candidate['price_data']
                 auction_state = trade_candidate.get("auction_state", "unknown")
                 setup_type = trade_candidate.get("setup_type")
+                alt_features = trade_candidate.get("alternative_data") or {}
+                alt_adjustment = float(trade_candidate.get("alternative_adjustment", 0.0))
                 # Build indicator snapshot for LLM and brain
                 try:
                     indicators_df = calculate_indicators(price_data)
@@ -684,6 +749,14 @@ def run_agent_loop() -> None:
                     'order_imbalance': order_imb,
                     'macro_indicator': macro_ind,
                     'sent_bias': sentiment_bias,
+                    'social_sentiment_score': alt_features.get('social_score'),
+                    'social_sentiment_confidence': alt_features.get('social_confidence'),
+                    'social_sentiment_bias': alt_features.get('social_bias'),
+                    'social_posts_analyzed': alt_features.get('social_posts'),
+                    'onchain_score': alt_features.get('onchain_score'),
+                    'onchain_net_flow': alt_features.get('onchain_net_flow'),
+                    'onchain_whale_ratio': alt_features.get('onchain_whale_ratio'),
+                    'alternative_score_adjustment': alt_adjustment,
                     'order_flow_score': signal_snapshot.get('order_flow_score'),
                     'order_flow_flag': signal_snapshot.get('order_flow_flag'),
                     'cvd': signal_snapshot.get('cvd'),
