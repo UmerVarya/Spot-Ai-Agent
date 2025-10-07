@@ -196,13 +196,8 @@ async def analyze_news_with_llm_async(
                 response = await _post_groq_request(
                     client, payload_template, model_used=payload_template["model"]
                 )
-            except RuntimeError as err:
-                raise err
             except Exception as err:
-                if (
-                    isinstance(err, Exception)
-                    and payload_template["model"] != config.DEFAULT_GROQ_MODEL
-                ):
+                if payload_template["model"] != config.DEFAULT_GROQ_MODEL:
                     logger.warning(
                         "Groq model %s unavailable (%s). Retrying with fallback model %s.",
                         payload_template["model"],
