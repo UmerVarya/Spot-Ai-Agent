@@ -1,6 +1,7 @@
 import pandas as pd
-from trade_utils import evaluate_signal
+
 from brain import should_trade
+from trade_utils import evaluate_signal
 
 
 def test_evaluate_signal_missing_columns():
@@ -80,3 +81,21 @@ def test_should_trade_demands_more_in_low_vol():
         volatility=0.1,
     )
     assert result["decision"] is False
+
+
+def test_should_trade_skips_breakout_in_balanced_regime():
+    result = should_trade(
+        symbol="ETHUSDT",
+        score=6.5,
+        direction="long",
+        indicators={},
+        session="US",
+        pattern_name="flag",
+        orderflow="neutral",
+        sentiment={"bias": "neutral"},
+        macro_news={"safe": True, "reason": ""},
+        auction_state="balanced",
+        setup_type="trend",
+    )
+    assert result["decision"] is False
+    assert "balanced" in result["reason"].lower()
