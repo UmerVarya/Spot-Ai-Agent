@@ -101,11 +101,12 @@ SIGNAL_STALE_AFTER = float(os.getenv("SIGNAL_STALE_AFTER", str(SIGNAL_REFRESH_IN
 # Interval between news fetches (in seconds)
 NEWS_INTERVAL = 3600
 RUN_DASHBOARD = os.getenv("RUN_DASHBOARD", "0") == "1"
-rl_sizer = RLPositionSizer()
+USE_RL_POSITION_SIZER = False
+rl_sizer = RLPositionSizer() if USE_RL_POSITION_SIZER else None
 
-# Explicit USD bounds for trade sizing
-MIN_TRADE_USD = 100.0
-MAX_TRADE_USD = 200.0
+# Explicit USD bounds for trade sizing (fixed at 500 USD per trade)
+MIN_TRADE_USD = 500.0
+MAX_TRADE_USD = 500.0
 
 logger.info(
     "Paths: LOG_FILE=%s TRADE_HISTORY=%s ACTIVE_TRADES=%s REJECTED_TRADES=%s LEARNING_LOG=%s",
@@ -118,45 +119,16 @@ logger.info(
 
 
 def calculate_dynamic_trade_size(confidence: float, ml_prob: float, score: float) -> float:
-    """Return trade notional in USDT based on confidence signals.
+    """Return the fixed 500 USDT notional per trade.
 
-    The agent expresses confidence on a 0-10 scale, the ML model supplies a
-    success probability in ``[0, 1]`` and the technical analysis module
-    outputs a normalized score on a 0-10 scale.  We map these inputs to a
-    dollar *position size* between 100 and 200 USDT.  Values above the upper
-    thresholds saturate at 200 and values below the lower bounds default to
-    100.
-
-    Parameters
-    ----------
-    confidence : float
-        Final blended confidence score on a 0-10 scale.
-    ml_prob : float
-        Predicted success probability from the ML model.
-    score : float
-        Technical analysis score on a 0-10 scale.
-
-    Returns
-    -------
-    float
-        Trade size in USDT.
+    The previous implementation scaled trade size based on confidence
+    signals.  The updated strategy standardises exposure, so we simply
+    return the configured constant.  ``confidence``, ``ml_prob`` and
+    ``score`` are retained in the signature to avoid touching callers.
     """
 
-    # Define the ranges over which size scales
-    min_conf, max_conf = 4.5, 8.0
-    min_prob, max_prob = 0.5, 0.7
-    min_score, max_score = 4.5, 8.0
-
-    conf_norm = (confidence - min_conf) / (max_conf - min_conf)
-    prob_norm = (ml_prob - min_prob) / (max_prob - min_prob)
-    score_norm = (score - min_score) / (max_score - min_score)
-    conf_norm = max(0.0, min(1.0, conf_norm))
-    prob_norm = max(0.0, min(1.0, prob_norm))
-    score_norm = max(0.0, min(1.0, score_norm))
-
-    edge = (conf_norm + prob_norm + score_norm) / 3.0
-    trade_usd = MIN_TRADE_USD + edge * (MAX_TRADE_USD - MIN_TRADE_USD)
-    return max(MIN_TRADE_USD, min(MAX_TRADE_USD, trade_usd))
+    _ = (confidence, ml_prob, score)  # explicitly unused in fixed-sizing mode
+    return MIN_TRADE_USD
 
 
 def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: float):
@@ -669,6 +641,19 @@ def run_agent_loop() -> None:
                 if order_imb_ratio != order_imb_ratio:
                     order_imb_ratio = 0.0
                 order_imb = float(order_imb_ratio) * 100.0
+                orderflow_metadata = {
+                    "state": getattr(flow_analysis, "state", "neutral") or "neutral",
+                    "features": {},
+                }
+                for key, value in (flow_features or {}).items():
+                    try:
+                        numeric = float(value)
+                    except (TypeError, ValueError):
+                        numeric = None
+                    if numeric is None or not math.isfinite(numeric):
+                        orderflow_metadata["features"][key] = None
+                    else:
+                        orderflow_metadata["features"][key] = numeric
                 macro_ind = (
                     100.0
                     if sentiment_bias == "bullish"
@@ -842,7 +827,9 @@ def run_agent_loop() -> None:
                             atr_val = entry_price * 0.02
                             sl_dist = atr_val * 2.0
                         state = get_rl_state(sym_vol_pct)
-                        mult = rl_sizer.select_multiplier(state)
+                        mult = 1.0
+                        if USE_RL_POSITION_SIZER and rl_sizer is not None:
+                            mult = rl_sizer.select_multiplier(state)
                         trade_usd *= mult
                         if micro_plan and micro_plan.get("size_multiplier") is not None:
                             try:
@@ -853,12 +840,27 @@ def run_agent_loop() -> None:
                         position_size = round(max(trade_usd / entry_price, 0), 6)
                         volume_profile_summary = None
                         poc_price: Optional[float] = None
+                        poc_target_price: Optional[float] = None
+                        lvn_entry_value: Optional[float] = None
+                        lvn_stop_price: Optional[float] = None
                         if volume_profile_result is not None:
                             volume_profile_summary = volume_profile_result.to_dict()
                             try:
                                 poc_price = float(volume_profile_result.poc)
+                                if math.isfinite(poc_price):
+                                    poc_target_price = round(poc_price, 6)
                             except (TypeError, ValueError):
                                 poc_price = None
+                            try:
+                                touched_lvn = volume_profile_result.touched_lvn(
+                                    close=price_data["close"].iloc[-1],
+                                    high=price_data["high"].iloc[-1],
+                                    low=price_data["low"].iloc[-1],
+                                )
+                            except Exception:
+                                touched_lvn = None
+                            if touched_lvn is not None and math.isfinite(touched_lvn):
+                                lvn_entry_value = round(float(touched_lvn), 6)
                         sl = round(entry_price - sl_dist, 6)
                         tp1 = round(entry_price + atr_val * 1.0, 6)
                         tp2 = round(entry_price + atr_val * 2.0, 6)
@@ -871,12 +873,18 @@ def run_agent_loop() -> None:
                                 candidate_sl = float(failed_low) - buffer
                                 if candidate_sl > 0:
                                     sl = round(candidate_sl, 6)
+                                    lvn_stop_price = sl
                             if poc_price is not None and math.isfinite(poc_price):
                                 if poc_price > entry_price * 1.0005:
                                     tp1 = round(poc_price, 6)
                                     tp2 = None
                                     tp3 = None
                                     use_volume_tp = True
+                                    poc_target_price = tp1
+                        if lvn_entry_value is None and isinstance(lvn_level, (int, float)) and math.isfinite(lvn_level):
+                            lvn_entry_value = round(float(lvn_level), 6)
+                        if volume_profile_result is not None and lvn_stop_price is None:
+                            lvn_stop_price = sl
                         htf_trend = htf_trend_pct
                         risk_amount = position_size * sl_dist
                         # Determine the high-level strategy label.  The
@@ -953,7 +961,11 @@ def run_agent_loop() -> None:
                             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "news_summary": decision_obj.get("news_summary", ""),
                             "volume_profile": volume_profile_summary,
-                            "lvn_entry_level": float(lvn_level) if isinstance(lvn_level, (int, float)) else None,
+                            "lvn_entry_level": lvn_entry_value,
+                            "lvn_stop": lvn_stop_price,
+                            "poc_target": poc_target_price,
+                            "auction_state": auction_state,
+                            "orderflow_analysis": orderflow_metadata,
                             "take_profit_strategy": "volume_poc" if use_volume_tp else "atr_multiples",
                         }
                         if micro_plan:
@@ -971,7 +983,14 @@ def run_agent_loop() -> None:
                             tp3,
                         )
                         # Add to active trades and persist if not a duplicate
-                        if create_new_trade(new_trade):
+                        if create_new_trade(
+                            new_trade,
+                            stop_price=lvn_stop_price,
+                            target_price=poc_target_price,
+                            auction_state=auction_state,
+                            lvn_entry_level=lvn_entry_value,
+                            orderflow_analysis=orderflow_metadata,
+                        ):
                             active_trades.append(new_trade)
                             # Do NOT log the open trade as a completed trade.  It will be logged upon exit by trade_manager.py.
                             save_active_trades(active_trades)

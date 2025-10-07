@@ -1310,7 +1310,15 @@ def _select_indicator_params(vol_percentile: float | None) -> tuple[str, dict[st
     return "mid", base_params
 
 
-def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: str = "neutral"):
+def evaluate_signal(
+    price_data: pd.DataFrame,
+    symbol: str = "",
+    sentiment_bias: str = "neutral",
+    auction_state: Optional[str] = None,
+    volume_profile: Optional[Any] = None,
+    lvn_entry_level: Optional[float] = None,
+    poc_target: Optional[float] = None,
+):
     """Evaluate a trading signal given a price DataFrame."""
     try:
         if price_data is None or price_data.empty or len(price_data) < 40:
@@ -1325,6 +1333,49 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
 
         price_data = price_data.replace([np.inf, -np.inf], np.nan)
         price_data = price_data.dropna(subset=['high', 'low', 'close'])
+
+        def _maybe_float(value: Any) -> Optional[float]:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not np.isfinite(number):
+                return None
+            return number
+
+        if auction_state is not None:
+            price_data.attrs["auction_state"] = str(auction_state)
+
+        poc_candidate = _maybe_float(poc_target)
+        volume_profile_summary: Optional[Dict[str, Any]] = None
+        if volume_profile is not None:
+            if hasattr(volume_profile, "to_dict"):
+                try:
+                    volume_profile_summary = volume_profile.to_dict()
+                except Exception:
+                    volume_profile_summary = None
+            elif isinstance(volume_profile, Mapping):
+                volume_profile_summary = dict(volume_profile)
+            if volume_profile_summary is not None:
+                price_data.attrs["volume_profile"] = volume_profile_summary
+            poc_from_profile = getattr(volume_profile, "poc", None)
+            if poc_candidate is None:
+                poc_candidate = _maybe_float(poc_from_profile)
+            lvns = getattr(volume_profile, "lvns", None)
+            if isinstance(lvns, (list, tuple)) and lvns:
+                cleaned_lvns = [
+                    float(level)
+                    for level in lvns
+                    if _maybe_float(level) is not None
+                ]
+                if cleaned_lvns:
+                    price_data.attrs["volume_profile_lvns"] = cleaned_lvns
+
+        lvn_candidate = _maybe_float(lvn_entry_level)
+        if lvn_candidate is not None:
+            price_data.attrs["lvn_entry_level"] = lvn_candidate
+        if poc_candidate is not None:
+            price_data.attrs["poc_target"] = poc_candidate
 
         hourly_bar = price_data.attrs.get("hourly_bar")
         if isinstance(hourly_bar, pd.DataFrame) and not hourly_bar.empty:
@@ -1895,6 +1946,9 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             "trend_norm": _safe_float(trend_norm),
             "mean_reversion_norm": _safe_float(mean_rev_norm),
             "activation_threshold": _safe_float(dynamic_threshold),
+            "auction_state": str(price_data.attrs.get("auction_state", auction_state or "unknown")),
+            "poc_target": _safe_float(price_data.attrs.get("poc_target", poc_candidate)),
+            "lvn_entry_level": _safe_float(price_data.attrs.get("lvn_entry_level", lvn_candidate)),
             **flow_snapshot,
         }
         price_data.attrs["signal_features"] = signal_snapshot
