@@ -1,29 +1,24 @@
 """Utilities for combining specialist financial language models.
 
-The original pipeline relied predominantly on FinBERT with a secondary
-FinLlama opinion.  Recent research shows that FinLlama and newer open
-models such as FinGPT are markedly more numerically aware and resilient
-to long-form macro headlines than FinBERT.  This module therefore
-provides:
+The pipeline now focuses on FinLlama and FinGPT which validation
+experiments show to be more numerically aware and resilient than the
+retired FinBERT component.  This module therefore provides:
 
-* Lightweight wrappers for FinBERT (classification), FinLlama and
-  FinGPT (instruction-tuned causal LLMs) with graceful degradation when
-  the heavy dependencies are missing.
-* Dynamic fusion weights that default to emphasising FinLlama and FinGPT
-  but can be recalibrated using a historical validation set.
+* Lightweight wrappers for FinLlama and FinGPT (instruction-tuned causal
+  LLMs) with graceful degradation when the heavy dependencies are
+  missing.
+* Dynamic fusion weights that default to an even split between FinLlama
+  and FinGPT but can be recalibrated using a historical validation set.
 * Helper routines that evaluate each model and search a simplex grid of
   candidate weights so the fused score can be tuned as new financial LLMs
   appear in 2024–2025.
 
 Mapping:
-    * FinBERT expectation ``s_fb`` lies in ``[-1, 1]`` and is derived from
-      positive minus negative probabilities.  ``c_fb`` is the mean maximum
-      class probability across headlines.
     * FinLlama sentiment ``s_fl`` is in ``{-1, 0, 1}`` (bearish, neutral,
       bullish) with confidence ``c_fl`` between ``0`` and ``1``.
     * FinGPT sentiment ``s_fg`` mirrors FinLlama's output schema.
-    * Fused score defaults to ``0.2*s_fb + 0.45*s_fl + 0.35*s_fg`` with
-      configurable weights that always renormalise to one.
+    * Fused score defaults to ``0.5*s_fl + 0.5*s_fg`` with configurable
+      weights that always renormalise to one.
 """
 
 from __future__ import annotations
@@ -41,28 +36,21 @@ logger = logging.getLogger(__name__)
 try:  # optional heavy dependency
     from transformers import (
         AutoModelForCausalLM,
-        AutoModelForSequenceClassification,
         AutoTokenizer,
-        pipeline,
     )
 except Exception:  # pragma: no cover - handles absence gracefully
     AutoModelForCausalLM = None
-    AutoModelForSequenceClassification = None
     AutoTokenizer = None
-    pipeline = None
     logger.warning("transformers not available; returning neutral sentiment")
 
-FINBERT_MODEL = "yiyanghkust/finbert-tone"
 FINLLAMA_MODEL = "kaiokendev/FinLlama-7B"  # placeholder model name
 FINGPT_MODEL = "AI4Finance/FinGPT-4B-2024"  # released 2024, instruction tuned
 
 DEFAULT_FUSION_WEIGHTS: Dict[str, float] = {
-    "finbert": 0.20,
-    "finllama": 0.45,
-    "fingpt": 0.35,
+    "finllama": 0.5,
+    "fingpt": 0.5,
 }
 
-_finbert_pipe = None
 _finllama_model = None
 _finllama_tokenizer = None
 _fingpt_model = None
@@ -76,41 +64,6 @@ class SentimentResult:
     score: float
     confidence: float
     rationale: Optional[str] = None
-
-
-def _load_finbert() -> None:
-    """Load FinBERT pipeline if possible."""
-    global _finbert_pipe
-    if _finbert_pipe is None and pipeline is not None:
-        try:
-            _finbert_pipe = pipeline(
-                "text-classification", model=FINBERT_MODEL, return_all_scores=True
-            )
-        except Exception as exc:  # pragma: no cover - best effort
-            logger.warning("Failed to load FinBERT: %s", exc)
-
-
-def _finbert_expectation(headlines: List[str]) -> Tuple[float, float, List[Dict[str, float]]]:
-    """Compute expectation ``s_fb`` and confidence ``c_fb`` from FinBERT."""
-    _load_finbert()
-    if _finbert_pipe is None:
-        return 0.0, 0.0, []
-    expectations: List[float] = []
-    confidences: List[float] = []
-    details: List[Dict[str, float]] = []
-    for hl in headlines:
-        result = _finbert_pipe(hl)[0]
-        probs = {item["label"].lower(): item["score"] for item in result}
-        pos = probs.get("positive", 0.0)
-        neg = probs.get("negative", 0.0)
-        expectation = pos - neg  # [-1,1]
-        confidence = max(probs.values()) if probs else 0.0
-        expectations.append(expectation)
-        confidences.append(confidence)
-        details.append(probs)
-    s_fb = sum(expectations) / len(expectations) if expectations else 0.0
-    c_fb = sum(confidences) / len(confidences) if confidences else 0.0
-    return s_fb, c_fb, details
 
 
 def _load_finllama() -> None:
@@ -216,14 +169,10 @@ def analyze_headlines(
     """Return fused sentiment analysis for a list of headlines."""
 
     weights = _normalise_weights(fusion_weights or DEFAULT_FUSION_WEIGHTS)
-    s_fb, c_fb, fb_details = _finbert_expectation(headlines)
     s_fl, c_fl, rationale_fl = _finllama_sentiment(headlines)
     s_fg, c_fg, rationale_fg = _fingpt_sentiment(headlines)
 
     model_outputs: Dict[str, SentimentResult] = {
-        "finbert": SentimentResult(
-            score=s_fb, confidence=c_fb, rationale=json.dumps(fb_details)
-        ),
         "finllama": SentimentResult(score=float(s_fl), confidence=c_fl, rationale=rationale_fl),
         "fingpt": SentimentResult(score=float(s_fg), confidence=c_fg, rationale=rationale_fg),
     }
@@ -233,13 +182,13 @@ def analyze_headlines(
     fused_conf = sum(
         model_outputs[name].confidence * weights.get(name, 0.0) for name in weights
     )
-    return {
-        "finbert": {"score": s_fb, "confidence": c_fb, "details": fb_details},
+    result: Dict[str, Dict[str, float]] = {
         "finllama": {"score": s_fl, "confidence": c_fl, "rationale": rationale_fl},
         "fingpt": {"score": s_fg, "confidence": c_fg, "rationale": rationale_fg},
         "fused": {"score": fused, "bias": bias, "confidence": fused_conf},
         "weights": dict(weights),
     }
+    return result
 
 
 def _simplex_grid(step: float, labels: Sequence[str]) -> Iterable[Dict[str, float]]:
@@ -275,7 +224,7 @@ def evaluate_models(
     for headlines, target in validation_set:
         result = analyzer(headlines, fusion_weights=fusion_weights)
         fused_errors.append(result["fused"]["score"] - target)
-        for key in ("finbert", "finllama", "fingpt"):
+        for key in ("finllama", "fingpt"):
             if key not in result:
                 continue
             per_model_errors.setdefault(key, []).append(result[key]["score"] - target)
@@ -302,7 +251,7 @@ def calibrate_fusion_weights(
 ) -> Dict[str, float]:
     """Search a coarse grid for fusion weights with the lowest MAE."""
 
-    labels = ["finbert", "finllama", "fingpt"]
+    labels = ["finllama", "fingpt"]
     base = _normalise_weights(base_weights or DEFAULT_FUSION_WEIGHTS)
     best_weights = dict(base)
     best_mae = float("inf")
