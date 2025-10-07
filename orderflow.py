@@ -54,6 +54,107 @@ def _normalise_volume_ratio(value: float) -> float:
     return _clip_unit(value - 1.0)
 
 
+def _compute_absorption_metrics(
+    footprint_bins: List[Dict[str, float]],
+    df: pd.DataFrame,
+    bin_size: float,
+) -> Tuple[float, float]:
+    if not footprint_bins or df is None or df.empty or "close" not in df:
+        return float("nan"), float("nan")
+
+    recent = df.tail(min(len(df), 20))
+    closes = pd.to_numeric(recent["close"], errors="coerce").dropna()
+    if closes.empty:
+        return float("nan"), float("nan")
+
+    start_price = float(closes.iloc[0])
+    current_price = float(closes.iloc[-1])
+    if start_price <= 0 or current_price <= 0:
+        return float("nan"), float("nan")
+
+    if "high" in recent:
+        highs = pd.to_numeric(recent["high"], errors="coerce")
+        price_high = float(highs.max()) if not highs.empty else current_price
+    else:
+        price_high = float(closes.max())
+    if not math.isfinite(price_high) or price_high <= 0:
+        price_high = current_price
+
+    if "low" in recent:
+        lows = pd.to_numeric(recent["low"], errors="coerce")
+        price_low = float(lows.min()) if not lows.empty else current_price
+    else:
+        price_low = float(closes.min())
+    if not math.isfinite(price_low) or price_low <= 0:
+        price_low = current_price
+
+    total_buy = 0.0
+    total_sell = 0.0
+    deltas: List[Tuple[float, float]] = []
+
+    for entry in footprint_bins:
+        price = float(entry.get("price", 0.0))
+        buy_vol = float(entry.get("buy_volume", 0.0))
+        sell_vol = float(entry.get("sell_volume", 0.0))
+        if not math.isfinite(price) or price <= 0:
+            continue
+        if not math.isfinite(buy_vol):
+            buy_vol = 0.0
+        if not math.isfinite(sell_vol):
+            sell_vol = 0.0
+        total_buy += max(buy_vol, 0.0)
+        total_sell += max(sell_vol, 0.0)
+        delta = buy_vol - sell_vol
+        if math.isfinite(delta):
+            deltas.append((price, delta))
+
+    total_volume = total_buy + total_sell
+    if total_volume <= 0 or not deltas:
+        return float("nan"), float("nan")
+
+    delta_high = max(delta for _, delta in deltas)
+    delta_low = min(delta for _, delta in deltas)
+    delta_range = delta_high - delta_low
+
+    if not math.isfinite(delta_range):
+        return float("nan"), float("nan")
+
+    norm_factor = max(total_volume, 1e-9)
+    delta_high_norm = delta_high / norm_factor
+    delta_low_norm = delta_low / norm_factor
+    delta_range_norm = delta_range / norm_factor
+
+    price_range = max(price_high - price_low, 0.0)
+    price_range_norm = price_range / max(start_price, 1e-9)
+    price_up_move = max(price_high - start_price, 0.0) / max(start_price, 1e-9)
+    price_down_move = max(start_price - price_low, 0.0) / max(start_price, 1e-9)
+    price_threshold = 0.0
+    if bin_size > 0:
+        price_threshold = (bin_size / current_price) if current_price > 0 else 0.0
+
+    delta_divergence = delta_range_norm - price_range_norm
+
+    ask_absorption_strength = max(0.0, delta_high_norm - max(price_up_move, price_threshold))
+    bid_absorption_strength = min(0.0, delta_low_norm + max(price_down_move, price_threshold))
+
+    if ask_absorption_strength >= abs(bid_absorption_strength):
+        absorption_score = ask_absorption_strength
+    else:
+        absorption_score = bid_absorption_strength
+
+    if math.isfinite(delta_divergence):
+        delta_divergence = _clip_unit(delta_divergence)
+    else:
+        delta_divergence = float("nan")
+
+    if math.isfinite(absorption_score):
+        absorption_score = _clip_unit(absorption_score)
+    else:
+        absorption_score = float("nan")
+
+    return delta_divergence, absorption_score
+
+
 def _clone_order_book(order_book: OrderBook, depth: int = 10) -> OrderBook:
     return {
         "bids": [(float(p), float(q)) for p, q in order_book.get("bids", [])[:depth]],
@@ -137,6 +238,8 @@ def compute_orderflow_features(
         "trade_imbalance": float("nan"),
         "aggressive_trade_rate": float("nan"),
         "spoofing_intensity": float("nan"),
+        "delta_divergence": float("nan"),
+        "absorption_score": float("nan"),
     }
 
     if df is None or df.empty:
@@ -169,6 +272,15 @@ def compute_orderflow_features(
         if math.isfinite(trade_rate):
             # Normalise trade-rate to roughly [-1, 1] using tanh scaling.
             features["aggressive_trade_rate"] = _clip_unit(math.tanh(trade_rate / 1.5))
+
+        footprint_bins = live_trades.get("price_footprint_bins")
+        bin_size = float(live_trades.get("price_footprint_bin_size", 0.0))
+        if isinstance(footprint_bins, list) and footprint_bins:
+            divergence, absorption = _compute_absorption_metrics(footprint_bins, df, bin_size)
+            if divergence == divergence:
+                features["delta_divergence"] = divergence
+            if absorption == absorption:
+                features["absorption_score"] = absorption
 
     cols = set(df.columns)
     has_taker = {"volume", "taker_buy_base", "taker_buy_quote"}.issubset(cols)
