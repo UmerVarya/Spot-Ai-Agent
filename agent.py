@@ -29,7 +29,12 @@ from typing import Optional
 import config
 import json
 import threading
-from fetch_news import fetch_news, run_news_fetcher  # noqa: F401
+from fetch_news import (
+    fetch_news,  # noqa: F401
+    run_news_fetcher,  # noqa: F401
+    run_news_fetcher_async,
+    analyze_news_with_llm_async,
+)
 from trade_utils import simulate_slippage, estimate_commission  # noqa: F401
 from trade_utils import (
     get_top_symbols,
@@ -51,7 +56,10 @@ from trade_storage import (
 )
 from notifier import send_email, log_rejection, REJECTED_TRADES_FILE
 from trade_logger import TRADE_LEARNING_LOG_FILE
-from brain import should_trade
+from brain import (
+    prepare_trade_decision,
+    finalize_trade_decision,
+)
 from sentiment import get_macro_sentiment
 from btc_dominance import get_btc_dominance
 from fear_greed import get_fear_greed_index
@@ -62,6 +70,7 @@ from volume_profile import (
     compute_reversion_leg_volume_profile,
 )
 from diversify import select_diversified_signals
+from groq_llm import async_batch_llm_judgment
 from ml_model import predict_success_probability
 from sequence_model import predict_next_return, train_sequence_model, SEQ_PKL
 from drawdown_guard import is_trading_blocked
@@ -120,6 +129,19 @@ logger.info(
     REJECTED_TRADES_FILE,
     TRADE_LEARNING_LOG_FILE,
 )
+
+
+def _run_async_task(coro_factory):
+    """Safely execute an async coroutine factory from the synchronous agent loop."""
+
+    try:
+        return asyncio.run(coro_factory())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro_factory())
+        finally:
+            loop.close()
 
 
 def calculate_dynamic_trade_size(confidence: float, ml_prob: float, score: float) -> float:
@@ -332,6 +354,20 @@ def run_agent_loop() -> None:
                 macro_reason_text = " + ".join(macro_reasons) if macro_reasons else "macro caution"
             else:
                 macro_reason_text = ""
+
+            macro_news_assessment = {"safe": True, "reason": "No events analyzed"}
+            macro_news_summary = ""
+            try:
+                events = _run_async_task(lambda: run_news_fetcher_async())
+                if events:
+                    macro_news_assessment = _run_async_task(
+                        lambda: analyze_news_with_llm_async(events)
+                    )
+                macro_news_summary = str(macro_news_assessment.get("reason", ""))
+            except Exception as news_exc:
+                logger.debug("Macro news analysis unavailable: %s", news_exc, exc_info=True)
+                macro_news_assessment = {"safe": True, "reason": "LLM error"}
+                macro_news_summary = ""
             # Load active trades and ensure only long trades remain (spot mode)
             active_trades_raw = load_active_trades()
             active_trades = []
@@ -618,10 +654,10 @@ def run_agent_loop() -> None:
             opened_count = 0
             # Pass allowed_new as max_trades to avoid misassigning correlation threshold
             selected = select_diversified_signals(potential_trades, max_trades=allowed_new)
-            # Iterate over selected trade candidates and open trades
+            pending_trade_contexts: list[dict] = []
+            batched_prompts: dict[str, str] = {}
+
             for trade_candidate in selected:
-                if opened_count >= allowed_new:
-                    break
                 symbol = trade_candidate['symbol']
                 score = trade_candidate['score']
                 position_size = trade_candidate['position_size']
@@ -631,7 +667,6 @@ def run_agent_loop() -> None:
                 setup_type = trade_candidate.get("setup_type")
                 alt_features = trade_candidate.get("alternative_data") or {}
                 alt_adjustment = float(trade_candidate.get("alternative_adjustment", 0.0))
-                # Build indicator snapshot for LLM and brain
                 try:
                     indicators_df = calculate_indicators(price_data)
                     indicators = {
@@ -672,7 +707,6 @@ def run_agent_loop() -> None:
                 except Exception:
                     pass
                 indicators['next_return'] = next_ret
-                # Precompute order flow once for reuse
                 flow_analysis = trade_candidate.get("orderflow")
                 if flow_analysis is None:
                     flow_analysis = detect_aggression(
@@ -724,7 +758,6 @@ def run_agent_loop() -> None:
                     if sentiment_bias == "bullish"
                     else -100.0 if sentiment_bias == "bearish" else 0.0
                 )
-                # Symbol-specific volatility
                 try:
                     sym_vol_pct = atr_percentile(
                         price_data["high"], price_data["low"], price_data["close"]
@@ -785,12 +818,9 @@ def run_agent_loop() -> None:
                     micro_feature_payload['volume_poc'] = None
                     micro_feature_payload['lvn_level'] = None
                     micro_feature_payload['volume_profile_leg_type'] = None
-                # Ask the brain whether to take the trade
-                # Call the brain with error handling.  If the brain throws an
-                # exception, record it as the reason for skipping so users
-                # understand why a potential trade was vetoed.
+
                 try:
-                    decision_obj = should_trade(
+                    pre_result, prepared = prepare_trade_decision(
                         symbol=symbol,
                         score=score,
                         direction="long",
@@ -799,19 +829,104 @@ def run_agent_loop() -> None:
                         pattern_name=pattern_name,
                         orderflow=orderflow,
                         sentiment=sentiment,
-                        macro_news={"safe": True, "reason": ""},
+                        macro_news=macro_news_assessment,
                         volatility=sym_vol_pct,
                         fear_greed=fg,
                         auction_state=auction_state,
                         setup_type=setup_type if isinstance(setup_type, str) else None,
+                        news_summary=macro_news_summary,
                     )
                 except Exception as e:
-                    logger.error("Error in should_trade for %s: %s", symbol, e, exc_info=True)
-                    decision_obj = {
+                    logger.error("Error preparing trade decision for %s: %s", symbol, e, exc_info=True)
+                    pre_result = {
                         "decision": False,
                         "confidence": 0.0,
-                        "reason": f"Error in should_trade(): {e}",
+                        "reason": f"Error in prepare_trade_decision(): {e}",
                     }
+                    prepared = None
+
+                context = {
+                    "symbol": symbol,
+                    "score": score,
+                    "position_size": position_size,
+                    "pattern_name": pattern_name,
+                    "price_data": price_data,
+                    "auction_state": auction_state,
+                    "setup_type": setup_type if isinstance(setup_type, str) else None,
+                    "alt_features": alt_features,
+                    "alt_adjustment": alt_adjustment,
+                    "indicators": indicators,
+                    "indicators_df": indicators_df,
+                    "volume_profile_result": volume_profile_result,
+                    "lvn_level": lvn_level,
+                    "orderflow": orderflow,
+                    "orderflow_metadata": orderflow_metadata,
+                    "micro_feature_payload": micro_feature_payload,
+                    "sym_vol_pct": sym_vol_pct,
+                    "sym_vol": sym_vol,
+                    "htf_trend_pct": htf_trend_pct,
+                    "signal_snapshot": signal_snapshot,
+                    "macro_ind": macro_ind,
+                    "pre_result": pre_result,
+                    "prepared": prepared,
+                }
+                pending_trade_contexts.append(context)
+                if prepared is not None:
+                    batched_prompts[symbol] = prepared.advisor_prompt
+
+            llm_batch_results: dict[str, str] = {}
+            if batched_prompts:
+                try:
+                    llm_batch_results = _run_async_task(
+                        lambda: async_batch_llm_judgment(batched_prompts)
+                    )
+                except Exception as batch_exc:
+                    logger.error("Batch LLM evaluation failed: %s", batch_exc, exc_info=True)
+                    llm_batch_results = {
+                        symbol: "LLM error: batch request failed"
+                        for symbol in batched_prompts
+                    }
+
+            # Iterate over prepared contexts and open trades once LLM responses are ready
+            for context in pending_trade_contexts:
+                if opened_count >= allowed_new:
+                    break
+
+                symbol = context["symbol"]
+                prepared = context["prepared"]
+                pre_result = context["pre_result"]
+
+                if prepared is None:
+                    if not isinstance(pre_result, dict):
+                        logger.error("No decision object generated for %s; skipping", symbol)
+                        continue
+                    decision_obj = pre_result
+                else:
+                    response = llm_batch_results.get(
+                        symbol, "LLM error: missing batch response"
+                    )
+                    decision_obj = finalize_trade_decision(prepared, response)
+
+                score = context["score"]
+                position_size = context["position_size"]
+                pattern_name = context["pattern_name"]
+                price_data = context["price_data"]
+                auction_state = context["auction_state"]
+                setup_type = context["setup_type"]
+                alt_features = context["alt_features"]
+                indicators = context["indicators"]
+                indicators_df = context["indicators_df"]
+                volume_profile_result = context["volume_profile_result"]
+                lvn_level = context["lvn_level"]
+                orderflow = context["orderflow"]
+                orderflow_metadata = context["orderflow_metadata"]
+                micro_feature_payload = context["micro_feature_payload"]
+                sym_vol_pct = context["sym_vol_pct"]
+                sym_vol = context["sym_vol"]
+                htf_trend_pct = context["htf_trend_pct"]
+                signal_snapshot = context["signal_snapshot"]
+                macro_ind = context["macro_ind"]
+
                 decision = bool(decision_obj.get("decision", False))
                 final_conf = float(decision_obj.get("confidence", score))
                 narrative = decision_obj.get("narrative", "")
@@ -821,6 +936,7 @@ def run_agent_loop() -> None:
                 technical_score = decision_obj.get("technical_indicator_score")
                 if technical_score is None:
                     technical_score = summarise_technical_score(indicators, "long")
+
                 logger.info(
                     "[Brain] %s -> %s | Confidence: %.2f | Reason: %s",
                     symbol,
@@ -828,10 +944,11 @@ def run_agent_loop() -> None:
                     final_conf,
                     reason,
                 )
+
                 if not decision:
                     log_rejection(symbol, reason or "Unknown reason")
                     continue
-                # ML model veto
+
                 ml_prob = predict_success_probability(
                     score=score,
                     confidence=final_conf,
@@ -852,230 +969,231 @@ def run_agent_loop() -> None:
                     )
                     log_rejection(symbol, f"ML prob {ml_prob:.2f} too low")
                     continue
-                # Blend ML probability into final confidence
+
                 final_conf = round((final_conf + ml_prob * 10) / 2.0, 2)
-                # Proceed if we still have room for a new trade
-                if position_size > 0:
+
+                if position_size <= 0:
+                    logger.info(
+                        "[SKIP] %s: computed position size <= 0 after ML veto integration", symbol
+                    )
+                    continue
+
+                try:
+                    raw_entry_price = float(price_data['close'].iloc[-1])
+                    entry_price = round(raw_entry_price, 6)
+                    micro_plan = None
+                    order_book_snapshot = None
                     try:
-                        raw_entry_price = float(price_data['close'].iloc[-1])
-                        entry_price = round(raw_entry_price, 6)
-                        micro_plan = None
-                        order_book_snapshot = None
+                        order_book_snapshot = get_order_book(symbol, limit=20)
+                    except Exception as exc:
+                        logger.debug(
+                            "Order book snapshot unavailable for %s: %s",
+                            symbol,
+                            exc,
+                            exc_info=True,
+                        )
+                    if order_book_snapshot:
                         try:
-                            order_book_snapshot = get_order_book(symbol, limit=20)
+                            micro_plan = plan_execution(
+                                "buy",
+                                raw_entry_price,
+                                order_book_snapshot,
+                                depth=15,
+                            )
+                            rec_price = micro_plan.get("recommended_price")
+                            if rec_price is not None:
+                                entry_price = round(float(rec_price), 6)
                         except Exception as exc:
                             logger.debug(
-                                "Order book snapshot unavailable for %s: %s",
+                                "Failed to compute execution plan for %s: %s",
                                 symbol,
                                 exc,
                                 exc_info=True,
                             )
-                        if order_book_snapshot:
-                            try:
-                                micro_plan = plan_execution(
-                                    "buy",
-                                    raw_entry_price,
-                                    order_book_snapshot,
-                                    depth=15,
-                                )
-                                rec_price = micro_plan.get("recommended_price")
-                                if rec_price is not None:
-                                    entry_price = round(float(rec_price), 6)
-                            except Exception as exc:
-                                logger.debug(
-                                    "Failed to compute execution plan for %s: %s",
-                                    symbol,
-                                    exc,
-                                    exc_info=True,
-                                )
-                                micro_plan = None
-                        try:
-                            atr_val = indicators_df['atr'].iloc[-1] if 'atr' in indicators_df else None
-                        except Exception:
-                            atr_val = None
-                        trade_usd = calculate_dynamic_trade_size(final_conf, ml_prob, score)
-                        if atr_val is not None and not np.isnan(atr_val) and atr_val > 0:
-                            sl_dist = atr_val * 2.0
-                        else:
-                            atr_val = entry_price * 0.02
-                            sl_dist = atr_val * 2.0
-                        state = get_rl_state(sym_vol_pct)
-                        mult = 1.0
-                        if USE_RL_POSITION_SIZER and rl_sizer is not None:
-                            mult = rl_sizer.select_multiplier(state)
-                        trade_usd *= mult
-                        if micro_plan and micro_plan.get("size_multiplier") is not None:
-                            try:
-                                trade_usd *= float(micro_plan.get("size_multiplier", 1.0))
-                            except (TypeError, ValueError):
-                                pass
-                        trade_usd = max(MIN_TRADE_USD, min(MAX_TRADE_USD, trade_usd))
-                        position_size = round(max(trade_usd / entry_price, 0), 6)
-                        volume_profile_summary = None
-                        poc_price: Optional[float] = None
-                        poc_target_price: Optional[float] = None
-                        lvn_entry_value: Optional[float] = None
-                        lvn_stop_price: Optional[float] = None
-                        if volume_profile_result is not None:
-                            volume_profile_summary = volume_profile_result.to_dict()
-                            try:
-                                poc_price = float(volume_profile_result.poc)
-                                if math.isfinite(poc_price):
-                                    poc_target_price = round(poc_price, 6)
-                            except (TypeError, ValueError):
-                                poc_price = None
-                            try:
-                                touched_lvn = volume_profile_result.touched_lvn(
-                                    close=price_data["close"].iloc[-1],
-                                    high=price_data["high"].iloc[-1],
-                                    low=price_data["low"].iloc[-1],
-                                )
-                            except Exception:
-                                touched_lvn = None
-                            if touched_lvn is not None and math.isfinite(touched_lvn):
-                                lvn_entry_value = round(float(touched_lvn), 6)
-                        sl = round(entry_price - sl_dist, 6)
-                        tp1 = round(entry_price + atr_val * 1.0, 6)
-                        tp2 = round(entry_price + atr_val * 2.0, 6)
-                        tp3 = round(entry_price + atr_val * 3.0, 6)
-                        use_volume_tp = False
-                        if volume_profile_result is not None:
-                            failed_low = volume_profile_result.metadata.get("failed_low")
-                            if failed_low is not None and math.isfinite(failed_low):
-                                buffer = max(volume_profile_result.bin_width, entry_price * 0.001)
-                                candidate_sl = float(failed_low) - buffer
-                                if candidate_sl > 0:
-                                    sl = round(candidate_sl, 6)
-                                    lvn_stop_price = sl
-                            if poc_price is not None and math.isfinite(poc_price):
-                                if poc_price > entry_price * 1.0005:
-                                    tp1 = round(poc_price, 6)
-                                    tp2 = None
-                                    tp3 = None
-                                    use_volume_tp = True
-                                    poc_target_price = tp1
-                        if lvn_entry_value is None and isinstance(lvn_level, (int, float)) and math.isfinite(lvn_level):
-                            lvn_entry_value = round(float(lvn_level), 6)
-                        if volume_profile_result is not None and lvn_stop_price is None:
-                            lvn_stop_price = sl
-                        htf_trend = htf_trend_pct
-                        risk_amount = position_size * sl_dist
-                        # Determine the high-level strategy label.  The
-                        # historical trade log expects ``strategy`` to describe
-                        # the approach (e.g. purely technical vs. LLM filtered)
-                        # while ``pattern`` captures the specific signal.  The
-                        # previous implementation copied ``pattern_name`` into
-                        # both fields which obscured whether an LLM gate was
-                        # involved.  We now derive a descriptive label that
-                        # preserves that distinction.
-                        strategy_label = "PatternTrade"
-                        llm_decision_token = str(llm_signal or "").strip().lower()
-                        if llm_approval is True:
-                            strategy_label = "PatternTrade+LLM"
-                        elif llm_approval is False:
-                            strategy_label = "PatternTrade-LLM"
-                        elif llm_decision_token in {"approved", "greenlight", "yes"}:
-                            strategy_label = "PatternTrade+LLM"
-                        elif llm_decision_token in {"vetoed", "rejected", "no"}:
-                            strategy_label = "PatternTrade-LLM"
-
-                        # Compose the new trade dictionary with extra metadata
-                        new_trade = {
-                            "symbol": symbol,
-                            "direction": "long",
-                            "entry": entry_price,
-                            "entry_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),  # record open time
-                            "sl": sl,
-                            "tp1": tp1,
-                            "tp2": tp2,
-                            "tp3": tp3,
-                            "position_size": position_size,
-                            "size": trade_usd,
-                            "initial_size": position_size,  # track original size for partial exits
-                            "risk_amount": risk_amount,
-                            "rl_state": state,
-                            "rl_multiplier": mult,
-                            "leverage": 1,  # default leverage (spot)
-                            "confidence": final_conf,
-                            "score": score,
-                            "session": session,
-                            "btc_dominance": btc_d,
-                            "fear_greed": fg,
-                            "sentiment_bias": sentiment_bias,
-                            "sentiment_confidence": sentiment_confidence,
-                            "sentiment_summary": sentiment.get("summary", ""),
-                            "volatility": sym_vol,
-                            "htf_trend": htf_trend,
-                            "order_imbalance": order_imb,
-                            "order_flow_score": signal_snapshot.get("order_flow_score"),
-                            "order_flow_flag": signal_snapshot.get("order_flow_flag"),
-                            "order_flow_state": signal_snapshot.get("order_flow_state"),
-                            "cvd": signal_snapshot.get("cvd"),
-                            "cvd_change": signal_snapshot.get("cvd_change"),
-                            "taker_buy_ratio": signal_snapshot.get("taker_buy_ratio"),
-                            "trade_imbalance": signal_snapshot.get("trade_imbalance"),
-                            "aggressive_trade_rate": signal_snapshot.get("aggressive_trade_rate"),
-                            "spoofing_intensity": signal_snapshot.get("spoofing_intensity"),
-                            "spoofing_alert": signal_snapshot.get("spoofing_alert"),
-                            "volume_ratio": signal_snapshot.get("volume_ratio"),
-                            "price_change_pct": signal_snapshot.get("price_change_pct"),
-                            "spread_bps": signal_snapshot.get("spread_bps"),
-                            "macro_indicator": macro_ind,
-                            "pattern": pattern_name,
-                            "strategy": strategy_label,
-                            "narrative": narrative,
-                            "ml_prob": ml_prob,
-                            "llm_decision": llm_signal,
-                            "llm_approval": llm_approval,
-                            "llm_confidence": decision_obj.get("llm_confidence"),
-                            "llm_error": decision_obj.get("llm_error"),
-                            "technical_indicator_score": technical_score,
-                            "status": {"tp1": False, "tp2": False, "tp3": False, "sl": False},
-                            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                            "news_summary": decision_obj.get("news_summary", ""),
-                            "volume_profile": volume_profile_summary,
-                            "lvn_entry_level": lvn_entry_value,
-                            "lvn_stop": lvn_stop_price,
-                            "poc_target": poc_target_price,
-                            "auction_state": auction_state,
-                            "orderflow_analysis": orderflow_metadata,
-                            "take_profit_strategy": "volume_poc" if use_volume_tp else "atr_multiples",
-                        }
-                        if micro_plan:
-                            logger.debug("Microstructure plan for %s: %s", symbol, micro_plan)
-                            new_trade["microstructure_plan"] = micro_plan
-                        logger.info("Narrative:\n%s\n", narrative)
-                        logger.info(
-                            "Trade Opened %s @ %s | Notional=%s USD | Qty=%s | TP1 %s / TP2 %s / TP3 %s",
-                            symbol,
-                            entry_price,
-                            trade_usd,
-                            position_size,
-                            tp1,
-                            tp2,
-                            tp3,
+                            micro_plan = None
+                    try:
+                        atr_val = (
+                            indicators_df['atr'].iloc[-1]
+                            if 'atr' in indicators_df
+                            else None
                         )
-                        # Add to active trades and persist if not a duplicate
-                        if create_new_trade(
-                            new_trade,
-                            stop_price=lvn_stop_price,
-                            target_price=poc_target_price,
-                            auction_state=auction_state,
-                            lvn_entry_level=lvn_entry_value,
-                            orderflow_analysis=orderflow_metadata,
-                        ):
-                            active_trades.append(new_trade)
-                            # Do NOT log the open trade as a completed trade.  It will be logged upon exit by trade_manager.py.
-                            save_active_trades(active_trades)
-                            send_email(
-                                f"New Trade Opened: {symbol}",
-                                f"{new_trade}\n\n Narrative:\n{narrative}\n\nNews Summary:\n{decision_obj.get('news_summary', '')}",
+                    except Exception:
+                        atr_val = None
+                    trade_usd = calculate_dynamic_trade_size(final_conf, ml_prob, score)
+                    if atr_val is not None and not np.isnan(atr_val) and atr_val > 0:
+                        sl_dist = atr_val * 2.0
+                    else:
+                        atr_val = entry_price * 0.02
+                        sl_dist = atr_val * 2.0
+                    state = get_rl_state(sym_vol_pct)
+                    mult = 1.0
+                    if USE_RL_POSITION_SIZER and rl_sizer is not None:
+                        mult = rl_sizer.select_multiplier(state)
+                    trade_usd *= mult
+                    if micro_plan and micro_plan.get("size_multiplier") is not None:
+                        try:
+                            trade_usd *= float(micro_plan.get("size_multiplier", 1.0))
+                        except (TypeError, ValueError):
+                            pass
+                    trade_usd = max(MIN_TRADE_USD, min(MAX_TRADE_USD, trade_usd))
+                    position_size = round(max(trade_usd / entry_price, 0), 6)
+                    volume_profile_summary = None
+                    poc_price: Optional[float] = None
+                    poc_target_price: Optional[float] = None
+                    lvn_entry_value: Optional[float] = None
+                    lvn_stop_price: Optional[float] = None
+                    if volume_profile_result is not None:
+                        volume_profile_summary = volume_profile_result.to_dict()
+                        try:
+                            poc_price = float(volume_profile_result.poc)
+                            if math.isfinite(poc_price):
+                                poc_target_price = round(poc_price, 6)
+                        except (TypeError, ValueError):
+                            poc_price = None
+                        try:
+                            touched_lvn = volume_profile_result.touched_lvn(
+                                close=price_data["close"].iloc[-1],
+                                high=price_data["high"].iloc[-1],
+                                low=price_data["low"].iloc[-1],
                             )
-                            opened_count += 1
-                        else:
-                            logger.info("Trade for %s already active; skipping new entry", symbol)
-                    except Exception as e:
-                        logger.error("Error opening trade for %s: %s", symbol, e, exc_info=True)
+                        except Exception:
+                            touched_lvn = None
+                        if touched_lvn is not None and math.isfinite(touched_lvn):
+                            lvn_entry_value = round(float(touched_lvn), 6)
+                    sl = round(entry_price - sl_dist, 6)
+                    tp1 = round(entry_price + atr_val * 1.0, 6)
+                    tp2 = round(entry_price + atr_val * 2.0, 6)
+                    tp3 = round(entry_price + atr_val * 3.0, 6)
+                    use_volume_tp = False
+                    if volume_profile_result is not None:
+                        failed_low = volume_profile_result.metadata.get("failed_low")
+                        if failed_low is not None and math.isfinite(failed_low):
+                            buffer = max(
+                                volume_profile_result.bin_width,
+                                entry_price * 0.001,
+                            )
+                            candidate_sl = float(failed_low) - buffer
+                            if candidate_sl > 0:
+                                sl = round(candidate_sl, 6)
+                                lvn_stop_price = sl
+                        if poc_price is not None and math.isfinite(poc_price):
+                            if poc_price > entry_price * 1.0005:
+                                tp1 = round(poc_price, 6)
+                                tp2 = None
+                                tp3 = None
+                                use_volume_tp = True
+                                poc_target_price = tp1
+                    if lvn_entry_value is None and isinstance(lvn_level, (int, float)) and math.isfinite(lvn_level):
+                        lvn_entry_value = round(float(lvn_level), 6)
+                    if volume_profile_result is not None and lvn_stop_price is None:
+                        lvn_stop_price = sl
+                    htf_trend = htf_trend_pct
+                    risk_amount = position_size * sl_dist
+                    strategy_label = "PatternTrade"
+                    llm_decision_token = str(llm_signal or "").strip().lower()
+                    if llm_approval is True:
+                        strategy_label = "PatternTrade+LLM"
+                    elif llm_approval is False:
+                        strategy_label = "PatternTrade-LLM"
+                    elif llm_decision_token in {"approved", "greenlight", "yes"}:
+                        strategy_label = "PatternTrade+LLM"
+                    elif llm_decision_token in {"vetoed", "rejected", "no"}:
+                        strategy_label = "PatternTrade-LLM"
+
+                    new_trade = {
+                        "symbol": symbol,
+                        "direction": "long",
+                        "entry": entry_price,
+                        "entry_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                        "sl": sl,
+                        "tp1": tp1,
+                        "tp2": tp2,
+                        "tp3": tp3,
+                        "position_size": position_size,
+                        "size": trade_usd,
+                        "initial_size": position_size,
+                        "risk_amount": risk_amount,
+                        "rl_state": state,
+                        "rl_multiplier": mult,
+                        "leverage": 1,
+                        "confidence": final_conf,
+                        "score": score,
+                        "session": session,
+                        "btc_dominance": btc_d,
+                        "fear_greed": fg,
+                        "sentiment_bias": sentiment_bias,
+                        "sentiment_confidence": sentiment_confidence,
+                        "sentiment_summary": sentiment.get("summary", ""),
+                        "volatility": sym_vol,
+                        "htf_trend": htf_trend,
+                        "order_imbalance": order_imb,
+                        "order_flow_score": signal_snapshot.get("order_flow_score"),
+                        "order_flow_flag": signal_snapshot.get("order_flow_flag"),
+                        "order_flow_state": signal_snapshot.get("order_flow_state"),
+                        "cvd": signal_snapshot.get("cvd"),
+                        "cvd_change": signal_snapshot.get("cvd_change"),
+                        "taker_buy_ratio": signal_snapshot.get("taker_buy_ratio"),
+                        "trade_imbalance": signal_snapshot.get("trade_imbalance"),
+                        "aggressive_trade_rate": signal_snapshot.get("aggressive_trade_rate"),
+                        "spoofing_intensity": signal_snapshot.get("spoofing_intensity"),
+                        "spoofing_alert": signal_snapshot.get("spoofing_alert"),
+                        "volume_ratio": signal_snapshot.get("volume_ratio"),
+                        "price_change_pct": signal_snapshot.get("price_change_pct"),
+                        "spread_bps": signal_snapshot.get("spread_bps"),
+                        "macro_indicator": macro_ind,
+                        "pattern": pattern_name,
+                        "strategy": strategy_label,
+                        "narrative": narrative,
+                        "ml_prob": ml_prob,
+                        "llm_decision": llm_signal,
+                        "llm_approval": llm_approval,
+                        "llm_confidence": decision_obj.get("llm_confidence"),
+                        "llm_error": decision_obj.get("llm_error"),
+                        "technical_indicator_score": technical_score,
+                        "status": {"tp1": False, "tp2": False, "tp3": False, "sl": False},
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "news_summary": decision_obj.get("news_summary", ""),
+                        "volume_profile": volume_profile_summary,
+                        "lvn_entry_level": lvn_entry_value,
+                        "lvn_stop": lvn_stop_price,
+                        "poc_target": poc_target_price,
+                        "auction_state": auction_state,
+                        "orderflow_analysis": orderflow_metadata,
+                        "take_profit_strategy": "volume_poc" if use_volume_tp else "atr_multiples",
+                    }
+                    if micro_plan:
+                        logger.debug("Microstructure plan for %s: %s", symbol, micro_plan)
+                        new_trade["microstructure_plan"] = micro_plan
+                    logger.info("Narrative:\n%s\n", narrative)
+                    logger.info(
+                        "Trade Opened %s @ %s | Notional=%s USD | Qty=%s | TP1 %s / TP2 %s / TP3 %s",
+                        symbol,
+                        entry_price,
+                        trade_usd,
+                        position_size,
+                        tp1,
+                        tp2,
+                        tp3,
+                    )
+                    if create_new_trade(
+                        new_trade,
+                        stop_price=lvn_stop_price,
+                        target_price=poc_target_price,
+                        auction_state=auction_state,
+                        lvn_entry_level=lvn_entry_value,
+                        orderflow_analysis=orderflow_metadata,
+                    ):
+                        active_trades.append(new_trade)
+                        save_active_trades(active_trades)
+                        send_email(
+                            f"New Trade Opened: {symbol}",
+                            f"{new_trade}\n\n Narrative:\n{narrative}\n\nNews Summary:\n{decision_obj.get('news_summary', '')}",
+                        )
+                        opened_count += 1
+                    else:
+                        logger.info("Trade for %s already active; skipping new entry", symbol)
+                except Exception as e:
+                    logger.error("Error opening trade for %s: %s", symbol, e, exc_info=True)
             # Manage existing trades after opening new ones
             try:
                 manage_trades()
