@@ -142,6 +142,8 @@ def should_trade(
     macro_news: Dict[str, Any],
     volatility: float | None = None,
     fear_greed: int | None = None,
+    auction_state: str | None = None,
+    setup_type: str | None = None,
 ) -> Dict[str, Any]:
     """Determine whether to take a trade based on quantitative metrics and LLM guidance.
 
@@ -171,6 +173,12 @@ def should_trade(
     fear_greed : int or None, optional
         Current Fear & Greed index (0-100).  Extreme fear raises the score
         threshold while extreme greed relaxes it slightly.
+    auction_state : str or None, optional
+        Market auction state classification (e.g. ``"balanced"``) used to
+        gate breakout setups in quiet conditions.
+    setup_type : str or None, optional
+        High level setup classification (e.g. ``"trend"`` or ``"mean_reversion"``)
+        derived from the signal evaluator to identify breakout-style trades.
 
     Returns
     -------
@@ -199,6 +207,35 @@ def should_trade(
 
         news_summary = summarize_recent_news()
 
+        try:
+            pattern_lower = pattern_name.lower() if isinstance(pattern_name, str) else ""
+        except Exception:
+            pattern_lower = ""
+
+        setup_lower = (setup_type or "").lower() if isinstance(setup_type, str) else ""
+        breakout_patterns = {
+            "triangle_wedge",
+            "flag",
+            "cup_handle",
+            "double_bottom",
+        }
+        breakout_match = (
+            setup_lower in {"trend", "breakout"}
+            or pattern_lower in breakout_patterns
+            or ("breakout" in pattern_lower if pattern_lower else False)
+        )
+        if auction_state and auction_state.lower() == "balanced" and breakout_match:
+            return {
+                "decision": False,
+                "confidence": float(score),
+                "reason": "Balanced market regime – breakout setups disabled",
+                "llm_decision": None,
+                "llm_approval": None,
+                "llm_confidence": None,
+                "llm_error": False,
+                "technical_indicator_score": technical_score,
+            }
+
         # Determine adaptive score threshold based on sentiment
         base_threshold: float = get_adaptive_conf_threshold() or 4.5
         if sentiment_bias == "bullish":
@@ -218,10 +255,6 @@ def should_trade(
         # confidence_guard module returns a strict cutoff (e.g., 5.5).
         # We cap the minimum threshold at 4.0 to avoid approving
         # marginal setups.
-        try:
-            pattern_lower = pattern_name.lower() if isinstance(pattern_name, str) else ""
-        except Exception:
-            pattern_lower = ""
         strong_patterns = {
             "three_white_soldiers",
             "marubozu_bullish",

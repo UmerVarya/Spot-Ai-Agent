@@ -64,6 +64,15 @@ from trade_utils import get_rl_state
 from microstructure import plan_execution
 from volatility_regime import atr_percentile
 from realtime_signal_cache import RealTimeSignalCache
+from auction_state import get_auction_state
+
+
+BREAKOUT_PATTERNS = {
+    "triangle_wedge",
+    "flag",
+    "cup_handle",
+    "double_bottom",
+}
 
 
 def handle_exception(exc_type, exc_value, exc_traceback):
@@ -391,16 +400,48 @@ def run_agent_loop() -> None:
                     direction = cached_signal.direction
                     position_size = cached_signal.position_size
                     pattern_name = cached_signal.pattern
+                    signal_snapshot = price_data.attrs.get("signal_features", {}) or {}
+                    setup_type = signal_snapshot.get("setup_type")
+                    try:
+                        auction_state = get_auction_state(price_data)
+                    except Exception as exc:
+                        logger.debug(
+                            "Failed to compute auction state for %s: %s",
+                            symbol,
+                            exc,
+                            exc_info=True,
+                        )
+                        auction_state = "unknown"
+                    pattern_lower = (pattern_name or "").lower()
+                    setup_lower = (setup_type or "").lower() if isinstance(setup_type, str) else ""
+                    is_breakout_setup = False
+                    if setup_lower in {"trend", "breakout"}:
+                        is_breakout_setup = True
+                    if pattern_lower in BREAKOUT_PATTERNS or "breakout" in pattern_lower:
+                        is_breakout_setup = True
+                    if auction_state == "balanced" and is_breakout_setup:
+                        logger.info(
+                            "[SKIP] %s: Balanced regime detected – breakout setup filtered (pattern=%s, setup=%s)",
+                            symbol,
+                            pattern_name or "none",
+                            setup_type or "unknown",
+                        )
+                        continue
                     logger.info(
-                        "%s: Score=%.2f, Direction=%s, Pattern=%s, PosSize=%s (age=%.2fs)",
+                        "%s: Score=%.2f, Direction=%s, Pattern=%s, PosSize=%s, AuctionState=%s (age=%.2fs)",
                         symbol,
                         score,
                         direction,
                         pattern_name,
                         position_size,
+                        auction_state,
                         cached_signal.age(),
                     )
-                    symbol_scores[symbol] = {"score": score, "direction": direction}
+                    symbol_scores[symbol] = {
+                        "score": score,
+                        "direction": direction,
+                        "auction_state": auction_state,
+                    }
                     if direction is None and score >= 4.5:
                         logger.warning(
                             "No clear direction for %s despite score=%.2f. Forcing 'long' direction.",
@@ -447,13 +488,16 @@ def run_agent_loop() -> None:
                             "pattern": pattern_name,
                             "price_data": price_data,
                             "orderflow": flow_analysis,
+                            "auction_state": auction_state,
+                            "setup_type": setup_type,
                         }
                     )
                     logger.info(
-                        "[Potential Trade] %s | Score=%.2f | Direction=long | Size=%s",
+                        "[Potential Trade] %s | Score=%.2f | Direction=long | Size=%s | AuctionState=%s",
                         symbol,
                         score,
                         position_size,
+                        auction_state,
                     )
                 except Exception as e:
                     logger.error("Error evaluating %s: %s", symbol, e, exc_info=True)
@@ -473,6 +517,8 @@ def run_agent_loop() -> None:
                 position_size = trade_candidate['position_size']
                 pattern_name = trade_candidate['pattern']
                 price_data = trade_candidate['price_data']
+                auction_state = trade_candidate.get("auction_state", "unknown")
+                setup_type = trade_candidate.get("setup_type")
                 # Build indicator snapshot for LLM and brain
                 try:
                     indicators_df = calculate_indicators(price_data)
@@ -507,6 +553,8 @@ def run_agent_loop() -> None:
                     "neutral"
                 )
                 signal_snapshot = price_data.attrs.get("signal_features", {}) or {}
+                if setup_type is None:
+                    setup_type = signal_snapshot.get("setup_type")
                 flow_features = getattr(flow_analysis, "features", {}) or {}
                 order_imb_feature = signal_snapshot.get("order_book_imbalance")
                 if order_imb_feature is None:
@@ -562,6 +610,8 @@ def run_agent_loop() -> None:
                     'volume_ratio': signal_snapshot.get('volume_ratio'),
                     'price_change_pct': signal_snapshot.get('price_change_pct'),
                     'spread_bps': signal_snapshot.get('spread_bps'),
+                    'auction_state': auction_state,
+                    'setup_type': setup_type,
                 }
                 # Ask the brain whether to take the trade
                 # Call the brain with error handling.  If the brain throws an
@@ -580,6 +630,8 @@ def run_agent_loop() -> None:
                         macro_news={"safe": True, "reason": ""},
                         volatility=sym_vol_pct,
                         fear_greed=fg,
+                        auction_state=auction_state,
+                        setup_type=setup_type if isinstance(setup_type, str) else None,
                     )
                 except Exception as e:
                     logger.error("Error in should_trade for %s: %s", symbol, e, exc_info=True)
