@@ -41,17 +41,17 @@ def test_analyze_news_with_llm_valid_json(monkeypatch):
 
     def fake_safe_chat_completion(client, *, model, messages, **kwargs):
         captured["messages"] = messages
-        payload = {"safe": False, "sensitivity": 0.7, "reason": "Volatility expected"}
+        payload = {"safe_decision": "no", "reason": "Volatility expected"}
         return _DummyCompletion(json.dumps(payload))
 
     monkeypatch.setattr(fetch_news, "safe_chat_completion", fake_safe_chat_completion, raising=False)
 
     result = fetch_news.analyze_news_with_llm(_example_events())
 
-    assert result == {"safe": False, "sensitivity": 0.7, "reason": "Volatility expected"}
+    assert result == {"safe": False, "sensitivity": 0.6, "reason": "Volatility expected"}
     assert captured["messages"][0]["role"] == "system"
-    assert "Respond ONLY with a JSON object" in captured["messages"][0]["content"]
-    assert "required JSON structure" in captured["messages"][1]["content"]
+    assert "`safe_decision`" in captured["messages"][0]["content"]
+    assert "Events:\n" in captured["messages"][1]["content"]
 
 
 def test_analyze_news_with_llm_handles_non_json(monkeypatch, caplog):
@@ -75,3 +75,21 @@ def test_analyze_news_with_llm_handles_non_json(monkeypatch, caplog):
 
     assert result == {"safe": True, "sensitivity": 0, "reason": "LLM non-JSON response"}
     assert any("LLM returned non-JSON response" in message for message in warnings)
+
+
+def test_analyze_news_with_llm_overrides_inconsistent_decision(monkeypatch):
+    import fetch_news
+
+    monkeypatch.setattr(fetch_news, "GROQ_API_KEY", "test-key", raising=False)
+    monkeypatch.setattr(fetch_news, "Groq", _DummyGroq, raising=False)
+
+    def fake_safe_chat_completion(client, *, model, messages, **kwargs):
+        return _DummyCompletion(json.dumps({"safe_decision": "yes", "reason": "Looks calm"}))
+
+    monkeypatch.setattr(fetch_news, "safe_chat_completion", fake_safe_chat_completion, raising=False)
+
+    result = fetch_news.analyze_news_with_llm(_example_events())
+
+    assert result["safe"] is False
+    assert result["sensitivity"] == 0.6
+    assert "Overriding" in result["reason"]
