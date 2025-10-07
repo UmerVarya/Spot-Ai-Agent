@@ -32,6 +32,10 @@ Key enhancements
 * **Non‑linear microstructure features** – The pipeline augments
   imbalance inputs with squared and extreme‑value flags so linear
   models can still react to threshold effects observed in order flow.
+* **Balanced training & drift monitoring** – Sample weighting, feature
+  selection (RFE/PCA), rolling time‑series validation and drift
+  detection ensure the ensemble adapts to regime shifts while handling
+  class imbalance.
 
 These changes allow the agent to capture non‑linear interactions
 between features and to adapt more flexibly to the historical trade
@@ -44,6 +48,7 @@ import os
 import json
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any, Optional, Mapping, Callable
+import inspect
 
 import numpy as np
 import pandas as pd
@@ -61,10 +66,12 @@ try:
         GridSearchCV,
         StratifiedKFold,
         StratifiedShuffleSplit,
+        TimeSeriesSplit,
     )
+    from sklearn.decomposition import PCA
+    from sklearn.feature_selection import RFECV
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.metrics import (
-        make_scorer,
         accuracy_score,
         balanced_accuracy_score,
         precision_recall_fscore_support,
@@ -74,6 +81,7 @@ try:
     )
     from sklearn.base import clone
     from sklearn.inspection import permutation_importance
+    from sklearn.utils.class_weight import compute_class_weight
     import joblib  # type: ignore
     SKLEARN_AVAILABLE = True
 except Exception:
@@ -84,6 +92,9 @@ except Exception:
     GridSearchCV = None  # type: ignore
     StratifiedKFold = None  # type: ignore
     StratifiedShuffleSplit = None  # type: ignore
+    TimeSeriesSplit = None  # type: ignore
+    PCA = None  # type: ignore
+    RFECV = None  # type: ignore
     CalibratedClassifierCV = None  # type: ignore
     balanced_accuracy_score = None  # type: ignore
     precision_recall_fscore_support = None  # type: ignore
@@ -92,6 +103,7 @@ except Exception:
     log_loss = None  # type: ignore
     clone = None  # type: ignore
     permutation_importance = None  # type: ignore
+    compute_class_weight = None  # type: ignore
     joblib = None  # type: ignore
     accuracy_score = None  # type: ignore
     SKLEARN_AVAILABLE = False
@@ -105,6 +117,11 @@ try:
     from lightgbm import LGBMClassifier  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
     LGBMClassifier = None  # type: ignore
+
+try:
+    from catboost import CatBoostClassifier  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    CatBoostClassifier = None  # type: ignore
 
 logger = setup_logger(__name__)
 
@@ -243,6 +260,176 @@ def _augment_nonlinear_features(features: Mapping[str, float]) -> Dict[str, floa
     enriched['extreme_imbalance_flag'] = 1.0 if order_imbalance >= 0.9 else 0.0
     return enriched
 
+
+def _compute_sample_weights(y: np.ndarray) -> Optional[np.ndarray]:
+    """Return class-balanced sample weights for the provided labels."""
+
+    if compute_class_weight is None:
+        return None
+    try:
+        classes = np.unique(y)
+        if classes.size < 2:
+            return None
+        weights = compute_class_weight(class_weight='balanced', classes=classes, y=y)
+        weight_map = {cls: weight for cls, weight in zip(classes, weights)}
+        return np.asarray([weight_map[label] for label in y], dtype=float)
+    except Exception:
+        return None
+
+
+def _model_supports_sample_weight(model: Any) -> bool:
+    """Check whether the estimator's fit method accepts sample weights."""
+
+    try:
+        signature = inspect.signature(model.fit)
+    except (TypeError, ValueError):
+        return False
+    return 'sample_weight' in signature.parameters
+
+
+def _perform_feature_selection(
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_names: List[str],
+    cv_splits: int,
+) -> Dict[str, Any]:
+    """Run RFECV to identify a compact feature subset."""
+
+    if RFECV is None or LogisticRegression is None or X.size == 0 or len(feature_names) == 0:
+        return {}
+    min_features = max(5, min(len(feature_names) - 1, len(feature_names) // 2))
+    try:
+        estimator = LogisticRegression(max_iter=1000, class_weight='balanced', solver='lbfgs')
+        selector = RFECV(
+            estimator=estimator,
+            step=1,
+            min_features_to_select=min_features,
+            scoring='roc_auc',
+            cv=max(2, min(cv_splits, len(y) - 1)),
+            n_jobs=-1,
+        )
+        selector.fit(X, y)
+        support = selector.support_
+        if support.sum() == 0:
+            return {}
+        indices = np.where(support)[0]
+        selected_features = [feature_names[idx] for idx in indices]
+        ranking = selector.ranking_.tolist()
+        grid_scores = getattr(selector, 'grid_scores_', None)
+        if grid_scores is not None:
+            scores = grid_scores.tolist()
+        else:
+            scores = []
+        return {
+            'indices': indices.tolist(),
+            'support': support.astype(int).tolist(),
+            'ranking': ranking,
+            'selected_features': selected_features,
+            'cv_scores': scores,
+        }
+    except Exception:
+        return {}
+
+
+def _fit_pca(X: np.ndarray, variance: float = 0.95) -> Optional[Any]:
+    """Fit PCA on the training data to capture the desired variance."""
+
+    if PCA is None or X.size == 0:
+        return None
+    try:
+        n_components = min(X.shape[0], X.shape[1])
+        if n_components <= 1:
+            return None
+        if 0 < variance < 1:
+            n_comp = variance
+        else:
+            n_comp = max(1, min(n_components, int(variance)))
+        pca = PCA(n_components=n_comp, svd_solver='full')
+        pca.fit(X)
+        return pca
+    except Exception:
+        return None
+
+
+def _transform_feature_matrix(
+    X: np.ndarray,
+    view: str,
+    selection_info: Optional[Dict[str, Any]] = None,
+    pca_model: Optional[Any] = None,
+) -> np.ndarray:
+    """Transform features according to the chosen view."""
+
+    if view == 'rfe' and selection_info:
+        indices = selection_info.get('indices')
+        if indices:
+            return X[:, indices]
+    if view == 'pca' and pca_model is not None:
+        return pca_model.transform(X)
+    return X
+
+
+def _transform_feature_vector(
+    x: np.ndarray,
+    view: str,
+    selection_info: Optional[Dict[str, Any]] = None,
+    pca_params: Optional[Dict[str, Any]] = None,
+) -> np.ndarray:
+    """Transform a single feature vector using persisted metadata."""
+
+    if view == 'rfe' and selection_info:
+        indices = selection_info.get('indices') or []
+        if indices:
+            return x[indices]
+    if view == 'pca' and pca_params:
+        components = np.asarray(pca_params.get('components'))
+        pca_mean = np.asarray(pca_params.get('mean'))
+        if components.ndim == 2 and pca_mean.size:
+            centered = x - pca_mean
+            return centered @ components.T
+    return x
+
+
+def _calculate_distribution_summary(X: np.ndarray, feature_names: List[str]) -> Dict[str, Dict[str, float]]:
+    """Summarise feature distributions for drift monitoring."""
+
+    summary: Dict[str, Dict[str, float]] = {}
+    if X.size == 0:
+        return summary
+    for idx, name in enumerate(feature_names):
+        column = X[:, idx]
+        try:
+            summary[name] = {
+                'mean': float(np.mean(column)),
+                'std': float(np.std(column) + 1e-8),
+                'p05': float(np.percentile(column, 5)),
+                'p50': float(np.percentile(column, 50)),
+                'p95': float(np.percentile(column, 95)),
+            }
+        except Exception:
+            summary[name] = {
+                'mean': 0.0,
+                'std': 1.0,
+                'p05': 0.0,
+                'p50': 0.0,
+                'p95': 0.0,
+            }
+    return summary
+
+
+def _build_time_series_cv(n_samples: int, max_splits: int = 5) -> Optional[Any]:
+    """Create a TimeSeriesSplit configuration for rolling validation."""
+
+    if TimeSeriesSplit is None or n_samples <= 2:
+        return None
+    splits = min(max_splits, max(2, n_samples // 50))
+    if splits >= n_samples:
+        splits = max(2, min(max_splits, n_samples - 1))
+    if splits < 2:
+        return None
+    try:
+        return TimeSeriesSplit(n_splits=splits)
+    except Exception:
+        return None
 
 def load_model_report() -> Dict[str, Any]:
     """Return the persisted model metadata if training artefacts exist."""
@@ -520,132 +707,18 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> Optional[T
         scaler = StandardScaler()
         X_train_norm = scaler.fit_transform(X_train)
         X_val_norm = scaler.transform(X_val)
-        models: Dict[str, Any] = {
-            'logistic': LogisticRegression(max_iter=1000, class_weight='balanced', solver='lbfgs'),
-            'random_forest': RandomForestClassifier(class_weight='balanced'),
-            'gradient_boosting': GradientBoostingClassifier(),
-            'mlp': MLPClassifier(max_iter=500),
-        }
-        if XGBClassifier is not None:
-            models['xgboost'] = XGBClassifier(
-                eval_metric='logloss',
-                use_label_encoder=False,
-            )
-        if LGBMClassifier is not None:
-            models['lightgbm'] = LGBMClassifier()
-        param_grid: Dict[str, Dict[str, List[Any]]] = {
-            'logistic': {
-                'C': [0.1, 1.0, 10.0],
-                'penalty': ['l2'],
-            },
-            'random_forest': {
-                'n_estimators': [50, 100, 200],
-                'max_depth': [3, 5, 7, None],
-                'min_samples_leaf': [1, 2, 4],
-            },
-            'gradient_boosting': {
-                'n_estimators': [50, 100, 200],
-                'learning_rate': [0.01, 0.1, 0.2],
-                'max_depth': [3, 5],
-            },
-            'mlp': {
-                'hidden_layer_sizes': [(50,), (100,), (50, 50)],
-                'alpha': [0.0001, 0.001],
-            },
-        }
-        if XGBClassifier is not None:
-            param_grid['xgboost'] = {
-                'n_estimators': [50, 100, 200],
-                'max_depth': [3, 5, 7],
-                'learning_rate': [0.01, 0.1, 0.2],
-                'subsample': [0.8, 1.0],
-            }
-        if LGBMClassifier is not None:
-            param_grid['lightgbm'] = {
-                'n_estimators': [50, 100, 200],
-                'num_leaves': [31, 63, 127],
-                'learning_rate': [0.01, 0.1, 0.2],
-                'max_depth': [3, 5, -1],
-            }
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        best_model: Optional[Any] = None
-        best_score: float = -np.inf
-        best_type: str = 'logistic'
-        best_params: Dict[str, Any] = {}
-        for model_name, model in models.items():
-            grid_params = param_grid.get(model_name, {})
-            if not grid_params:
-                estimator = model.fit(X_train_norm, y_train)
-                candidate_model = estimator
-                score = float(estimator.score(X_val_norm, y_val))
-                params: Dict[str, Any] = {}
-            else:
-                gs = GridSearchCV(
-                    estimator=model,
-                    param_grid=grid_params,
-                    cv=cv,
-                    scoring=make_scorer(accuracy_score),
-                    n_jobs=-1,
-                )
-                try:
-                    gs.fit(X_train_norm, y_train)
-                    candidate_model = gs.best_estimator_
-                    score = float(candidate_model.score(X_val_norm, y_val))
-                    params = dict(gs.best_params_)
-                except Exception as exc:
-                    logger.warning("Grid search failed for %s: %s", model_name, exc, exc_info=True)
-                    candidate_model = model.fit(X_train_norm, y_train)
-                    score = float(candidate_model.score(X_val_norm, y_val))
-                    params = {}
-            logger.info("%s trained. Validation accuracy: %.2f%%", model_name, score * 100)
-            if score > best_score:
-                best_score = score
-                best_model = candidate_model
-                best_type = model_name
-                best_params = params
-        if best_model is None:
-            logger.warning("Failed to select a best model. Falling back to logistic regression.")
-            best_model = models['logistic'].fit(X_train_norm, y_train)
-            best_type = 'logistic'
-            best_params = {}
-        calibration_method: Optional[str] = None
-        calibrated = False
-        final_model = best_model
-        if CalibratedClassifierCV is not None and clone is not None and hasattr(best_model, 'predict_proba'):
-            try:
-                calibration_method = 'sigmoid'
-                calibrator = CalibratedClassifierCV(
-                    base_estimator=clone(best_model),
-                    method=calibration_method,
-                    cv=3,
-                )
-                calibrator.fit(X_train_norm, y_train)
-                final_model = calibrator
-                calibrated = True
-            except Exception as exc:
-                logger.warning("Calibration failed: %s", exc, exc_info=True)
-                final_model = best_model
-        try:
-            y_pred = final_model.predict(X_val_norm)
-        except Exception:
-            y_pred = best_model.predict(X_val_norm)
-        y_prob = _safe_predict_proba(final_model, X_val_norm)
-        metrics = _compute_classification_metrics(y_val, y_pred, y_prob)
         scaler_full = StandardScaler()
         X_full_norm = scaler_full.fit_transform(X)
-        if calibrated and CalibratedClassifierCV is not None and clone is not None:
-            persisted_model = CalibratedClassifierCV(
-                base_estimator=clone(best_model),
-                method=calibration_method or 'sigmoid',
-                cv=3,
-            )
-            persisted_model.fit(X_full_norm, y)
-        else:
+        class_weight_metadata: Dict[str, float] = {}
+        if compute_class_weight is not None:
             try:
-                persisted_model = clone(best_model) if clone is not None else best_model
-                persisted_model.fit(X_full_norm, y)
+                all_classes = np.unique(y)
+                class_weights = compute_class_weight('balanced', classes=all_classes, y=y)
+                class_weight_metadata = {str(int(cls)): float(weight) for cls, weight in zip(all_classes, class_weights)}
             except Exception:
-                persisted_model = best_model.fit(X_full_norm, y)
+                class_weight_metadata = {}
+        sample_weights_train = _compute_sample_weights(y_train)
+        sample_weights_full = _compute_sample_weights(y)
         feature_names = [
             'score', 'confidence', 'session_id', 'btc_dom',
             'fear_greed', 'sent_conf', 'sent_bias', 'pattern_len',
@@ -658,10 +731,284 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> Optional[T
             'price_change_pct', 'spread_bps',
             'llm_decision', 'llm_confidence', 'time_since_last', 'recent_win_rate'
         ]
-        feature_info = _compute_feature_attribution(persisted_model, feature_names, X_full_norm, y)
+        time_cv = _build_time_series_cv(len(X_train_norm))
+        cv_for_selection = time_cv.get_n_splits() if time_cv is not None else 5
+        selection_info = _perform_feature_selection(X_train_norm, y_train, feature_names, cv_for_selection)
+        pca_model = _fit_pca(X_train_norm)
+        feature_views: Dict[str, Dict[str, np.ndarray]] = {
+            'standard': {'train': X_train_norm, 'val': X_val_norm},
+        }
+        if selection_info:
+            feature_views['rfe'] = {
+                'train': _transform_feature_matrix(X_train_norm, 'rfe', selection_info, None),
+                'val': _transform_feature_matrix(X_val_norm, 'rfe', selection_info, None),
+            }
+        if pca_model is not None:
+            feature_views['pca'] = {
+                'train': _transform_feature_matrix(X_train_norm, 'pca', None, pca_model),
+                'val': _transform_feature_matrix(X_val_norm, 'pca', None, pca_model),
+            }
+
+        def _logistic_factory() -> Any:
+            return LogisticRegression(max_iter=1000, class_weight='balanced', solver='lbfgs')
+
+        def _rf_factory() -> Any:
+            return RandomForestClassifier(class_weight='balanced')
+
+        def _gb_factory() -> Any:
+            return GradientBoostingClassifier()
+
+        def _mlp_factory() -> Any:
+            return MLPClassifier(max_iter=500)
+
+        model_candidates: List[Dict[str, Any]] = [
+            {
+                'name': 'logistic',
+                'base_type': 'logistic',
+                'factory': _logistic_factory,
+                'param_grid': {
+                    'C': [0.1, 1.0, 10.0],
+                    'penalty': ['l2'],
+                },
+                'view': 'standard',
+            },
+            {
+                'name': 'logistic_rfe',
+                'base_type': 'logistic',
+                'factory': _logistic_factory,
+                'param_grid': {
+                    'C': [0.1, 1.0, 10.0],
+                    'penalty': ['l2'],
+                },
+                'view': 'rfe',
+            },
+            {
+                'name': 'random_forest',
+                'base_type': 'random_forest',
+                'factory': _rf_factory,
+                'param_grid': {
+                    'n_estimators': [50, 100, 200],
+                    'max_depth': [3, 5, 7, None],
+                    'min_samples_leaf': [1, 2, 4],
+                },
+                'view': 'standard',
+            },
+            {
+                'name': 'gradient_boosting',
+                'base_type': 'gradient_boosting',
+                'factory': _gb_factory,
+                'param_grid': {
+                    'n_estimators': [50, 100, 200],
+                    'learning_rate': [0.01, 0.1, 0.2],
+                    'max_depth': [3, 5],
+                },
+                'view': 'standard',
+            },
+            {
+                'name': 'mlp_pca',
+                'base_type': 'mlp',
+                'factory': _mlp_factory,
+                'param_grid': {
+                    'hidden_layer_sizes': [(50,), (100,), (50, 50)],
+                    'alpha': [0.0001, 0.001],
+                },
+                'view': 'pca',
+            },
+        ]
+        if XGBClassifier is not None:
+            model_candidates.append({
+                'name': 'xgboost',
+                'base_type': 'xgboost',
+                'factory': lambda: XGBClassifier(eval_metric='logloss', use_label_encoder=False),
+                'param_grid': {
+                    'n_estimators': [50, 100, 200],
+                    'max_depth': [3, 5, 7],
+                    'learning_rate': [0.01, 0.1, 0.2],
+                    'subsample': [0.8, 1.0],
+                },
+                'view': 'standard',
+            })
+        if LGBMClassifier is not None:
+            model_candidates.append({
+                'name': 'lightgbm',
+                'base_type': 'lightgbm',
+                'factory': lambda: LGBMClassifier(),
+                'param_grid': {
+                    'n_estimators': [50, 100, 200],
+                    'num_leaves': [31, 63, 127],
+                    'learning_rate': [0.01, 0.1, 0.2],
+                    'max_depth': [3, 5, -1],
+                },
+                'view': 'standard',
+            })
+        if CatBoostClassifier is not None:
+            model_candidates.append({
+                'name': 'catboost',
+                'base_type': 'catboost',
+                'factory': lambda: CatBoostClassifier(verbose=False, loss_function='Logloss'),
+                'param_grid': {
+                    'depth': [4, 6, 8],
+                    'learning_rate': [0.01, 0.1],
+                    'iterations': [100, 200],
+                },
+                'view': 'standard',
+            })
+
+        best_model: Optional[Any] = None
+        best_type = 'logistic'
+        best_params: Dict[str, Any] = {}
+        best_score = -np.inf
+        best_view = 'standard'
+        metrics: Dict[str, float] = {}
+        calibration_method: Optional[str] = None
+        calibrated = False
+        best_cv_score: Optional[float] = None
+        best_candidate_name: Optional[str] = None
+        scoring_metric = 'roc_auc' if roc_auc_score is not None else 'balanced_accuracy'
+        for candidate in model_candidates:
+            view = candidate['view']
+            if view not in feature_views:
+                continue
+            try:
+                estimator = candidate['factory']()
+            except Exception:
+                logger.warning("Failed to instantiate model %s", candidate['name'], exc_info=True)
+                continue
+            X_train_view = feature_views[view]['train']
+            X_val_view = feature_views[view]['val']
+            fit_kwargs: Dict[str, Any] = {}
+            candidate_sample_weights = sample_weights_train
+            if candidate_sample_weights is not None and not _model_supports_sample_weight(estimator):
+                candidate_sample_weights = None
+            if candidate_sample_weights is not None:
+                fit_kwargs['sample_weight'] = candidate_sample_weights
+            param_grid = candidate.get('param_grid') or {}
+            cv = time_cv
+            if cv is None:
+                if StratifiedKFold is not None and len(X_train_view) >= 5:
+                    try:
+                        cv = StratifiedKFold(n_splits=min(5, max(2, len(X_train_view) // 4)), shuffle=True, random_state=42)
+                    except Exception:
+                        cv = 3
+                else:
+                    cv = 3
+            try:
+                if param_grid:
+                    grid = GridSearchCV(
+                        estimator,
+                        param_grid,
+                        scoring=scoring_metric,
+                        cv=cv,
+                        n_jobs=-1,
+                    )
+                    if fit_kwargs:
+                        grid.fit(X_train_view, y_train, **fit_kwargs)
+                    else:
+                        grid.fit(X_train_view, y_train)
+                    estimator = grid.best_estimator_
+                    current_params = grid.best_params_
+                    cv_score = float(grid.best_score_)
+                else:
+                    if fit_kwargs:
+                        estimator.fit(X_train_view, y_train, **fit_kwargs)
+                    else:
+                        estimator.fit(X_train_view, y_train)
+                    current_params = {}
+                    cv_score = float('nan')
+            except Exception:
+                logger.warning("Training failed for model %s", candidate['name'], exc_info=True)
+                continue
+            try:
+                y_val_pred = estimator.predict(X_val_view)
+                y_val_prob = _safe_predict_proba(estimator, X_val_view)
+                val_metrics = _compute_classification_metrics(y_val, y_val_pred, y_val_prob)
+            except Exception:
+                val_metrics = {}
+            candidate_score = val_metrics.get('roc_auc')
+            if candidate_score is None or np.isnan(candidate_score):
+                candidate_score = val_metrics.get('balanced_accuracy')
+            if candidate_score is None or np.isnan(candidate_score):
+                candidate_score = val_metrics.get('accuracy')
+            if candidate_score is None or np.isnan(candidate_score):
+                candidate_score = -np.inf
+            if candidate_score > best_score:
+                best_score = float(candidate_score)
+                best_model = estimator
+                best_type = candidate['base_type']
+                best_params = current_params
+                metrics = val_metrics
+                best_view = view
+                best_cv_score = cv_score
+                best_candidate_name = candidate['name']
+        if best_model is None:
+            logger.warning("No suitable model found during training.")
+            return None
+
+        if best_view == 'pca' and pca_model is not None:
+            try:
+                n_components = getattr(pca_model, 'n_components_', None) or getattr(pca_model, 'n_components', None)
+                pca_full = PCA(n_components=n_components, svd_solver='full')
+                pca_full.fit(X_full_norm)
+            except Exception:
+                pca_full = pca_model
+        else:
+            pca_full = pca_model if best_view == 'pca' else None
+
+        X_val_best = _transform_feature_matrix(X_val_norm, best_view, selection_info, pca_model)
+        X_full_transformed = _transform_feature_matrix(X_full_norm, best_view, selection_info, pca_full)
+        try:
+            y_val_pred = best_model.predict(X_val_best)
+            y_val_prob = _safe_predict_proba(best_model, X_val_best)
+            metrics = _compute_classification_metrics(y_val, y_val_pred, y_val_prob)
+        except Exception:
+            metrics = {}
+
+        persisted_model: Any
+        if hasattr(best_model, 'predict_proba') and CalibratedClassifierCV is not None:
+            try:
+                calibration_method = 'isotonic' if len(y) >= 200 else 'sigmoid'
+                base_estimator = clone(best_model) if clone is not None else best_model
+                persisted_model = CalibratedClassifierCV(
+                    base_estimator=base_estimator,
+                    method=calibration_method,
+                    cv=3,
+                )
+                fit_kwargs_full: Dict[str, Any] = {}
+                if sample_weights_full is not None and _model_supports_sample_weight(persisted_model):
+                    fit_kwargs_full['sample_weight'] = sample_weights_full
+                persisted_model.fit(X_full_transformed, y, **fit_kwargs_full)
+                calibrated = True
+            except Exception:
+                persisted_model = clone(best_model) if clone is not None else best_model
+                fit_kwargs_full = {}
+                if sample_weights_full is not None and _model_supports_sample_weight(persisted_model):
+                    fit_kwargs_full['sample_weight'] = sample_weights_full
+                persisted_model.fit(X_full_transformed, y, **fit_kwargs_full)
+                calibration_method = None
+        else:
+            persisted_model = clone(best_model) if clone is not None else best_model
+            fit_kwargs_full = {}
+            if sample_weights_full is not None and _model_supports_sample_weight(persisted_model):
+                fit_kwargs_full['sample_weight'] = sample_weights_full
+            persisted_model.fit(X_full_transformed, y, **fit_kwargs_full)
+
+        if best_view == 'rfe' and selection_info:
+            model_feature_names = [feature_names[idx] for idx in selection_info.get('indices', [])]
+        elif best_view == 'pca' and pca_full is not None:
+            n_components = getattr(pca_full, 'n_components_', None)
+            if n_components is None:
+                n_components = X_full_transformed.shape[1]
+            model_feature_names = [f'pca_component_{i}' for i in range(int(n_components))]
+        else:
+            model_feature_names = feature_names
+        feature_info = _compute_feature_attribution(persisted_model, model_feature_names, X_full_transformed, y)
         class_counts = {
             str(int(cls)): int(np.sum(y == cls)) for cls in np.unique(y)
         }
+        feature_distribution = _calculate_distribution_summary(X_full_norm, feature_names)
+        cv_score_serialisable: Optional[float] = (
+            float(best_cv_score) if best_cv_score is not None and np.isfinite(best_cv_score) else None
+        )
         diagnostics = TrainingDiagnostics(
             model_type=best_type,
             best_params=best_params,
@@ -675,9 +1022,12 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> Optional[T
             joblib.dump(persisted_model, MODEL_PKL)
             model_metadata = {
                 'model_type': best_type,
+                'model_name': best_candidate_name,
+                'feature_view': best_view,
                 'scaler_mean': scaler_full.mean_.tolist(),
                 'scaler_scale': scaler_full.scale_.tolist(),
                 'feature_names': feature_names,
+                'model_feature_names': model_feature_names,
                 'validation_metrics': metrics,
                 'calibration': {
                     'applied': calibrated,
@@ -685,21 +1035,32 @@ def train_model(iterations: int = 200, learning_rate: float = 0.1) -> Optional[T
                 },
                 'best_params': best_params,
                 'class_distribution': class_counts,
+                'class_weights': class_weight_metadata,
                 'validation_samples': int(len(y_val)),
                 'training_timestamp': datetime.utcnow().isoformat(),
                 'feature_importance': feature_info,
+                'feature_distribution': feature_distribution,
+                'cv_best_score': cv_score_serialisable,
+                'selection_info': selection_info,
+                'pca': {
+                    'components': getattr(pca_full, 'components_', None).tolist() if best_view == 'pca' and hasattr(pca_full, 'components_') else None,
+                    'mean': getattr(pca_full, 'mean_', None).tolist() if best_view == 'pca' and hasattr(pca_full, 'mean_') else None,
+                    'explained_variance_ratio': getattr(pca_full, 'explained_variance_ratio_', None).tolist() if best_view == 'pca' and hasattr(pca_full, 'explained_variance_ratio_') else None,
+                },
             }
             with open(MODEL_JSON, 'w') as f:
                 json.dump(model_metadata, f, indent=2)
             logger.info(
-                "Best model (%s) saved to %s with metadata %s",
+                "Best model (%s/%s) saved to %s with metadata %s",
                 best_type,
+                best_view,
                 MODEL_PKL,
                 MODEL_JSON,
             )
         except Exception as e:
             logger.warning("Failed to save model: %s", e, exc_info=True)
         return diagnostics
+
     else:
         # ------------------------------------------------------------------
         # Fallback: manual logistic regression without sklearn
@@ -767,6 +1128,68 @@ def _load_model_metadata() -> Dict[str, Any]:
             return json.load(f)
     except Exception:
         return {}
+
+
+def detect_feature_drift(
+    recent_data: pd.DataFrame,
+    feature_shift_threshold: float = 0.3,
+    label_shift_threshold: float = 0.05,
+) -> Dict[str, Any]:
+    """Detect distribution drift between recent samples and the training data."""
+
+    metadata = _load_model_metadata()
+    if not metadata:
+        return {'status': 'unavailable', 'reason': 'no_metadata'}
+    feature_names: List[str] = metadata.get('feature_names') or []
+    if not feature_names:
+        return {'status': 'unavailable', 'reason': 'missing_feature_names'}
+    reference_summary: Dict[str, Dict[str, float]] = metadata.get('feature_distribution') or {}
+    if not reference_summary:
+        return {'status': 'unavailable', 'reason': 'missing_reference_distribution'}
+    scaler_mean = np.asarray(metadata.get('scaler_mean', []), dtype=float)
+    scaler_scale = np.asarray(metadata.get('scaler_scale', []), dtype=float)
+    if scaler_mean.size == 0 or scaler_scale.size == 0:
+        return {'status': 'unavailable', 'reason': 'missing_scaler'}
+    X_recent, y_recent = _extract_features(recent_data)
+    if X_recent.size == 0:
+        return {'status': 'unavailable', 'reason': 'no_recent_samples'}
+    try:
+        X_recent_norm = (X_recent - scaler_mean) / scaler_scale
+    except Exception:
+        return {'status': 'error', 'reason': 'normalisation_failed'}
+    recent_summary = _calculate_distribution_summary(X_recent_norm, feature_names)
+    drift_features: Dict[str, float] = {}
+    for name in feature_names:
+        ref_stats = reference_summary.get(name)
+        recent_stats = recent_summary.get(name)
+        if not ref_stats or not recent_stats:
+            continue
+        ref_std = abs(ref_stats.get('std', 0.0)) + 1e-6
+        mean_shift = abs(recent_stats.get('mean', 0.0) - ref_stats.get('mean', 0.0)) / ref_std
+        std_shift = abs(recent_stats.get('std', 0.0) - ref_stats.get('std', 0.0)) / ref_std
+        drift_score = float(max(mean_shift, std_shift))
+        if drift_score > feature_shift_threshold:
+            drift_features[name] = drift_score
+    label_drift: Dict[str, float] = {}
+    reference_classes = metadata.get('class_distribution', {})
+    if reference_classes and y_recent.size > 0:
+        recent_counts = {str(int(cls)): int(np.sum(y_recent == cls)) for cls in np.unique(y_recent)}
+        total_ref = float(sum(reference_classes.values()) or 1.0)
+        total_recent = float(sum(recent_counts.values()) or 1.0)
+        for cls in set(reference_classes.keys()) | set(recent_counts.keys()):
+            ref_ratio = reference_classes.get(cls, 0) / total_ref
+            recent_ratio = recent_counts.get(cls, 0) / total_recent
+            diff = abs(recent_ratio - ref_ratio)
+            if diff > label_shift_threshold:
+                label_drift[cls] = diff
+    should_retrain = bool(drift_features or label_drift)
+    return {
+        'status': 'ok',
+        'should_retrain': should_retrain,
+        'feature_drift': drift_features,
+        'label_drift': label_drift,
+        'recent_samples': int(len(X_recent)),
+    }
 
 
 def _coerce_bool(value: Any) -> Optional[bool]:
@@ -917,19 +1340,24 @@ def predict_success_probability(
     model_type = metadata.get('model_type', 'manual')
     try:
         # Use sklearn model if available
-        if model_type in {'logistic', 'random_forest', 'gradient_boosting', 'mlp', 'xgboost', 'lightgbm'} and SKLEARN_AVAILABLE and os.path.exists(MODEL_PKL):
-            # Load scaler statistics
-            mean = np.array(metadata.get('scaler_mean'))
-            scale = np.array(metadata.get('scaler_scale'))
+        if model_type in {'logistic', 'random_forest', 'gradient_boosting', 'mlp', 'xgboost', 'lightgbm', 'catboost'} and SKLEARN_AVAILABLE and os.path.exists(MODEL_PKL):
+            mean = np.array(metadata.get('scaler_mean'), dtype=float)
+            scale = np.array(metadata.get('scaler_scale'), dtype=float)
+            scale = np.where(scale == 0, 1.0, scale)
             x_norm = (x - mean) / scale
-            # Load model
+            view = metadata.get('feature_view', 'standard')
+            selection_info = metadata.get('selection_info') if view == 'rfe' else None
+            pca_params = metadata.get('pca') if view == 'pca' else None
+            x_view = _transform_feature_vector(x_norm, view, selection_info, pca_params)
             clf = joblib.load(MODEL_PKL)
-            # Some classifiers (e.g., GradientBoosting) expect 2D array
-            x_norm_2d = x_norm.reshape(1, -1)
-            proba = clf.predict_proba(x_norm_2d)
-            # Class 1 is success (win); index may vary but binary classification returns shape (n,2)
-            prob = float(proba[0][1])
-            return prob
+            x_input = np.asarray(x_view, dtype=float).reshape(1, -1)
+            if hasattr(clf, 'predict_proba'):
+                proba = clf.predict_proba(x_input)
+                prob = float(proba[0][1])
+                return prob
+            if hasattr(clf, 'predict'):
+                pred = clf.predict(x_input)
+                return float(pred[0])
         elif model_type == 'manual':
             # Manual logistic regression
             mu = np.array(metadata.get('mu'))
