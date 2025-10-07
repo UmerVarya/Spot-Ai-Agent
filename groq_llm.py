@@ -23,6 +23,7 @@ import json
 import aiohttp
 import asyncio
 import time
+from typing import Dict, Mapping, List, Tuple
 import config
 from log_utils import setup_logger
 from groq_safe import (
@@ -33,10 +34,9 @@ from groq_safe import (
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-HEADERS = {
-    "Authorization": f"Bearer {GROQ_API_KEY}",
-    "Content-Type": "application/json"
-}
+HEADERS = {"Content-Type": "application/json"}
+if GROQ_API_KEY:
+    HEADERS["Authorization"] = f"Bearer {GROQ_API_KEY}"
 
 logger = setup_logger(__name__)
 
@@ -231,3 +231,114 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
         latency = time.perf_counter() - start if 'start' in locals() else 0.0
         logger.error("Async LLM Exception after %.2fs: %s", latency, e, exc_info=True)
         return "LLM error: Exception occurred."
+
+
+async def async_batch_llm_judgment(
+    prompts: Mapping[str, str],
+    *,
+    batch_size: int = 4,
+    temperature: float = 0.4,
+    max_tokens: int = 500,
+) -> Dict[str, str]:
+    """Send multiple prompts to Groq in batched asynchronous requests."""
+
+    if not prompts:
+        return {}
+    if not GROQ_API_KEY:
+        return {symbol: "LLM error: missing API key" for symbol in prompts}
+
+    model = config.get_groq_model()
+    items = [(symbol, _sanitize_prompt(prompt)) for symbol, prompt in prompts.items()]
+    results: Dict[str, str] = {}
+    async with aiohttp.ClientSession() as session:
+        for idx in range(0, len(items), batch_size):
+            chunk = items[idx : idx + batch_size]
+            batch_prompt = _build_batch_prompt(chunk)
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an experienced crypto trading advisor. For each section labelled by a symbol, "
+                            "return a JSON object with keys decision (Yes/No), confidence (0-10 float), reason, and thesis."
+                            " Respond with a single JSON object mapping each symbol to its analysis."
+                        ),
+                    },
+                    {"role": "user", "content": batch_prompt},
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens * max(1, len(chunk)),
+            }
+
+            response = await _execute_async_request(session, payload)
+            content = (
+                response.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
+            try:
+                parsed = json.loads(content)
+            except Exception:
+                parsed = {}
+            for symbol, _ in chunk:
+                entry = parsed.get(symbol)
+                if isinstance(entry, str):
+                    results[symbol] = entry
+                elif isinstance(entry, Mapping):
+                    try:
+                        results[symbol] = json.dumps(entry)
+                    except Exception:
+                        results[symbol] = content
+                else:
+                    results[symbol] = content
+    return results
+
+
+def _build_batch_prompt(chunk: List[Tuple[str, str]]) -> str:
+    sections = []
+    for symbol, prompt in chunk:
+        sections.append(f"### {symbol}\n{prompt}")
+    return "\n\n".join(sections)
+
+
+async def _execute_async_request(session: aiohttp.ClientSession, payload: dict) -> dict:
+    model_used = payload["model"]
+    start = time.perf_counter()
+    async with session.post(GROQ_API_URL, headers=HEADERS, json=payload) as resp:
+        latency = time.perf_counter() - start
+        if resp.status == 200:
+            data = await resp.json()
+            logger.info("Async batch LLM call succeeded in %.2fs (model=%s)", latency, model_used)
+            return data
+        error_detail = await _parse_async_error(resp)
+        if (
+            resp.status in {400, 404}
+            and payload["model"] != config.DEFAULT_GROQ_MODEL
+            and is_model_decommissioned_error(error_detail)
+        ):
+            fallback_model = config.DEFAULT_GROQ_MODEL
+            logger.warning(
+                "Groq model %s unavailable (%s). Retrying batch with fallback model %s.",
+                payload["model"],
+                describe_error(error_detail),
+                fallback_model,
+            )
+            retry_payload = {**payload, "model": fallback_model}
+            return await _execute_async_request(session, retry_payload)
+        logger.error(
+            "Batch LLM request failed in %.2fs: %s, %s",
+            latency,
+            resp.status,
+            describe_error(error_detail) or error_detail,
+        )
+        raise RuntimeError("Groq batch LLM request failed")
+
+
+async def _parse_async_error(resp: aiohttp.ClientResponse) -> object:
+    text = await resp.text()
+    try:
+        return json.loads(text)
+    except Exception:
+        return text
