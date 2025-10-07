@@ -83,6 +83,18 @@ TRADE_HISTORY_COLUMNS = [
     "size_tp2",
     "notional_tp1",
     "notional_tp2",
+    "auction_state",
+    "volume_profile_leg_type",
+    "volume_profile_poc",
+    "volume_profile_lvns",
+    "volume_profile_bin_width",
+    "volume_profile_snapshot",
+    "lvn_entry_level",
+    "lvn_stop",
+    "poc_target",
+    "orderflow_state_detail",
+    "orderflow_features",
+    "orderflow_snapshot",
 ]
 
 # Mapping of normalised legacy column names to their canonical equivalents.
@@ -176,6 +188,18 @@ COLUMN_SYNONYMS: Dict[str, str] = {
     "sizetp2": "size_tp2",
     "notionaltp1": "notional_tp1",
     "notionaltp2": "notional_tp2",
+    "auctionstate": "auction_state",
+    "volumeprofilelegtype": "volume_profile_leg_type",
+    "volumeprofilepoc": "volume_profile_poc",
+    "volumeprofilelvns": "volume_profile_lvns",
+    "volumeprofilebinwidth": "volume_profile_bin_width",
+    "volumeprofilesnapshot": "volume_profile_snapshot",
+    "lvnentrylevel": "lvn_entry_level",
+    "lvnstop": "lvn_stop",
+    "poctarget": "poc_target",
+    "orderflowstatedetail": "orderflow_state_detail",
+    "orderflowfeatures": "orderflow_features",
+    "orderflowsnapshot": "orderflow_snapshot",
 }
 
 

@@ -25,7 +25,7 @@ import csv
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 from log_utils import ensure_symlink
 from notifier import send_performance_email
 
@@ -414,11 +414,12 @@ def log_trade_result(
     existing_headers: list[str] = []
     header_rename_map: dict[str, str] = {}
 
-    def _optional_text_field(value: Optional[str]) -> str:
+    def _optional_text_field(value: Optional[object]) -> str:
         if value is None:
             return MISSING_VALUE
         if isinstance(value, str):
-            return value if value.strip() else MISSING_VALUE
+            token = value.strip()
+            return token if token else MISSING_VALUE
         return str(value)
 
     def _optional_numeric_field(value: Optional[object]):
@@ -457,6 +458,42 @@ def log_trade_result(
             return json.dumps(value)
         except Exception:
             return ERROR_VALUE
+
+    def _ensure_mapping(obj: Optional[object]) -> Optional[Mapping[str, object]]:
+        if obj is None:
+            return None
+        if isinstance(obj, Mapping):
+            return obj  # type: ignore[return-value]
+        if hasattr(obj, "to_dict"):
+            try:
+                candidate = obj.to_dict()
+            except Exception:
+                return None
+            if isinstance(candidate, Mapping):
+                return candidate  # type: ignore[return-value]
+            return None
+        if isinstance(obj, str):
+            try:
+                decoded = json.loads(obj)
+            except Exception:
+                return None
+            if isinstance(decoded, Mapping):
+                return decoded  # type: ignore[return-value]
+        return None
+
+    def _normalise_json_value(value: object) -> object:
+        if isinstance(value, Mapping):
+            return {str(k): _normalise_json_value(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_normalise_json_value(v) for v in value]
+        try:
+            if isinstance(value, (int, float, bool)) or value is None:
+                return value
+            if hasattr(value, "__float__"):
+                return float(value)  # type: ignore[return-value]
+        except Exception:
+            return value
+        return value
 
     entry_price = trade.get("entry")
     try:
@@ -641,6 +678,49 @@ def log_trade_result(
     tp1_flag = bool(trade.get("tp1_partial")) or "tp1_partial" in outcome_lower
     tp2_flag = bool(trade.get("tp2_partial")) or "tp2_partial" in outcome_lower
 
+    volume_profile_summary = _ensure_mapping(trade.get("volume_profile"))
+    volume_profile_poc = None
+    volume_profile_leg_type = None
+    volume_profile_lvns = None
+    volume_profile_bin_width = None
+    volume_profile_serialisable = None
+    if volume_profile_summary:
+        volume_profile_leg_type = volume_profile_summary.get("leg_type")
+        volume_profile_poc = volume_profile_summary.get("poc")
+        volume_profile_bin_width = volume_profile_summary.get("bin_width")
+        lvns_data = volume_profile_summary.get("lvns")
+        if isinstance(lvns_data, (list, tuple)):
+            cleaned_lvns: list[float] = []
+            for level in lvns_data:
+                try:
+                    cleaned_lvns.append(float(level))
+                except Exception:
+                    continue
+            volume_profile_lvns = cleaned_lvns
+        volume_profile_serialisable = _normalise_json_value(volume_profile_summary)
+
+    orderflow_snapshot = _ensure_mapping(trade.get("orderflow_analysis"))
+    orderflow_state_detail = None
+    orderflow_features = None
+    orderflow_serialisable = None
+    if orderflow_snapshot:
+        orderflow_state_detail = orderflow_snapshot.get("state")
+        features_candidate = orderflow_snapshot.get("features")
+        if isinstance(features_candidate, Mapping):
+            cleaned_features: dict[str, object] = {}
+            for key, value in features_candidate.items():
+                try:
+                    numeric = float(value)
+                except Exception:
+                    numeric = value
+                cleaned_features[str(key)] = numeric
+            orderflow_features = cleaned_features
+        elif isinstance(features_candidate, (list, tuple)):
+            orderflow_features = list(features_candidate)
+        else:
+            orderflow_features = _normalise_json_value(features_candidate) if features_candidate is not None else None
+        orderflow_serialisable = _normalise_json_value(orderflow_snapshot)
+
     row = {
         "trade_id": trade.get("trade_id", str(uuid.uuid4())),
         "timestamp": _to_utc_iso(),
@@ -703,6 +783,18 @@ def log_trade_result(
         "size_tp2": _optional_numeric_field(0.0),
         "notional_tp1": _optional_numeric_field(0.0),
         "notional_tp2": _optional_numeric_field(0.0),
+        "auction_state": _optional_text_field(trade.get("auction_state")),
+        "volume_profile_leg_type": _optional_text_field(volume_profile_leg_type),
+        "volume_profile_poc": _optional_numeric_field(volume_profile_poc),
+        "volume_profile_lvns": _serialise_extra_field(volume_profile_lvns),
+        "volume_profile_bin_width": _optional_numeric_field(volume_profile_bin_width),
+        "volume_profile_snapshot": _serialise_extra_field(volume_profile_serialisable),
+        "lvn_entry_level": _optional_numeric_field(trade.get("lvn_entry_level")),
+        "lvn_stop": _optional_numeric_field(trade.get("lvn_stop")),
+        "poc_target": _optional_numeric_field(trade.get("poc_target")),
+        "orderflow_state_detail": _optional_text_field(orderflow_state_detail),
+        "orderflow_features": _serialise_extra_field(orderflow_features),
+        "orderflow_snapshot": _serialise_extra_field(orderflow_serialisable),
     }
 
     if tp1_flag:
@@ -785,6 +877,33 @@ def log_trade_result(
                 canonical_headers = {
                     header_rename_map.get(col, col) for col in existing_headers
                 }
+                missing_required = [
+                    col
+                    for col in TRADE_HISTORY_HEADERS
+                    if col not in canonical_headers
+                ]
+                if missing_required:
+                    try:
+                        _consolidate_trade_history_file()
+                    except Exception:  # pragma: no cover - best effort upgrade
+                        logger.exception(
+                            "Failed to expand trade history columns in %s", TRADE_HISTORY_FILE
+                        )
+                    try:
+                        with open(TRADE_HISTORY_FILE, "r", encoding="utf-8") as f:
+                            first_line = f.readline()
+                    except OSError:
+                        first_line = ""
+                    if _header_is_compatible(first_line, TRADE_HISTORY_HEADERS):
+                        existing_headers = _parse_header_columns(first_line)
+                        headers = existing_headers or list(TRADE_HISTORY_HEADERS)
+                        try:
+                            header_rename_map = build_rename_map(headers)
+                        except Exception:
+                            header_rename_map = {col: col for col in headers}
+                        canonical_headers = {
+                            header_rename_map.get(col, col) for col in headers
+                        }
                 if "pattern" not in canonical_headers:
                     try:
                         _consolidate_trade_history_file()
@@ -1055,7 +1174,13 @@ def _consolidate_trade_history_file(path: Optional[str] = None) -> None:
     # when the file is missing or unreadable. In that case we still want to
     # ensure the on-disk file contains a header so future appends remain
     # aligned.
-    ordered_cols = [col for col in TRADE_HISTORY_HEADERS if col in df.columns]
+    ordered_cols = list(TRADE_HISTORY_HEADERS)
+    if df.empty:
+        df = pd.DataFrame(columns=ordered_cols)
+    else:
+        for col in ordered_cols:
+            if col not in df.columns:
+                df[col] = MISSING_VALUE
     extra_cols = [col for col in df.columns if col not in ordered_cols]
     all_columns = ordered_cols + extra_cols
 

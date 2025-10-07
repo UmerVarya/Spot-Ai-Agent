@@ -1057,6 +1057,19 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     except Exception:
         tech_score_val = None
     exit_reason = data.get("exit_reason", "")
+
+    def _round_price_or_none(value):
+        try:
+            if value is None or value == "":
+                return None
+            return round(float(value), 4)
+        except Exception:
+            return None
+
+    lvn_entry_val = _round_price_or_none(data.get("lvn_entry_level"))
+    lvn_stop_val = _round_price_or_none(data.get("lvn_stop"))
+    poc_target_val = _round_price_or_none(data.get("poc_target"))
+    auction_state_val = str(data.get("auction_state") or "").strip()
     return {
         "Symbol": symbol,
         "Direction": direction_raw if direction_raw is not None else ("short" if is_short else "long"),
@@ -1079,6 +1092,10 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
         "LLM Confidence Score": llm_conf_val,
         "Technical Indicators": tech_score_val,
         "Exit Reason": exit_reason,
+        "Auction State": auction_state_val,
+        "LVN Entry": lvn_entry_val,
+        "LVN Stop": lvn_stop_val,
+        "POC Target": poc_target_val,
     }
 
 
@@ -1230,6 +1247,9 @@ def render_live_tab() -> None:
             "TP1": _fmt_price,
             "TP2": _fmt_price,
             "TP3": _fmt_price,
+            "LVN Entry": _fmt_price,
+            "LVN Stop": _fmt_price,
+            "POC Target": _fmt_price,
             "Quantity": _fmt_quantity,
             "Position Size (USDT)": _fmt_money,
             "PnL ($)": _fmt_money,
@@ -1266,6 +1286,9 @@ def render_live_tab() -> None:
                 "TP1": trade_info.get("tp1"),
                 "TP2": trade_info.get("tp2"),
                 "TP3": trade_info.get("tp3"),
+                "LVN Entry": trade_info.get("lvn_entry_level"),
+                "LVN Stop": trade_info.get("lvn_stop"),
+                "POC Target": trade_info.get("poc_target"),
             }
             if alt is not None:
                 base = (
