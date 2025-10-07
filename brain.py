@@ -56,10 +56,16 @@ except Exception:
         return 4.5
 
 try:
-    from pattern_memory import recall_pattern_confidence  # type: ignore
+    from pattern_memory import (  # type: ignore
+        recall_pattern_confidence,
+        get_pattern_posterior_stats,
+    )
 except Exception:
     def recall_pattern_confidence(symbol: str, pattern_name: str) -> float:  # type: ignore
         return 0.0
+
+    def get_pattern_posterior_stats(symbol: str, pattern_name: str) -> Dict[str, float]:  # type: ignore
+        return {"mean": 0.5, "variance": 1.0 / 12.0, "alpha": 1.0, "beta": 1.0, "trades": 0.0}
 
 try:
     from confidence import calculate_historical_confidence  # type: ignore
@@ -236,6 +242,18 @@ def should_trade(
                 "technical_indicator_score": technical_score,
             }
 
+        pattern_stats: Dict[str, float] = get_pattern_posterior_stats(symbol, pattern_name)
+        posterior_mean = float(pattern_stats.get("mean", 0.5))
+        posterior_variance = float(pattern_stats.get("variance", 1.0 / 12.0))
+        trade_observations = float(pattern_stats.get("trades", 0.0))
+        pattern_memory_context = {
+            "posterior_mean": round(posterior_mean, 4),
+            "posterior_variance": round(posterior_variance, 6),
+            "trades": int(trade_observations),
+            "alpha": float(pattern_stats.get("alpha", 1.0)),
+            "beta": float(pattern_stats.get("beta", 1.0)),
+        }
+
         # Determine adaptive score threshold based on sentiment
         base_threshold: float = get_adaptive_conf_threshold() or 4.5
         if sentiment_bias == "bullish":
@@ -279,6 +297,23 @@ def should_trade(
                 base_thr = 4.5
             if score >= (base_thr - 0.5):
                 score_threshold -= 0.2
+
+        # Bayesian pattern memory adjustments.  When we have sufficient
+        # observations for a given pattern-symbol combination, the posterior
+        # probability and its uncertainty modulate the score threshold.
+        if trade_observations >= 5:
+            threshold_delta = 0.0
+            if posterior_mean >= 0.6:
+                threshold_delta -= min(0.4, (posterior_mean - 0.6) * 1.5)
+            elif posterior_mean <= 0.4:
+                threshold_delta += min(0.4, (0.4 - posterior_mean) * 1.5)
+
+            if posterior_variance > 0.03:
+                threshold_delta += min(0.3, (posterior_variance - 0.03) * 10.0)
+            elif posterior_variance < 0.01:
+                threshold_delta -= min(0.2, (0.01 - posterior_variance) * 15.0)
+
+            score_threshold = round(score_threshold + threshold_delta, 2)
 
         # Volatility-based adjustments
         if volatility is not None and not math.isnan(volatility):
@@ -336,9 +371,16 @@ def should_trade(
             if adx > 25:
                 confidence += 0.5
 
-        # Pattern memory boost
+        # Pattern memory boost using Bayesian posterior statistics
         memory_boost: float = recall_pattern_confidence(symbol, pattern_name)
         confidence += memory_boost
+
+        if trade_observations >= 3:
+            confidence += (posterior_mean - 0.5) * 2.0
+            if posterior_variance < 0.02:
+                confidence += min(0.8, (0.02 - posterior_variance) * 20.0)
+            elif posterior_variance > 0.06:
+                confidence -= min(0.8, (posterior_variance - 0.06) * 12.0)
 
         # Historical performance boost
         hist_result = calculate_historical_confidence(symbol, score, direction, session, pattern_name)
@@ -392,6 +434,7 @@ def should_trade(
                 "llm_confidence": None,
                 "llm_error": False,
                 "technical_indicator_score": technical_score,
+                "pattern_memory": pattern_memory_context,
             }
         if score < score_threshold:
             return {
@@ -403,6 +446,7 @@ def should_trade(
                 "llm_confidence": None,
                 "llm_error": False,
                 "technical_indicator_score": technical_score,
+                "pattern_memory": pattern_memory_context,
             }
         # Require a minimum confidence but allow more flexibility for scalping.
         # Original implementation rejected trades below 4.5; we relax this to 4.0
@@ -418,6 +462,7 @@ def should_trade(
                 "llm_confidence": None,
                 "llm_error": False,
                 "technical_indicator_score": technical_score,
+                "pattern_memory": pattern_memory_context,
             }
 
         advisor_rating: float | None = None
@@ -451,6 +496,9 @@ def should_trade(
             f"Auction State: {auction_state if auction_state is not None else 'N/A'}\n\n"
             "### Historical Memory\n"
             f"Pattern: {pattern_name}\n"
+            f"Posterior Mean Win Rate: {posterior_mean:.2%}\n"
+            f"Posterior Variance: {posterior_variance:.5f}\n"
+            f"Recorded Pattern Trades: {int(trade_observations)}\n"
             f"Historical Context Summary: {recent_summary if recent_summary else 'No recent trades available'}\n\n"
             "Evaluate support and conflict between sections. Provide a concise rationale highlighting decisive factors.\n"
             "Return a JSON object with exactly these keys: decision (\"Yes\" to approve the long trade, \"No\" to reject), confidence (0-10 float), reason (<=200 characters), thesis (2-3 sentences summarizing the trade idea).\n"
@@ -508,6 +556,7 @@ def should_trade(
                 "llm_confidence": None,
                 "llm_error": True,
                 "technical_indicator_score": technical_score,
+                "pattern_memory": pattern_memory_context,
             }
 
         # Parse the LLM response (JSON or fallback)
@@ -542,6 +591,7 @@ def should_trade(
                 "llm_confidence": advisor_rating,
                 "llm_error": False,
                 "technical_indicator_score": technical_score,
+                "pattern_memory": pattern_memory_context,
             }
 
         # Generate narrative
@@ -570,6 +620,7 @@ def should_trade(
             "llm_confidence": advisor_rating,
             "llm_error": False,
             "technical_indicator_score": technical_score,
+            "pattern_memory": pattern_memory_context,
         }
 
     except Exception as e:
