@@ -63,6 +63,18 @@ Each row recorded by `trade_storage.log_trade_result` contains the following col
 | `size_tp2` | Size closed at the TP2 partial exit. |
 | `notional_tp1` | Notional value closed at the TP1 partial exit. |
 | `notional_tp2` | Notional value closed at the TP2 partial exit. |
+| `auction_state` | Auction regime classification (e.g. `balanced`, `out_of_balance_trend`). |
+| `volume_profile_leg_type` | Indicates whether the profile was derived from an impulse or reclaim leg. |
+| `volume_profile_poc` | Point of control price from the captured volume profile. |
+| `volume_profile_lvns` | JSON array of low-volume node (LVN) prices. |
+| `volume_profile_bin_width` | Price step used when constructing the histogram bins. |
+| `volume_profile_snapshot` | JSON blob containing the full volume-profile summary (POC, LVNs, histogram bins, metadata). |
+| `lvn_entry_level` | LVN level that triggered the entry (when available). |
+| `lvn_stop` | Stop level derived from the LVN structure (when available). |
+| `poc_target` | Target price derived from the POC or reclaim objective. |
+| `orderflow_state_detail` | Detailed order-flow state captured at entry. |
+| `orderflow_features` | JSON blob of the order-flow feature vector (CVD, imbalance metrics, spoofing intensity, etc.). |
+| `orderflow_snapshot` | Combined JSON snapshot mirroring the in-memory `orderflow_analysis` structure (state + features). |
 
 The Streamlit dashboard surfaces the stage-specific `size_tp*`,
 `notional_tp*` and `pnl_tp*` columns so each partial take-profit's
@@ -92,7 +104,7 @@ Partial exits are denoted with a `_partial` suffix. Manual closures may appear a
 ## Example Header
 
 ```
-trade_id,timestamp,symbol,direction,entry_time,exit_time,entry,exit,size,notional,fees,slippage,pnl,pnl_pct,outcome,outcome_desc,exit_reason,strategy,session,confidence,btc_dominance,fear_greed,sentiment_bias,sentiment_confidence,score,pattern,narrative,llm_decision,llm_approval,llm_confidence,llm_error,technical_indicator_score,volatility,htf_trend,order_imbalance,order_flow_score,order_flow_flag,order_flow_state,cvd,cvd_change,taker_buy_ratio,trade_imbalance,aggressive_trade_rate,spoofing_intensity,spoofing_alert,volume_ratio,price_change_pct,spread_bps,macro_indicator,tp1_partial,tp2_partial,pnl_tp1,pnl_tp2,size_tp1,size_tp2,notional_tp1,notional_tp2
+trade_id,timestamp,symbol,direction,entry_time,exit_time,entry,exit,size,notional,fees,slippage,pnl,pnl_pct,outcome,outcome_desc,exit_reason,strategy,session,confidence,btc_dominance,fear_greed,sentiment_bias,sentiment_confidence,score,pattern,narrative,llm_decision,llm_approval,llm_confidence,llm_error,technical_indicator_score,volatility,htf_trend,order_imbalance,order_flow_score,order_flow_flag,order_flow_state,cvd,cvd_change,taker_buy_ratio,trade_imbalance,aggressive_trade_rate,spoofing_intensity,spoofing_alert,volume_ratio,price_change_pct,spread_bps,macro_indicator,tp1_partial,tp2_partial,pnl_tp1,pnl_tp2,size_tp1,size_tp2,notional_tp1,notional_tp2,auction_state,volume_profile_leg_type,volume_profile_poc,volume_profile_lvns,volume_profile_bin_width,volume_profile_snapshot,lvn_entry_level,lvn_stop,poc_target,orderflow_state_detail,orderflow_features,orderflow_snapshot
 ```
 
 A single trade may produce multiple rows if partial take-profits occur. Rows are grouped by `trade_id` (falling back to `entry_time`, `symbol` and `strategy` when absent) and collapsed into one summary row by `_deduplicate_history`. PnL, size and notional values are summed for the whole trade, while per-stage fields such as `pnl_tp1`, `pnl_tp2`, `size_tp1`, `size_tp2`, `notional_tp1` and `notional_tp2` detail the contribution of each partial exit alongside the `tp1_partial`/`tp2_partial` flags.
