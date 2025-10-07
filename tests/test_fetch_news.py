@@ -63,6 +63,64 @@ def test_analyze_news_with_llm_async_valid_json(monkeypatch):
     assert result == {"safe": False, "sensitivity": 0.6, "reason": "Volatility expected"}
 
 
+def test_analyze_news_with_llm_async_retries_on_runtime_error(monkeypatch):
+    import fetch_news
+
+    monkeypatch.setattr(fetch_news, "GROQ_API_KEY", "test-key", raising=False)
+    monkeypatch.setattr(
+        fetch_news.config, "get_groq_model", lambda: "custom-model", raising=False
+    )
+
+    calls = []
+
+    async def fake_post(session, payload, *, model_used):
+        calls.append(model_used)
+        if len(calls) == 1:
+            raise RuntimeError("Groq LLM request failed")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"safe_decision": "yes", "reason": "Fallback succeeded"}
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(fetch_news, "_post_groq_request", fake_post, raising=False)
+
+    monkeypatch.setattr(
+        fetch_news,
+        "quantify_event_risk",
+        lambda events: {
+            "considered_events": len(events),
+            "events_in_window": events,
+            "window_hours": 24,
+            "high_impact_events": 1,
+            "risk_score": 2.0,
+        },
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        fetch_news,
+        "reconcile_with_quant_filters",
+        lambda decision, reason, metrics: (True, 0.1, reason),
+        raising=False,
+    )
+
+    result = asyncio.run(fetch_news.analyze_news_with_llm_async(_example_events()))
+
+    assert result == {
+        "safe": True,
+        "sensitivity": 0.1,
+        "reason": "Fallback succeeded",
+    }
+    assert calls == ["custom-model", fetch_news.config.DEFAULT_GROQ_MODEL]
+
+
 def test_analyze_news_with_llm_async_handles_non_json(monkeypatch):
     import fetch_news
 
