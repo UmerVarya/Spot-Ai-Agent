@@ -17,7 +17,8 @@ working directory.
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Tuple, Optional, Union
+import math
+from typing import Any, Dict, List, Tuple, Optional, Union, Mapping
 
 import pandas as pd
 
@@ -62,7 +63,8 @@ MACRO_CONFIDENCE_EXIT_THRESHOLD = 7
 MAX_HOLDING_TIME = timedelta(hours=6)
 
 logger = setup_logger(__name__)
-rl_sizer = RLPositionSizer()
+USE_RL_POSITION_SIZER = False
+rl_sizer = RLPositionSizer() if USE_RL_POSITION_SIZER else None
 
 
 def _coerce_to_utc_datetime(value: Union[str, float, int, datetime, None]) -> Optional[datetime]:
@@ -297,6 +299,8 @@ def execute_exit_trade(
 
 def _update_rl(trade: dict, exit_price: float) -> None:
     """Update RL position sizer based on trade outcome."""
+    if not USE_RL_POSITION_SIZER or rl_sizer is None:
+        return
     try:
         entry = float(trade.get('entry', 0))
         state = trade.get('rl_state', 'neutral')
@@ -371,7 +375,15 @@ def _persist_active_snapshot(
         logger.exception("Failed to persist active trades snapshot")
 
 
-def create_new_trade(trade: dict) -> bool:
+def create_new_trade(
+    trade: dict,
+    *,
+    stop_price: Optional[float] = None,
+    target_price: Optional[float] = None,
+    auction_state: Optional[str] = None,
+    lvn_entry_level: Optional[float] = None,
+    orderflow_analysis: Optional[Mapping[str, Any]] = None,
+) -> bool:
     """Add a new trade to persistent storage if not already active.
 
     Returns
@@ -380,6 +392,48 @@ def create_new_trade(trade: dict) -> bool:
         ``True`` if the trade was stored, ``False`` if a trade with the
         same symbol was already active.
     """
+    def _assign_float(key: str, value: Any) -> None:
+        number = _to_float(value)
+        if number is None or not math.isfinite(number):
+            return
+        trade[key] = number
+
+    if auction_state is not None:
+        trade["auction_state"] = str(auction_state)
+    elif "auction_state" in trade and trade.get("auction_state") is not None:
+        trade["auction_state"] = str(trade["auction_state"])
+
+    if lvn_entry_level is not None:
+        _assign_float("lvn_entry_level", lvn_entry_level)
+    elif "lvn_entry_level" in trade:
+        _assign_float("lvn_entry_level", trade.get("lvn_entry_level"))
+
+    if stop_price is not None:
+        _assign_float("lvn_stop", stop_price)
+    elif "lvn_stop" in trade:
+        _assign_float("lvn_stop", trade.get("lvn_stop"))
+
+    if target_price is not None:
+        _assign_float("poc_target", target_price)
+    elif "poc_target" in trade:
+        _assign_float("poc_target", trade.get("poc_target"))
+
+    snapshot = orderflow_analysis
+    if snapshot is None and isinstance(trade.get("orderflow_analysis"), Mapping):
+        snapshot = trade.get("orderflow_analysis")  # type: ignore[assignment]
+    if isinstance(snapshot, Mapping):
+        state = str(snapshot.get("state", "neutral"))
+        features: Dict[str, Optional[float]] = {}
+        raw_features = snapshot.get("features", {})
+        if isinstance(raw_features, Mapping):
+            for key, value in raw_features.items():
+                clean = _to_float(value)
+                if clean is None or not math.isfinite(clean):
+                    features[str(key)] = None
+                else:
+                    features[str(key)] = clean
+        trade["orderflow_analysis"] = {"state": state, "features": features}
+
     symbol = trade.get("symbol")
     if symbol and is_trade_active(symbol):
         logger.info("Trade for %s already active; skipping new entry.", symbol)
