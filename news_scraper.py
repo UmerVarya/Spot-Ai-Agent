@@ -31,12 +31,26 @@ def fetch_headlines_from_rss(url, limit=10):
         return []
 
 
-def get_combined_headlines():
+def get_combined_headlines(limit: int | None = 60):
+    """Return a blended list of crypto and macro headlines.
+
+    Args:
+        limit: Maximum number of headlines to return. ``None`` disables
+            truncation and returns the full corpus collected.
+
+    Returns:
+        List of headline strings ordered by the order they were fetched.
+    """
+
     headlines = []
-    headlines += fetch_headlines_from_rss(CRYPTO_PANIC_RSS)
-    headlines += fetch_headlines_from_rss(COINDESK_RSS)
-    headlines += fetch_headlines_from_rss(FOREX_FACTORY_RSS)
-    return headlines[:15]
+    headlines += fetch_headlines_from_rss(CRYPTO_PANIC_RSS, limit=limit or 50)
+    headlines += fetch_headlines_from_rss(COINDESK_RSS, limit=limit or 50)
+    headlines += fetch_headlines_from_rss(FOREX_FACTORY_RSS, limit=limit or 50)
+
+    if limit is None:
+        return headlines
+
+    return headlines[:limit]
 
 
 if __name__ == "__main__":

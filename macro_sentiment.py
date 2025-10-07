@@ -1,5 +1,6 @@
 import os
 from news_scraper import get_combined_headlines
+from news_retriever import build_retrieval_context, load_structured_events
 from groq import Groq
 from log_utils import setup_logger
 
@@ -12,21 +13,39 @@ client = Groq(api_key=GROQ_API_KEY)
 logger = setup_logger(__name__)
 
 def analyze_macro_sentiment():
-    headlines = get_combined_headlines()
+    headlines = get_combined_headlines(limit=None)
+    structured_events = load_structured_events()
 
-    if not headlines:
+    if not headlines and not structured_events:
         return {
             "summary": "No news headlines available.",
             "bias": "neutral",
             "confidence": 0
         }
 
+    documents = headlines + structured_events
+    sources = ["headline"] * len(headlines) + ["event"] * len(structured_events)
+
+    context = build_retrieval_context(
+        query=(
+            "macro environment for crypto markets including regulatory "
+            "shifts, macroeconomic releases, institutional flows and on-chain signals"
+        ),
+        documents=documents,
+        sources=sources,
+        top_k=18,
+    )
+
     prompt = f"""
 You are a professional macroeconomic and crypto news analyst.
-Given the following headlines, analyze and summarize the market sentiment.
+You will receive a curated context window that includes the most relevant
+headlines and structured events retrieved from a semantic search corpus.
 
-Headlines:
-{headlines}
+Context:
+{context}
+
+Using only this context, analyze and summarize the prevailing market sentiment.
+Highlight notable macro drivers, regulatory actions and crypto-native signals.
 
 Return your response exactly in this format:
 Summary: <concise summary>
