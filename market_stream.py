@@ -10,6 +10,7 @@ rates without waiting for REST snapshots.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -101,10 +102,59 @@ class RollingTradeStats:
                 self._sell_quote -= stale.quote_qty
                 self._sell_count -= 1
 
+    def _build_price_footprint(
+        self,
+        entries: Iterable[TradeEntry],
+        bin_pct: float = 0.0001,
+    ) -> Tuple[List[Dict[str, float]], float]:
+        """Aggregate executed trades into price-level bins."""
+
+        entries_list = [entry for entry in entries if entry.base_qty > 0 and entry.quote_qty > 0]
+        if not entries_list:
+            return [], 0.0
+
+        last_price = None
+        for entry in reversed(entries_list):
+            price = entry.quote_qty / entry.base_qty
+            if math.isfinite(price) and price > 0:
+                last_price = price
+                break
+
+        if not last_price or last_price <= 0:
+            return [], 0.0
+
+        bin_size = max(last_price * bin_pct, 1e-9)
+        bins: Dict[float, List[float]] = defaultdict(lambda: [0.0, 0.0])
+
+        for entry in entries_list:
+            price = entry.quote_qty / entry.base_qty
+            if not math.isfinite(price) or price <= 0:
+                continue
+            bin_index = int(round(price / bin_size)) if bin_size > 0 else 0
+            price_level = round(bin_index * bin_size, 8)
+            bucket = bins[price_level]
+            if entry.is_taker_buy:
+                bucket[0] += entry.base_qty
+            else:
+                bucket[1] += entry.base_qty
+
+        footprint = [
+            {
+                "price": float(level),
+                "buy_volume": float(values[0]),
+                "sell_volume": float(values[1]),
+            }
+            for level, values in sorted(bins.items())
+            if values[0] > 0 or values[1] > 0
+        ]
+
+        return footprint, float(bin_size)
+
     def snapshot(self, window_seconds: Optional[int] = None) -> Dict[str, float]:
         window = int(window_seconds) if window_seconds is not None else self.window_seconds
         now = time.time()
         with self._lock:
+            entries_list: List[TradeEntry]
             if window != self.window_seconds:
                 cutoff = now - window
                 buy_base = 0.0
@@ -113,9 +163,11 @@ class RollingTradeStats:
                 sell_quote = 0.0
                 buy_count = 0
                 sell_count = 0
+                entries_list = []
                 for entry in self._entries:
                     if entry.timestamp < cutoff:
                         continue
+                    entries_list.append(entry)
                     if entry.is_taker_buy:
                         buy_base += entry.base_qty
                         buy_quote += entry.quote_qty
@@ -126,6 +178,7 @@ class RollingTradeStats:
                         sell_count += 1
             else:
                 self._trim_locked(now)
+                entries_list = list(self._entries)
                 buy_base = max(self._buy_base, 0.0)
                 sell_base = max(self._sell_base, 0.0)
                 buy_quote = max(self._buy_quote, 0.0)
@@ -137,6 +190,7 @@ class RollingTradeStats:
             total_quote = buy_quote + sell_quote
             total_trades = buy_count + sell_count
             trade_rate = total_trades / max(window, 1)
+            footprint_bins, bin_size = self._build_price_footprint(entries_list)
             return {
                 "window_seconds": float(window),
                 "last_event_ts": float(self._last_event_ts),
@@ -156,6 +210,8 @@ class RollingTradeStats:
                 "cumulative_total_base_volume": float(self._cumulative_total_base),
                 "cumulative_net_quote_volume": float(self._cumulative_net_quote),
                 "cumulative_total_quote_volume": float(self._cumulative_total_quote),
+                "price_footprint_bins": footprint_bins,
+                "price_footprint_bin_size": float(bin_size),
             }
 
 
