@@ -17,6 +17,7 @@ from log_utils import setup_logger, LOG_FILE
 
 logger = setup_logger(__name__)
 
+import math
 import time
 import os
 import sys
@@ -479,11 +480,33 @@ def run_agent_loop() -> None:
                     indicators = {
                         "rsi": float(indicators_df['rsi'].iloc[-1] if 'rsi' in indicators_df else 50.0),
                         "macd": float(indicators_df['macd'].iloc[-1] if 'macd' in indicators_df else 0.0),
+                        "macd_signal": float(
+                            indicators_df['macd_signal'].iloc[-1]
+                            if 'macd_signal' in indicators_df
+                            else math.nan
+                        ),
                         "adx": float(indicators_df['adx'].iloc[-1] if 'adx' in indicators_df else 20.0),
+                        "di_plus": float(
+                            indicators_df['di_plus'].iloc[-1]
+                            if 'di_plus' in indicators_df
+                            else math.nan
+                        ),
+                        "di_minus": float(
+                            indicators_df['di_minus'].iloc[-1]
+                            if 'di_minus' in indicators_df
+                            else math.nan
+                        ),
                     }
                 except Exception:
                     indicators_df = price_data
-                    indicators = {"rsi": 50.0, "macd": 0.0, "adx": 20.0}
+                    indicators = {
+                        "rsi": 50.0,
+                        "macd": 0.0,
+                        "macd_signal": math.nan,
+                        "adx": 20.0,
+                        "di_plus": math.nan,
+                        "di_minus": math.nan,
+                    }
                 next_ret = 0.0
                 try:
                     if not os.path.exists(SEQ_PKL):

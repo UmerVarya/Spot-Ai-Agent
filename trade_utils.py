@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import pandas as pd
 import os
@@ -210,12 +211,24 @@ except Exception:
             rs = avg_gain / (avg_loss + 1e-9)
             return 100 - (100 / (1 + rs))
     class ADXIndicator:
-        def __init__(self, high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14):
+        def __init__(
+            self,
+            high: pd.Series,
+            low: pd.Series,
+            close: pd.Series,
+            window: int = 14,
+        ):
             self.high = high
             self.low = low
             self.close = close
             self.window = window
-        def adx(self) -> pd.Series:
+            self._plus_di: Optional[pd.Series] = None
+            self._minus_di: Optional[pd.Series] = None
+            self._adx: Optional[pd.Series] = None
+
+        def _compute(self) -> None:
+            if self._adx is not None:
+                return
             up_move = self.high.diff()
             down_move = self.low.diff()
             plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
@@ -225,10 +238,24 @@ except Exception:
             tr3 = (self.low - self.close.shift()).abs()
             tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
             atr = tr.rolling(self.window).mean()
-            plus_di = 100 * (pd.Series(plus_dm).rolling(self.window).mean() / (atr + 1e-9))
-            minus_di = 100 * (pd.Series(minus_dm).rolling(self.window).mean() / (atr + 1e-9))
+            plus_di = 100 * (pd.Series(plus_dm, index=self.high.index).rolling(self.window).mean() / (atr + 1e-9))
+            minus_di = 100 * (pd.Series(minus_dm, index=self.high.index).rolling(self.window).mean() / (atr + 1e-9))
             dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
-            return dx.rolling(self.window).mean()
+            self._plus_di = plus_di
+            self._minus_di = minus_di
+            self._adx = dx.rolling(self.window).mean()
+
+        def adx(self) -> pd.Series:
+            self._compute()
+            return self._adx if self._adx is not None else pd.Series(dtype=float)
+
+        def adx_pos(self) -> pd.Series:
+            self._compute()
+            return self._plus_di if self._plus_di is not None else pd.Series(dtype=float)
+
+        def adx_neg(self) -> pd.Series:
+            self._compute()
+            return self._minus_di if self._minus_di is not None else pd.Series(dtype=float)
     class BollingerBands:
         def __init__(self, series: pd.Series, window: int = 20, window_dev: int = 2):
             self.series = series
@@ -830,7 +857,15 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df['macd'] = macd_obj.macd_diff()
         df['macd_signal'] = macd_obj.macd_signal()
         df['rsi'] = RSIIndicator(df['close'], window=14).rsi()
-        df['adx'] = ADXIndicator(df['high'], df['low'], df['close'], window=14).adx().fillna(0)
+        adx_indicator = ADXIndicator(df['high'], df['low'], df['close'], window=14)
+        df['adx'] = adx_indicator.adx().fillna(0)
+        try:
+            df['di_plus'] = adx_indicator.adx_pos().fillna(0)
+            df['di_minus'] = adx_indicator.adx_neg().fillna(0)
+        except AttributeError:
+            # Older TA versions may not expose DI helpers; fall back to zeros.
+            df['di_plus'] = 0.0
+            df['di_minus'] = 0.0
         bb = BollingerBands(df['close'], window=20, window_dev=2)
         df['bb_upper'] = bb.bollinger_hband()
         df['bb_lower'] = bb.bollinger_lband()
@@ -861,7 +896,13 @@ def summarise_technical_score(
     indicators: Mapping[str, Any],
     direction: str = "long",
 ) -> float:
-    """Return a bounded 0–10 technical score summarising core indicators."""
+    """Return a bounded 0–10 technical score summarising core indicators.
+
+    The revised version favours smooth, continuous adjustments so that very small
+    changes in high-frequency data do not create discontinuous confidence jumps.
+    RSI and MACD inputs are normalised via ``tanh`` and ADX is weighted by the
+    trend direction inferred from the directional movement index (DI+/DI-).
+    """
 
     def _extract(name: str, default: float) -> float:
         raw = indicators.get(name)
@@ -877,43 +918,55 @@ def summarise_technical_score(
         except Exception:
             return default
 
-    rsi = _extract("rsi", 50.0)
-    macd = _extract("macd", 0.0)
-    adx = _extract("adx", 20.0)
+    def _finite(value: float, fallback: float) -> float:
+        return value if math.isfinite(value) else fallback
+
+    rsi = _finite(_extract("rsi", 50.0), 50.0)
+    macd = _finite(_extract("macd", 0.0), 0.0)
+    macd_signal = _extract("macd_signal", math.nan)
+    adx = _finite(_extract("adx", 20.0), 20.0)
+    di_plus = _extract("di_plus", math.nan)
+    di_minus = _extract("di_minus", math.nan)
+
     score = 5.0
     bias = (direction or "long").strip().lower()
+    if bias not in {"long", "short"}:
+        bias = "long"
 
+    # --- RSI: favour oversold readings for longs and overbought for shorts.
+    rsi_delta = (50.0 - rsi) / 10.0
     if bias == "short":
-        if rsi > 70:
-            score += 2.0
-        elif rsi > 55:
-            score += 0.5
-        elif rsi < 30:
-            score -= 2.0
-        elif rsi < 40:
-            score -= 0.5
-        macd_adj = max(min(-macd * 4.0, 1.5), -1.5)
-    else:
-        if rsi < 30:
-            score += 2.0
-        elif rsi < 45:
-            score += 0.5
-        elif rsi > 70:
-            score -= 2.0
-        elif rsi > 60:
-            score -= 0.5
-        macd_adj = max(min(macd * 4.0, 1.5), -1.5)
+        rsi_delta = -rsi_delta
+    rsi_component = 2.5 * math.tanh(rsi_delta / 2.0)
+    score += rsi_component
 
-    score += macd_adj
-
-    if adx >= 35:
-        score += 1.5
-    elif adx >= 25:
-        score += 1.0
-    elif adx >= 15:
-        score += 0.3
+    # --- MACD: emphasise histogram slope which responds faster on lower TFs.
+    if math.isfinite(macd_signal):
+        macd_hist = macd - macd_signal
     else:
-        score -= 0.7
+        macd_hist = macd
+    macd_hist = _finite(macd_hist, 0.0)
+    macd_component = 2.0 * math.tanh(macd_hist * 8.0)
+    if bias == "short":
+        macd_component *= -1.0
+    score += macd_component
+
+    # --- ADX + Directional Index: reward strength only when aligned with bias.
+    adx_strength = math.tanh((adx - 20.0) / 15.0)
+    alignment = 0.0
+    if math.isfinite(di_plus) and math.isfinite(di_minus):
+        di_diff = di_plus - di_minus
+        alignment = math.tanh(di_diff / 20.0)
+        if bias == "short":
+            alignment = -alignment
+    else:
+        # Without DI data treat strong trends as a headwind for counter trades.
+        alignment = 1.0 if bias == "long" else -0.6
+
+    adx_component = 1.1 * adx_strength * alignment
+    if adx_strength > 0 and alignment < 0:
+        adx_component -= 0.5 * adx_strength * abs(alignment)
+    score += adx_component
 
     return round(max(0.0, min(score, 10.0)), 2)
 
@@ -1308,8 +1361,17 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         ).macd_diff()
         rsi = RSIIndicator(close, window=14).rsi()
         with np.errstate(invalid='ignore', divide='ignore'):
-            adx_series = ADXIndicator(high=high, low=low, close=close, window=14).adx()
+            adx_indicator = ADXIndicator(high=high, low=low, close=close, window=14)
+            adx_series = adx_indicator.adx()
+            try:
+                di_plus = adx_indicator.adx_pos()
+                di_minus = adx_indicator.adx_neg()
+            except AttributeError:
+                di_plus = pd.Series(0.0, index=adx_series.index)
+                di_minus = pd.Series(0.0, index=adx_series.index)
         adx = adx_series.fillna(0)
+        di_plus = di_plus.fillna(0)
+        di_minus = di_minus.fillna(0)
         bb = BollingerBands(
             close,
             window=int(indicator_params["bb_window"]),
