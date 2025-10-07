@@ -23,6 +23,7 @@ import os
 import sys
 import asyncio
 from datetime import datetime
+from typing import Any, Optional
 
 # Centralized configuration loader
 import config
@@ -530,6 +531,19 @@ def run_agent_loop() -> None:
                     "neutral"
                 )
                 signal_snapshot = price_data.attrs.get("signal_features", {}) or {}
+                volume_profile_info = signal_snapshot.get("volume_profile")
+                if not volume_profile_info:
+                    volume_profile_info = price_data.attrs.get("volume_profile", {}) or {}
+                if not isinstance(volume_profile_info, dict):
+                    volume_profile_info = {}
+                def _maybe_float(value: Any) -> Optional[float]:
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError):
+                        return None
+                    if not math.isfinite(number):
+                        return None
+                    return number
                 flow_features = getattr(flow_analysis, "features", {}) or {}
                 order_imb_feature = signal_snapshot.get("order_book_imbalance")
                 if order_imb_feature is None:
@@ -712,6 +726,37 @@ def run_agent_loop() -> None:
                         tp1 = round(entry_price + atr_val * 1.0, 6)
                         tp2 = round(entry_price + atr_val * 2.0, 6)
                         tp3 = round(entry_price + atr_val * 3.0, 6)
+                        poc_level = _maybe_float(volume_profile_info.get("poc"))
+                        if poc_level is not None and poc_level > entry_price:
+                            tp1 = round(poc_level, 6)
+                        recommended_stop = _maybe_float(volume_profile_info.get("recommended_stop"))
+                        if recommended_stop is not None and recommended_stop < entry_price:
+                            sl = round(max(recommended_stop, 0.0), 6)
+                        if tp2 <= tp1:
+                            tp2 = round(max(tp1, entry_price + atr_val * 1.5), 6)
+                        if tp3 <= tp2:
+                            tp3 = round(max(tp2, entry_price + atr_val * 2.5), 6)
+                        sanitized_profile: dict[str, Any] = {}
+                        if volume_profile_info:
+                            sanitized_profile = {
+                                "auction_state": volume_profile_info.get("auction_state"),
+                                "context": volume_profile_info.get("context"),
+                                "orderflow_state": volume_profile_info.get("orderflow_state"),
+                                "lvn_ready": bool(volume_profile_info.get("lvn_ready")),
+                                "orderflow_required": bool(volume_profile_info.get("orderflow_required")),
+                            }
+                            for key in ("poc", "active_lvn", "recommended_stop", "balance_low", "balance_high", "failed_low"):
+                                val = _maybe_float(volume_profile_info.get(key))
+                                if val is not None:
+                                    sanitized_profile[key] = val
+                            lvns_values = volume_profile_info.get("lvns")
+                            if isinstance(lvns_values, (list, tuple)):
+                                cleaned_lvns = [lvl for lvl in (_maybe_float(x) for x in lvns_values) if lvl is not None]
+                                if cleaned_lvns:
+                                    sanitized_profile["lvns"] = cleaned_lvns
+                            gate_reason = volume_profile_info.get("gate_reason")
+                            if gate_reason:
+                                sanitized_profile["gate_reason"] = str(gate_reason)
                         htf_trend = htf_trend_pct
                         risk_amount = position_size * sl_dist
                         # Determine the high-level strategy label.  The
@@ -788,6 +833,8 @@ def run_agent_loop() -> None:
                             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "news_summary": decision_obj.get("news_summary", ""),
                         }
+                        if sanitized_profile:
+                            new_trade["volume_profile"] = sanitized_profile
                         if micro_plan:
                             logger.debug("Microstructure plan for %s: %s", symbol, micro_plan)
                             new_trade["microstructure_plan"] = micro_plan

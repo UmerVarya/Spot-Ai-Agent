@@ -24,6 +24,8 @@ except Exception:
 from trade_storage import TRADE_HISTORY_FILE, load_trade_history_df  # shared trade log path
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
+from auction_state import get_auction_state
+from volume_profile import compute_volume_profile
 from multi_timeframe import (
     multi_timeframe_confluence,
     multi_timeframe_indicator_alignment,
@@ -1246,6 +1248,110 @@ def estimate_commission(symbol: str, quantity: float = 1.0, maker: bool = False)
     """Estimate the commission fee rate for a given trade."""
     return 0.0004 if maker else 0.001
 
+
+def _pick_active_lvn(price: float, lvns: list[float], bin_size: float, tolerance_pct: float = 0.0015) -> Optional[float]:
+    """Return the LVN closest to ``price`` within a tolerance."""
+
+    if not lvns or price != price or price <= 0:
+        return None
+    try:
+        tolerance = max(price * tolerance_pct, float(bin_size) * 1.5 if bin_size == bin_size else 0.0)
+    except Exception:
+        tolerance = price * tolerance_pct
+    nearest = min(lvns, key=lambda level: abs(level - price))
+    if abs(nearest - price) <= tolerance:
+        return float(nearest)
+    return None
+
+
+def _extract_impulse_leg(df: pd.DataFrame, lookback: int = 150) -> Optional[pd.DataFrame]:
+    """Approximate the most recent impulse leg for trend continuation setups."""
+
+    if df is None or df.empty:
+        return None
+    recent = df.tail(lookback)
+    if recent.empty or len(recent) < 10:
+        return None
+    try:
+        high_series = pd.to_numeric(recent["high"], errors="coerce")
+        low_series = pd.to_numeric(recent["low"], errors="coerce")
+    except Exception:
+        return None
+    if high_series.isna().all() or low_series.isna().all():
+        return None
+    max_price = float(high_series.max())
+    if not np.isfinite(max_price):
+        return None
+    high_idx = high_series[high_series == max_price].index[-1]
+    leg_slice = recent.loc[:high_idx]
+    if leg_slice.empty:
+        return None
+    low_idx = pd.to_numeric(leg_slice["low"], errors="coerce").idxmin()
+    impulse = recent.loc[low_idx:]
+    if impulse.empty or len(impulse) < 5:
+        return None
+    return impulse
+
+
+def _get_previous_day_range(df: pd.DataFrame) -> tuple[Optional[float], Optional[float]]:
+    """Return (low, high) of the previous day's session if available."""
+
+    if df.index is None or len(df.index) == 0:
+        return None, None
+    index = df.index
+    if not isinstance(index, pd.DatetimeIndex):
+        try:
+            index = pd.to_datetime(index)
+        except Exception:
+            return None, None
+    if index.tz is not None:
+        index = index.tz_convert(None)
+    current_day = index[-1].normalize()
+    prev_day_start = current_day - pd.Timedelta(days=1)
+    prev_mask = (index >= prev_day_start) & (index < current_day)
+    prev_day = df.loc[prev_mask]
+    if prev_day.empty:
+        prev_day = df.tail(1440)
+    if prev_day.empty:
+        return None, None
+    low = pd.to_numeric(prev_day["low"], errors="coerce").min()
+    high = pd.to_numeric(prev_day["high"], errors="coerce").max()
+    low = float(low) if np.isfinite(low) else None
+    high = float(high) if np.isfinite(high) else None
+    return low, high
+
+
+def _extract_reclaim_leg(
+    df: pd.DataFrame,
+    balance_low: Optional[float],
+    lookback: int = 150,
+    max_leg_bars: int = 120,
+) -> Optional[pd.DataFrame]:
+    """Return the leg formed by a failed breakdown and subsequent reclaim."""
+
+    if balance_low is None or balance_low != balance_low:
+        return None
+    recent = df.tail(lookback)
+    if recent.empty or len(recent) < 10:
+        return None
+    lows = pd.to_numeric(recent["low"], errors="coerce")
+    closes = pd.to_numeric(recent["close"], errors="coerce")
+    if lows.isna().all() or closes.isna().all():
+        return None
+    breakdown_mask = lows < balance_low
+    if not breakdown_mask.any():
+        return None
+    breakdown_idx = breakdown_mask[breakdown_mask].index[-1]
+    reclaim = recent.loc[breakdown_idx:]
+    if reclaim.empty or len(reclaim) < 5:
+        return None
+    if len(reclaim) > max_leg_bars:
+        return None
+    last_close = float(closes.loc[reclaim.index][-1])
+    if not np.isfinite(last_close) or last_close <= balance_low:
+        return None
+    return reclaim
+
 def _select_indicator_params(vol_percentile: float | None) -> tuple[str, dict[str, int | float]]:
     """Return tuned indicator parameters for the current volatility regime."""
 
@@ -1450,6 +1556,70 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
         avg_quote_vol_20 = price_data['quote_volume'].iloc[-20:].mean() if 'quote_volume' in price_data else None
         latest_quote_vol = price_data['quote_volume'].iloc[-1] if 'quote_volume' in price_data else None
         price_now = close.iloc[-1]
+        try:
+            auction_slice = price_data[["high", "low", "close"]].tail(240)
+            auction_state = get_auction_state(auction_slice) if not auction_slice.empty else "unknown"
+        except Exception:
+            auction_state = "unknown"
+
+        volume_profile_snapshot: dict[str, Any] = {"auction_state": auction_state}
+        trend_lvn_ready = False
+        mean_rev_lvn_ready = False
+        poc_level: Optional[float] = None
+        active_lvn: Optional[float] = None
+        recommended_stop: Optional[float] = None
+        balance_low: Optional[float] = None
+        balance_high: Optional[float] = None
+        failed_low: Optional[float] = None
+
+        if auction_state == "out_of_balance_trend":
+            impulse_leg = _extract_impulse_leg(price_data)
+            if impulse_leg is not None:
+                profile = compute_volume_profile(impulse_leg)
+                poc_level = profile.poc if profile.poc == profile.poc else None
+                lvns = profile.lvns
+                active_lvn = _pick_active_lvn(float(price_now), lvns, profile.bin_size)
+                trend_lvn_ready = active_lvn is not None
+                volume_profile_snapshot.update(
+                    {
+                        "context": "trend_impulse",
+                        "poc": poc_level,
+                        "lvns": lvns,
+                        "active_lvn": active_lvn,
+                    }
+                )
+        elif auction_state in {"out_of_balance_revert", "balanced"}:
+            balance_low, balance_high = _get_previous_day_range(price_data)
+            reclaim_leg = _extract_reclaim_leg(price_data, balance_low)
+            if reclaim_leg is not None:
+                profile = compute_volume_profile(reclaim_leg)
+                poc_level = profile.poc if profile.poc == profile.poc else None
+                lvns = profile.lvns
+                active_lvn = _pick_active_lvn(float(price_now), lvns, profile.bin_size)
+                mean_rev_lvn_ready = active_lvn is not None
+                failed_low = pd.to_numeric(reclaim_leg["low"], errors="coerce").min()
+                buffer = max(float(price_now) * 0.0015, float(profile.bin_size) if profile.bin_size == profile.bin_size else 0.0)
+                if np.isfinite(failed_low):
+                    recommended_stop = max(float(failed_low) - buffer, 0.0)
+                volume_profile_snapshot.update(
+                    {
+                        "context": "balance_reclaim",
+                        "poc": poc_level,
+                        "lvns": lvns,
+                        "active_lvn": active_lvn,
+                        "balance_low": balance_low,
+                        "balance_high": balance_high,
+                        "failed_low": float(failed_low) if np.isfinite(failed_low) else None,
+                        "recommended_stop": recommended_stop,
+                    }
+                )
+        volume_profile_snapshot["trend_lvn_ready"] = bool(trend_lvn_ready)
+        volume_profile_snapshot["mean_reversion_lvn_ready"] = bool(mean_rev_lvn_ready)
+        volume_profile_snapshot["lvn_ready"] = bool(trend_lvn_ready or mean_rev_lvn_ready)
+        if balance_low is not None:
+            volume_profile_snapshot.setdefault("balance_low", balance_low)
+        if balance_high is not None:
+            volume_profile_snapshot.setdefault("balance_high", balance_high)
         if avg_quote_vol_20 is None:
             avg_quote_vol_20 = volume.iloc[-20:].mean() * price_now
             latest_quote_vol = volume.iloc[-1] * price_now
@@ -1768,7 +1938,35 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             normalized_score -= 0.8
         normalized_score = round(normalized_score, 2)
         direction = "long" if setup_type and normalized_score >= dynamic_threshold else None
+        gate_reason = None
+        orderflow_state = getattr(aggression, "state", "neutral")
+        volume_profile_snapshot["orderflow_state"] = orderflow_state
+        volume_profile_snapshot["orderflow_required"] = auction_state in {
+            "out_of_balance_trend",
+            "out_of_balance_revert",
+            "balanced",
+        }
+        if direction == "long":
+            if auction_state == "out_of_balance_trend" and setup_type == "trend":
+                if not trend_lvn_ready:
+                    gate_reason = "price not retesting LVN"
+                elif orderflow_state != "buyers in control":
+                    gate_reason = "buyers not in control at LVN"
+            elif auction_state in {"out_of_balance_revert", "balanced"} and setup_type in {
+                "mean_reversion",
+                "counter_trend",
+            }:
+                if not mean_rev_lvn_ready:
+                    gate_reason = "reclaim leg missing LVN touch"
+                elif orderflow_state != "buyers in control":
+                    gate_reason = "buyers not in control on reclaim"
+        if gate_reason:
+            logger.debug("Volume-profile gate blocked %s setup for %s: %s", setup_type, symbol, gate_reason)
+            direction = None
+            volume_profile_snapshot["gate_reason"] = gate_reason
         position_size = get_position_size(normalized_score)
+        if direction is None:
+            position_size = 0
         zones = detect_support_resistance_zones(price_data)
         zones = zones.to_dict() if isinstance(zones, pd.Series) else (zones or {"support": [], "resistance": []})
         current_price = float(close.iloc[-1])
@@ -1897,7 +2095,46 @@ def evaluate_signal(price_data: pd.DataFrame, symbol: str = "", sentiment_bias: 
             "activation_threshold": _safe_float(dynamic_threshold),
             **flow_snapshot,
         }
+        if volume_profile_snapshot:
+            lvns_raw = volume_profile_snapshot.get("lvns")
+            lvns_clean: list[float] = []
+            if isinstance(lvns_raw, (list, tuple)):
+                for level in lvns_raw:
+                    cleaned = _safe_float(level)
+                    if cleaned is not None:
+                        lvns_clean.append(cleaned)
+            vp_snapshot: dict[str, Any] = {
+                "auction_state": volume_profile_snapshot.get("auction_state", "unknown"),
+                "context": volume_profile_snapshot.get("context"),
+                "poc": _safe_float(volume_profile_snapshot.get("poc")),
+                "active_lvn": _safe_float(volume_profile_snapshot.get("active_lvn")),
+                "lvn_ready": bool(volume_profile_snapshot.get("lvn_ready")),
+                "trend_lvn_ready": bool(volume_profile_snapshot.get("trend_lvn_ready")),
+                "mean_reversion_lvn_ready": bool(volume_profile_snapshot.get("mean_reversion_lvn_ready")),
+                "orderflow_required": bool(volume_profile_snapshot.get("orderflow_required", False)),
+                "orderflow_state": volume_profile_snapshot.get("orderflow_state"),
+            }
+            if lvns_clean:
+                vp_snapshot["lvns"] = lvns_clean
+            balance_low_clean = _safe_float(volume_profile_snapshot.get("balance_low"))
+            balance_high_clean = _safe_float(volume_profile_snapshot.get("balance_high"))
+            if balance_low_clean is not None:
+                vp_snapshot["balance_low"] = balance_low_clean
+            if balance_high_clean is not None:
+                vp_snapshot["balance_high"] = balance_high_clean
+            recommended_stop_clean = _safe_float(volume_profile_snapshot.get("recommended_stop"))
+            if recommended_stop_clean is not None:
+                vp_snapshot["recommended_stop"] = recommended_stop_clean
+            failed_low_clean = _safe_float(volume_profile_snapshot.get("failed_low"))
+            if failed_low_clean is not None:
+                vp_snapshot["failed_low"] = failed_low_clean
+            gate_reason = volume_profile_snapshot.get("gate_reason")
+            if gate_reason:
+                vp_snapshot["gate_reason"] = str(gate_reason)
+            signal_snapshot["volume_profile"] = vp_snapshot
         price_data.attrs["signal_features"] = signal_snapshot
+        if "volume_profile" in signal_snapshot:
+            price_data.attrs["volume_profile"] = signal_snapshot["volume_profile"]
         indicator_flags = {
             "ema": ema_flag,
             "macd": macd_flag,
