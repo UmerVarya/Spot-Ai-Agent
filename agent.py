@@ -23,6 +23,7 @@ import os
 import sys
 import asyncio
 from datetime import datetime
+from typing import Optional
 
 # Centralized configuration loader
 import config
@@ -55,6 +56,11 @@ from sentiment import get_macro_sentiment
 from btc_dominance import get_btc_dominance
 from fear_greed import get_fear_greed_index
 from orderflow import detect_aggression
+from volume_profile import (
+    VolumeProfileResult,
+    compute_trend_leg_volume_profile,
+    compute_reversion_leg_volume_profile,
+)
 from diversify import select_diversified_signals
 from ml_model import predict_success_probability
 from sequence_model import predict_next_return, train_sequence_model, SEQ_PKL
@@ -475,11 +481,77 @@ def run_agent_loop() -> None:
                         live_trades=price_data.attrs.get("live_trades"),
                     )
                     flow_status = getattr(flow_analysis, "state", "neutral")
-                    if flow_status == "sellers in control":
-                        logger.warning(
-                            "Bearish order flow detected in %s. Proceeding with caution (penalized score handled in evaluate_signal).",
-                            symbol,
+                    volume_profile_result: Optional[VolumeProfileResult] = None
+                    lvn_touch: Optional[float] = None
+                    last_close = None
+                    last_high = None
+                    last_low = None
+                    try:
+                        last_close = float(price_data["close"].iloc[-1])
+                        last_high = float(price_data["high"].iloc[-1])
+                        last_low = float(price_data["low"].iloc[-1])
+                    except Exception:
+                        last_close = None
+                    if auction_state == "out_of_balance_trend":
+                        volume_profile_result = compute_trend_leg_volume_profile(price_data)
+                        if volume_profile_result is None or not volume_profile_result.lvns:
+                            logger.debug(
+                                "[SKIP] %s: unable to derive impulse-leg LVNs for trend continuation.",
+                                symbol,
+                            )
+                            continue
+                        lvn_touch = volume_profile_result.touched_lvn(
+                            close=last_close or 0.0,
+                            high=last_high,
+                            low=last_low,
                         )
+                        if lvn_touch is None:
+                            logger.debug(
+                                "[SKIP] %s: price not interacting with impulse-leg LVN (auction_state=%s).",
+                                symbol,
+                                auction_state,
+                            )
+                            continue
+                        if flow_status != "buyers in control":
+                            logger.info(
+                                "[SKIP] %s: LVN retest lacks buyer aggression (order flow state=%s).",
+                                symbol,
+                                flow_status,
+                            )
+                            continue
+                    elif auction_state in {"out_of_balance_revert", "balanced"}:
+                        volume_profile_result = compute_reversion_leg_volume_profile(price_data)
+                        if volume_profile_result is None or not volume_profile_result.lvns:
+                            logger.debug(
+                                "[SKIP] %s: unable to derive reclaim-leg LVNs (auction_state=%s).",
+                                symbol,
+                                auction_state,
+                            )
+                            continue
+                        lvn_touch = volume_profile_result.touched_lvn(
+                            close=last_close or 0.0,
+                            high=last_high,
+                            low=last_low,
+                        )
+                        if lvn_touch is None:
+                            logger.debug(
+                                "[SKIP] %s: reclaim leg not pulling back into an LVN.",
+                                symbol,
+                            )
+                            continue
+                        if flow_status != "buyers in control":
+                            logger.info(
+                                "[SKIP] %s: reclaim LVN lacks buyer aggression (order flow state=%s).",
+                                symbol,
+                                flow_status,
+                            )
+                            continue
+                    else:
+                        if flow_status == "sellers in control":
+                            logger.warning(
+                                "Bearish order flow detected in %s. Proceeding with caution (penalized score handled in evaluate_signal).",
+                                symbol,
+                            )
                     potential_trades.append(
                         {
                             "symbol": symbol,
@@ -491,6 +563,8 @@ def run_agent_loop() -> None:
                             "orderflow": flow_analysis,
                             "auction_state": auction_state,
                             "setup_type": setup_type,
+                            "volume_profile": volume_profile_result,
+                            "lvn_level": lvn_touch,
                         }
                     )
                     logger.info(
@@ -569,6 +643,10 @@ def run_agent_loop() -> None:
                         symbol=symbol,
                         live_trades=price_data.attrs.get("live_trades"),
                     )
+                volume_profile_result = trade_candidate.get("volume_profile")
+                if not isinstance(volume_profile_result, VolumeProfileResult):
+                    volume_profile_result = None
+                lvn_level = trade_candidate.get("lvn_level")
                 of_state = getattr(flow_analysis, "state", "neutral")
                 orderflow = (
                     "buyers" if of_state == "buyers in control" else
@@ -636,6 +714,19 @@ def run_agent_loop() -> None:
                     'auction_state': auction_state,
                     'setup_type': setup_type,
                 }
+                if volume_profile_result is not None:
+                    try:
+                        micro_feature_payload['volume_poc'] = float(volume_profile_result.poc)
+                    except (TypeError, ValueError):
+                        micro_feature_payload['volume_poc'] = None
+                    micro_feature_payload['lvn_level'] = (
+                        float(lvn_level) if isinstance(lvn_level, (int, float)) else None
+                    )
+                    micro_feature_payload['volume_profile_leg_type'] = volume_profile_result.leg_type
+                else:
+                    micro_feature_payload['volume_poc'] = None
+                    micro_feature_payload['lvn_level'] = None
+                    micro_feature_payload['volume_profile_leg_type'] = None
                 # Ask the brain whether to take the trade
                 # Call the brain with error handling.  If the brain throws an
                 # exception, record it as the reason for skipping so users
@@ -760,10 +851,32 @@ def run_agent_loop() -> None:
                                 pass
                         trade_usd = max(MIN_TRADE_USD, min(MAX_TRADE_USD, trade_usd))
                         position_size = round(max(trade_usd / entry_price, 0), 6)
+                        volume_profile_summary = None
+                        poc_price: Optional[float] = None
+                        if volume_profile_result is not None:
+                            volume_profile_summary = volume_profile_result.to_dict()
+                            try:
+                                poc_price = float(volume_profile_result.poc)
+                            except (TypeError, ValueError):
+                                poc_price = None
                         sl = round(entry_price - sl_dist, 6)
                         tp1 = round(entry_price + atr_val * 1.0, 6)
                         tp2 = round(entry_price + atr_val * 2.0, 6)
                         tp3 = round(entry_price + atr_val * 3.0, 6)
+                        use_volume_tp = False
+                        if volume_profile_result is not None:
+                            failed_low = volume_profile_result.metadata.get("failed_low")
+                            if failed_low is not None and math.isfinite(failed_low):
+                                buffer = max(volume_profile_result.bin_width, entry_price * 0.001)
+                                candidate_sl = float(failed_low) - buffer
+                                if candidate_sl > 0:
+                                    sl = round(candidate_sl, 6)
+                            if poc_price is not None and math.isfinite(poc_price):
+                                if poc_price > entry_price * 1.0005:
+                                    tp1 = round(poc_price, 6)
+                                    tp2 = None
+                                    tp3 = None
+                                    use_volume_tp = True
                         htf_trend = htf_trend_pct
                         risk_amount = position_size * sl_dist
                         # Determine the high-level strategy label.  The
@@ -839,6 +952,9 @@ def run_agent_loop() -> None:
                             "status": {"tp1": False, "tp2": False, "tp3": False, "sl": False},
                             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "news_summary": decision_obj.get("news_summary", ""),
+                            "volume_profile": volume_profile_summary,
+                            "lvn_entry_level": float(lvn_level) if isinstance(lvn_level, (int, float)) else None,
+                            "take_profit_strategy": "volume_poc" if use_volume_tp else "atr_multiples",
                         }
                         if micro_plan:
                             logger.debug("Microstructure plan for %s: %s", symbol, micro_plan)
