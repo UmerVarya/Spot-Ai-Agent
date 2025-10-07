@@ -234,6 +234,9 @@ def compute_orderflow_features(
         "order_book_imbalance": float("nan"),
         "cvd": float("nan"),
         "cvd_change": float("nan"),
+        "cvd_divergence": 0.0,
+        "cvd_absorption": 0.0,
+        "cvd_accumulation": 0.0,
         "taker_buy_ratio": float("nan"),
         "trade_imbalance": float("nan"),
         "aggressive_trade_rate": float("nan"),
@@ -285,6 +288,8 @@ def compute_orderflow_features(
     cols = set(df.columns)
     has_taker = {"volume", "taker_buy_base", "taker_buy_quote"}.issubset(cols)
 
+    cvd_series: Optional[pd.Series] = None
+
     if has_taker:
         taker_buy = pd.to_numeric(df["taker_buy_base"], errors="coerce").fillna(0.0)
         volume = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
@@ -300,6 +305,60 @@ def compute_orderflow_features(
             buy_ratio = _safe_div(float(taker_buy.iloc[-1]), last_vol)
             features["taker_buy_ratio"] = _clip_unit(2.0 * buy_ratio - 1.0)
             features["trade_imbalance"] = _clip_unit(_safe_div(net_flow.iloc[-1], last_vol))
+
+    if cvd_series is not None and {"high", "low"}.issubset(cols):
+        price_high = pd.to_numeric(df["high"], errors="coerce")
+        price_low = pd.to_numeric(df["low"], errors="coerce")
+        lookback = int(min(len(cvd_series), len(price_high), 30))
+        if lookback >= 6:
+            recent_cvd = cvd_series.tail(lookback)
+            recent_high = price_high.tail(lookback).fillna(method="ffill").fillna(method="bfill")
+            recent_low = price_low.tail(lookback).fillna(method="ffill").fillna(method="bfill")
+            split = max(3, lookback // 2)
+            prev_cvd_high = float(recent_cvd.iloc[:split].max())
+            curr_cvd_high = float(recent_cvd.iloc[split:].max())
+            prev_price_high = float(recent_high.iloc[:split].max())
+            curr_price_high = float(recent_high.iloc[split:].max())
+            prev_cvd_low = float(recent_cvd.iloc[:split].min())
+            curr_cvd_low = float(recent_cvd.iloc[split:].min())
+            prev_price_low = float(recent_low.iloc[:split].min())
+            curr_price_low = float(recent_low.iloc[split:].min())
+
+            def _significant_gain(current: float, previous: float, tolerance: float = 0.002) -> bool:
+                threshold = max(abs(previous), abs(current), 1.0) * tolerance
+                return (current - previous) > threshold
+
+            def _significant_drop(current: float, previous: float, tolerance: float = 0.002) -> bool:
+                threshold = max(abs(previous), abs(current), 1.0) * tolerance
+                return (previous - current) > threshold
+
+            def _lack_of_breakout(current: float, previous: float, tolerance: float = 0.001) -> bool:
+                threshold = max(abs(previous), abs(current), 1.0) * tolerance
+                return current <= previous + threshold
+
+            def _lack_of_breakdown(current: float, previous: float, tolerance: float = 0.001) -> bool:
+                threshold = max(abs(previous), abs(current), 1.0) * tolerance
+                return current >= previous - threshold
+
+            absorption_strength = 0.0
+            if _significant_gain(curr_cvd_high, prev_cvd_high) and _lack_of_breakout(
+                curr_price_high, prev_price_high
+            ):
+                delta = curr_cvd_high - prev_cvd_high
+                scale = max(abs(prev_cvd_high), 1.0)
+                absorption_strength = float(max(0.0, min(1.0, math.tanh(delta / scale))))
+
+            accumulation_strength = 0.0
+            if _significant_drop(curr_cvd_low, prev_cvd_low) and _lack_of_breakdown(
+                curr_price_low, prev_price_low
+            ):
+                delta = prev_cvd_low - curr_cvd_low
+                scale = max(abs(prev_cvd_low), 1.0)
+                accumulation_strength = float(max(0.0, min(1.0, math.tanh(delta / scale))))
+
+            features["cvd_absorption"] = absorption_strength
+            features["cvd_accumulation"] = accumulation_strength
+            features["cvd_divergence"] = accumulation_strength - absorption_strength
 
     if "number_of_trades" in df.columns and len(df) >= 5:
         trades = pd.to_numeric(df["number_of_trades"], errors="coerce").fillna(0.0)
@@ -361,6 +420,10 @@ def detect_aggression(
     spoofing = features.get("spoofing_intensity")
     if spoofing == spoofing:
         flow_strength += 0.1 * spoofing
+
+    divergence = features.get("cvd_divergence")
+    if divergence == divergence:
+        flow_strength += 0.3 * divergence
 
     volume_factor = 0.0
     if avg_volume == avg_volume and last_volume == last_volume and avg_volume > 0:

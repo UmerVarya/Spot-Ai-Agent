@@ -46,6 +46,9 @@ Each row recorded by `trade_storage.log_trade_result` contains the following col
 | `order_flow_state` | Textual classification of order-flow pressure (e.g. `buyers in control`). |
 | `cvd` | Normalised cumulative volume delta observed over the recent window. |
 | `cvd_change` | Short-term change in cumulative volume delta (last bar vs. average). |
+| `cvd_divergence` | Signed divergence score where positive values indicate CVD strength without matching price highs. |
+| `cvd_absorption` | Magnitude of sell-side absorption (CVD higher high while price fails to break out). |
+| `cvd_accumulation` | Magnitude of buy-side accumulation (CVD lower low while price holds support). |
 | `taker_buy_ratio` | Normalised taker-buy to total volume ratio. |
 | `trade_imbalance` | Net taker flow imbalance for the latest bar. |
 | `aggressive_trade_rate` | Normalised rate of aggressive trades relative to recent history. |
