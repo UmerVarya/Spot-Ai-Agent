@@ -173,11 +173,11 @@ def compute_volume_profile(
 
     price_series = pd.to_numeric(df[price_col], errors="coerce")
     volume_series = pd.to_numeric(df[volume_col], errors="coerce")
+    mask = price_series.notna() & volume_series.notna()
+    price_series = price_series[mask]
+    volume_series = volume_series[mask]
     prices = price_series.to_numpy(dtype=float)
     volumes = volume_series.to_numpy(dtype=float)
-    mask = np.isfinite(prices) & np.isfinite(volumes)
-    prices = prices[mask]
-    volumes = volumes[mask]
     if prices.size == 0 or volumes.size == 0:
         return VolumeProfileResult(
             poc=None,
