@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 from datetime import datetime
-from typing import List, Dict
+from typing import Any, Dict, List
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -10,6 +10,11 @@ from dotenv import load_dotenv
 from groq import Groq
 import config
 from groq_safe import safe_chat_completion
+from news_guardrails import (
+    parse_llm_json,
+    quantify_event_risk,
+    reconcile_with_quant_filters,
+)
 
 from log_utils import setup_logger
 
@@ -70,24 +75,23 @@ def save_events(events: List[Dict[str, str]], path: str = "news_events.json") ->
     logger.info("Saved %d events to %s", len(events), path)
 
 
-def build_news_prompt(events: List[Dict[str, str]]) -> str:
-    now = datetime.utcnow()
-    filtered = []
-    for event in events:
-        try:
-            event_time = datetime.fromisoformat(event["datetime"].replace("Z", ""))
-            hours_until = (event_time - now).total_seconds() / 3600.0
-            if hours_until >= -48:
-                filtered.append(event)
-        except Exception:
-            continue
-    return json.dumps(filtered, indent=2)
+def _build_llm_payload(metrics: Dict[str, Any]) -> str:
+    return json.dumps(metrics["events_in_window"], indent=2)
 
 
 def analyze_news_with_llm(events: List[Dict[str, str]]) -> Dict[str, str]:
     if not GROQ_API_KEY:
         return {"safe": True, "sensitivity": 0, "reason": "No API key"}
-    prompt = build_news_prompt(events)
+
+    metrics = quantify_event_risk(events)
+    if metrics["considered_events"] == 0:
+        return {
+            "safe": True,
+            "sensitivity": 0.0,
+            "reason": "No impactful events within the monitoring window.",
+        }
+
+    prompt = _build_llm_payload(metrics)
     client = Groq(api_key=GROQ_API_KEY)
     try:
         chat_completion = safe_chat_completion(
@@ -98,37 +102,32 @@ def analyze_news_with_llm(events: List[Dict[str, str]]) -> Dict[str, str]:
                     "role": "system",
                     "content": (
                         "You are a crypto macro risk analyst. Respond ONLY with a JSON object "
-                        "containing the keys `safe` (boolean), `sensitivity` (number), and `reason` "
-                        "(string). Do not include any additional commentary."
+                        "containing the keys `safe_decision` (\"yes\" or \"no\") and `reason` (string). "
+                        "Do not include any additional commentary or keys."
                     ),
                 },
                 {
                     "role": "user",
                     "content": (
-                        "Assess the market impact of the following events and respond with the "
-                        "required JSON structure:\n"
-                        f"{prompt}"
+                        "Assess the market impact of the following events occurring within the next "
+                        f"{metrics['window_hours']} hours. There are {metrics['considered_events']} "
+                        "events under review, including "
+                        f"{metrics['high_impact_events']} high-impact entries. Respond with the "
+                        "required JSON structure.\n"
+                        f"Events:\n{prompt}"
                     ),
                 },
             ],
         )
         raw_reply = chat_completion.choices[0].message.content
-        try:
-            parsed_reply = json.loads(raw_reply)
-        except json.JSONDecodeError:
-            logger.warning("LLM returned non-JSON response: %s", raw_reply)
-            return {"safe": True, "sensitivity": 0, "reason": "LLM non-JSON response"}
+        safe_decision, reason = parse_llm_json(raw_reply, logger)
+        if safe_decision is None:
+            return {"safe": True, "sensitivity": 0, "reason": reason or "LLM error"}
 
-        if not isinstance(parsed_reply, dict):
-            logger.warning("LLM JSON payload is not an object: %s", parsed_reply)
-            return {"safe": True, "sensitivity": 0, "reason": "LLM malformed JSON response"}
-
-        expected_keys = {"safe", "sensitivity", "reason"}
-        if not expected_keys.issubset(parsed_reply):
-            logger.warning("LLM JSON missing expected keys: %s", parsed_reply)
-            return {"safe": True, "sensitivity": 0, "reason": "LLM malformed JSON response"}
-
-        return parsed_reply
+        safe, sensitivity, reconciled_reason = reconcile_with_quant_filters(
+            safe_decision, reason or "No reason provided.", metrics
+        )
+        return {"safe": safe, "sensitivity": sensitivity, "reason": reconciled_reason}
     except Exception as e:
         logger.error("Groq LLM analysis failed: %s", e, exc_info=True)
         return {"safe": True, "sensitivity": 0, "reason": "LLM error"}
