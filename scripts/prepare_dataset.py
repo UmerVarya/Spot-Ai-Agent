@@ -43,6 +43,9 @@ HEADER_MAP = {
     "order_flow_state": "order_flow_state",
     "cvd": "cvd",
     "cvd_change": "cvd_change",
+    "cvd_divergence": "cvd_divergence",
+    "cvd_absorption": "cvd_absorption",
+    "cvd_accumulation": "cvd_accumulation",
     "taker_buy_ratio": "taker_buy_ratio",
     "trade_imbalance": "trade_imbalance",
     "aggressive_trade_rate": "aggressive_trade_rate",
@@ -68,7 +71,7 @@ REQUIRED_COLS_MIN = {"symbol", "entry_time", "exit_time", "entry_price", "exit_p
 POSSIBLE_FEATURES = [
     "score","technical_indicator_score","rsi","ema_diff","bb_width","volatility","volume_z",
     "sentiment_score","session","spread_bps","slippage_bps",
-    "order_imbalance","order_flow_score","order_flow_flag","cvd","cvd_change","taker_buy_ratio",
+    "order_imbalance","order_flow_score","order_flow_flag","cvd","cvd_change","cvd_divergence","cvd_absorption","cvd_accumulation","taker_buy_ratio",
     "trade_imbalance","aggressive_trade_rate","spoofing_intensity","spoofing_alert",
     "volume_ratio","price_change_pct"
 ]
@@ -100,7 +103,7 @@ def coerce_types(df):
     for col in [
         "entry_price","exit_price","size_quote","size_base","fees","pnl_quote","pnl_pct","score",
         "rsi","ema_diff","bb_width","volatility","volume_z","spread_bps","slippage_bps","sentiment_score",
-        "order_imbalance","order_flow_score","order_flow_flag","cvd","cvd_change","taker_buy_ratio","trade_imbalance",
+        "order_imbalance","order_flow_score","order_flow_flag","cvd","cvd_change","cvd_divergence","cvd_absorption","cvd_accumulation","taker_buy_ratio","trade_imbalance",
         "aggressive_trade_rate","spoofing_intensity","spoofing_alert","volume_ratio","price_change_pct"
     ]:
         if col in df.columns:

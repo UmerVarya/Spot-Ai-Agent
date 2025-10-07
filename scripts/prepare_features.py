@@ -31,7 +31,7 @@ CANDIDATES_NUM = [
     "sentiment_bias", "sentiment_confidence",
     "volatility", "htf_trend",
     "order_imbalance", "order_flow_score", "order_flow_flag",
-    "cvd", "cvd_change", "taker_buy_ratio",
+    "cvd", "cvd_change", "cvd_divergence", "cvd_absorption", "cvd_accumulation", "taker_buy_ratio",
     "trade_imbalance", "aggressive_trade_rate",
     "spoofing_intensity", "spoofing_alert",
     "volume_ratio", "price_change_pct", "spread_bps",
