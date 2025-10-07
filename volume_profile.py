@@ -107,14 +107,23 @@ def _find_lvns(histogram: pd.DataFrame, lv_threshold: float, hv_threshold: float
         return lvns
     low_cutoff = max_volume * lv_threshold
     high_cutoff = max_volume * hv_threshold
-    for idx, row in histogram.iterrows():
-        volume = float(row["volume"])
+    prices = histogram["price"].to_numpy(dtype=float)
+    for idx, volume in enumerate(volumes):
+        volume = float(volume)
         if volume <= 0 or volume > low_cutoff:
             continue
-        prev_volume = float(volumes[idx - 1]) if idx > 0 else max_volume
-        next_volume = float(volumes[idx + 1]) if idx + 1 < len(volumes) else max_volume
-        if prev_volume >= high_cutoff or next_volume >= high_cutoff:
-            lvns.append(float(row["price"]))
+        prev_idx = idx - 1
+        while prev_idx >= 0 and volumes[prev_idx] <= 0:
+            prev_idx -= 1
+        next_idx = idx + 1
+        while next_idx < len(volumes) and volumes[next_idx] <= 0:
+            next_idx += 1
+        prev_volume = float(volumes[prev_idx]) if prev_idx >= 0 else max_volume
+        next_volume = float(volumes[next_idx]) if next_idx < len(volumes) else max_volume
+        if (prev_idx >= 0 and prev_volume >= high_cutoff) or (
+            next_idx < len(volumes) and next_volume >= high_cutoff
+        ):
+            lvns.append(float(prices[idx]))
     return sorted(lvns)
 
 
@@ -162,8 +171,10 @@ def compute_volume_profile(
             price_max=float("nan"),
         )
 
-    prices = pd.to_numeric(df[price_col], errors="coerce").to_numpy(dtype=float)
-    volumes = pd.to_numeric(df[volume_col], errors="coerce").to_numpy(dtype=float)
+    price_series = pd.to_numeric(df[price_col], errors="coerce")
+    volume_series = pd.to_numeric(df[volume_col], errors="coerce")
+    prices = price_series.to_numpy(dtype=float)
+    volumes = volume_series.to_numpy(dtype=float)
     mask = np.isfinite(prices) & np.isfinite(volumes)
     prices = prices[mask]
     volumes = volumes[mask]
@@ -179,7 +190,7 @@ def compute_volume_profile(
 
     price_min = float(np.min(prices))
     price_max = float(np.max(prices))
-    inferred_bin = _infer_bin_size(prices, default_pct=bin_pct)
+    inferred_bin = _infer_bin_size(price_series, default_pct=bin_pct)
     histogram = _build_histogram(prices, volumes, inferred_bin, price_min, price_max)
     poc_price: Optional[float] = None
     if not histogram.empty:
