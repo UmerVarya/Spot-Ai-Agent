@@ -1,17 +1,17 @@
 # Sentiment Model Evaluation Playbook
 
-The fused sentiment stack now includes FinBERT, FinLlama and FinGPT with
-weights that default to 0.20 / 0.45 / 0.35 respectively.  To keep the
-fusion aligned with the best-performing language models release-over-release,
-run the following evaluation workflow whenever a new financial LLM becomes
-available (e.g. Llama 3-70B finetunes or Mistral-FinRL updates).
+The fused sentiment stack now includes FinLlama and FinGPT with weights that
+default to 0.50 / 0.50.  To keep the fusion aligned with the best-performing
+language models release-over-release, run the following evaluation workflow
+whenever a new financial LLM becomes available (e.g. Llama 3-70B finetunes or
+Mistral-FinRL updates).
 
 ## 1. Build a validation set
 
 * Collect at least 200 dated macro and micro news snippets with ground truth
   sentiment scores in ``[-1, 1]``.  Regulatory filings, FOMC statements and
   CPI prints are particularly valuable because they stress long-form numeric
-  reasoning – a weakness for FinBERT but a strength for FinGPT.
+  reasoning – an area where FinGPT excels compared with earlier classifiers.
 * Store the dataset as JSON lines with the fields ``{"headlines": [...], "label": float}``.
 
 ## 2. Run the evaluation helper
