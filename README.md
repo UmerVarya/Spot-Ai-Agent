@@ -24,7 +24,8 @@ Set the following environment variables as needed:
 
 ## Sentiment Fusion
 
-Headline sentiment is computed using a two-model stack:
+Headline sentiment is now computed using a three-model stack that favours the
+newer, more numerically-aware LLMs:
 
 * **FinBERT** quickly converts individual headlines into class probabilities
   (positive/neutral/negative).  The expected value of these probabilities is
@@ -32,10 +33,18 @@ Headline sentiment is computed using a two-model stack:
 * **FinLlama** aggregates the headlines into a discrete signal ``s_fl \in
   \{-1,0,1\}`` (bearish/neutral/bullish) with confidence ``c_fl`` and a short
   rationale.
+* **FinGPT (2024)** mirrors the FinLlama schema but is trained on a broader mix
+  of macro and micro structure disclosures released after 2023, improving
+  sensitivity to numbers and longer sentences.
 
-The fused score ``0.55*s_fb + 0.45*s_fl`` is considered bullish above ``+0.15``
-and bearish below ``-0.15``; otherwise the outlook is neutral.  This fused
-sentiment is passed to the Groq LLM for macro context and final arbitration.
+Fusion weights default to ``0.20`` (FinBERT), ``0.45`` (FinLlama) and ``0.35``
+(FinGPT), reflecting the stronger validation performance of the generative
+models.  Bias remains bullish above ``+0.15`` and bearish below ``-0.15``.  The
+helper `fused_sentiment.calibrate_fusion_weights` function can be run on a
+labelled macro-news validation set to refresh these weights as new models (e.g.
+Llama 3‑70B financial fine-tunes or Mistral-FinRL variants) become available.
+The fused sentiment and rationale bundle is still passed to the Groq LLM for
+macro context and final arbitration.
 
 ### Persistent data
 
