@@ -585,6 +585,13 @@ def _status_token_is_closed(value) -> bool:
     token = str(value).strip().lower()
     if not token:
         return False
+    try:
+        numeric_token = float(token)
+    except ValueError:
+        pass
+    else:
+        if numeric_token == 0.0:
+            return True
     closed_tokens = {
         "closed",
         "complete",
@@ -621,7 +628,9 @@ def _status_value_is_truthy(value) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
-        return float(value) != 0.0
+        if isinstance(value, float) and value != value:
+            return False
+        return True
     if isinstance(value, str):
         token = value.strip()
         if not token:
@@ -631,8 +640,12 @@ def _status_value_is_truthy(value) -> bool:
         if lower in explicit_negatives:
             return False
         try:
-            return float(token) != 0.0
+            numeric_token = float(token)
         except ValueError:
+            return True
+        else:
+            if numeric_token != numeric_token:
+                return False
             return True
     return bool(value)
 
