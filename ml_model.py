@@ -376,6 +376,7 @@ def _transform_feature_vector(
     view: str,
     selection_info: Optional[Dict[str, Any]] = None,
     pca_params: Optional[Dict[str, Any]] = None,
+    feature_names: Optional[Sequence[str]] = None,
 ) -> np.ndarray:
     """Transform a single feature vector using persisted metadata."""
 
@@ -384,11 +385,48 @@ def _transform_feature_vector(
         if indices:
             return x[indices]
     if view == 'pca' and pca_params:
-        components = np.asarray(pca_params.get('components'))
-        pca_mean = np.asarray(pca_params.get('mean'))
-        if components.ndim == 2 and pca_mean.size:
-            centered = x - pca_mean
-            return centered @ components.T
+        components_raw = pca_params.get('components')
+        if components_raw is None:
+            return x
+        try:
+            components = np.asarray(components_raw, dtype=float)
+        except Exception:
+            return x
+        mean_raw = pca_params.get('mean')
+        if mean_raw is None:
+            pca_mean = np.zeros(0, dtype=float)
+        else:
+            try:
+                pca_mean = np.asarray(mean_raw, dtype=float)
+            except Exception:
+                pca_mean = np.zeros(0, dtype=float)
+        if components.ndim == 2 and components.size:
+            feature_dim = x.shape[0]
+            comp = components
+            current_dim = comp.shape[1]
+            if current_dim != feature_dim:
+                if current_dim < feature_dim:
+                    pad_width = feature_dim - current_dim
+                    pad = np.zeros((comp.shape[0], pad_width), dtype=comp.dtype)
+                    comp = np.hstack([comp, pad])
+                else:
+                    comp = comp[:, :feature_dim]
+            mean = pca_mean.ravel()
+            mean_dim = mean.size
+            if mean_dim != feature_dim:
+                if mean_dim < feature_dim:
+                    if feature_names is not None and len(feature_names) >= feature_dim:
+                        defaults = [
+                            _FEATURE_FALLBACKS.get(feature_names[i], 0.0)
+                            for i in range(mean_dim, feature_dim)
+                        ]
+                    else:
+                        defaults = [0.0] * (feature_dim - mean_dim)
+                    mean = np.concatenate([mean, np.asarray(defaults, dtype=float)])
+                else:
+                    mean = mean[:feature_dim]
+            centered = x - mean
+            return centered @ comp.T
     return x
 
 
@@ -1400,7 +1438,7 @@ def predict_success_probability(
             view = metadata.get('feature_view', 'standard')
             selection_info = metadata.get('selection_info') if view == 'rfe' else None
             pca_params = metadata.get('pca') if view == 'pca' else None
-            x_view = _transform_feature_vector(x_norm, view, selection_info, pca_params)
+            x_view = _transform_feature_vector(x_norm, view, selection_info, pca_params, feature_names)
             clf = joblib.load(MODEL_PKL)
             x_input = np.asarray(x_view, dtype=float).reshape(1, -1)
             if hasattr(clf, 'predict_proba'):
