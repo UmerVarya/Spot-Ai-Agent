@@ -579,9 +579,6 @@ def _status_token_is_closed(value) -> bool:
         # heuristics inspect the key names to interpret these values, so treat the bare
         # boolean as "unknown" here to avoid false positives.
         return False
-    if isinstance(value, (int, float)):
-        # Numerical status codes of zero commonly indicate inactivity
-        return float(value) == 0.0
     token = str(value).strip().lower()
     if not token:
         return False
@@ -613,6 +610,70 @@ def _status_token_is_closed(value) -> bool:
         if marker in token:
             return True
     return False
+
+
+def _status_value_indicates_closed(value, key_hint: str | None = None) -> bool:
+    """Return ``True`` when ``value`` conveys a closed state in context."""
+
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        for nested_key, nested_value in value.items():
+            if _status_value_indicates_closed(nested_value, nested_key):
+                return True
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return any(_status_value_indicates_closed(item, key_hint) for item in value)
+    if isinstance(value, bool):
+        if not value:
+            return False
+        if not key_hint:
+            return False
+        token = str(key_hint).strip().lower()
+        if not token:
+            return False
+        if token.endswith("_closed") or token.startswith("is_closed"):
+            return True
+        if _status_token_is_closed(token):
+            return True
+        return False
+    if isinstance(value, (int, float)):
+        if float(value) != 0.0:
+            return False
+        if not key_hint:
+            return False
+        token = str(key_hint).strip().lower()
+        if not token:
+            return False
+        numeric_closure_tokens = {
+            "status",
+            "state",
+            "trade_status",
+            "position_status",
+            "status_code",
+            "code",
+            "exit_code",
+            "position_state",
+        }
+        if (
+            token in numeric_closure_tokens
+            or token.endswith("_status")
+            or token.endswith("_state")
+            or token.endswith("_code")
+            or _status_token_is_closed(token)
+        ):
+            return True
+        return False
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return False
+        try:
+            numeric = float(token)
+        except ValueError:
+            return _status_token_is_closed(token)
+        return _status_value_indicates_closed(numeric, key_hint)
+    return _status_token_is_closed(value)
 
 
 def _status_value_is_truthy(value) -> bool:
@@ -665,22 +726,20 @@ def _is_trade_closed(trade: dict) -> bool:
         for key, value in status_field.items():
             if _status_token_is_closed(key) and _status_value_is_truthy(value):
                 return True
-            if _status_value_is_truthy(value) and _status_token_is_closed(value):
+            if _status_value_indicates_closed(value, key):
                 return True
         # Nested state hints
         for nested_key in ("state", "status", "trade_status"):
             if nested_key in status_field:
                 nested_value = status_field[nested_key]
-                if _status_value_is_truthy(nested_value) and _status_token_is_closed(
-                    nested_value
-                ):
+                if _status_value_indicates_closed(nested_value, nested_key):
                     return True
-    elif _status_value_is_truthy(status_field) and _status_token_is_closed(status_field):
+    elif _status_value_indicates_closed(status_field, "status"):
         return True
     # Additional explicit status fields commonly emitted by the agent
     for alt_key in ("state", "position_status", "trade_status", "status_name"):
         alt_value = trade.get(alt_key)
-        if _status_value_is_truthy(alt_value) and _status_token_is_closed(alt_value):
+        if _status_value_indicates_closed(alt_value, alt_key):
             return True
     return False
 
