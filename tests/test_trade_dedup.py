@@ -84,6 +84,54 @@ def test_deduplicate_history(tmp_path, monkeypatch):
     assert t2["pnl_tp3"] == 0.0
 
 
+def test_deduplicate_history_uses_final_exit_size_for_remaining_leg(tmp_path, monkeypatch):
+    data = [
+        {
+            "trade_id": "10",
+            "symbol": "BTCUSDT",
+            "direction": "long",
+            "entry_time": "2024-05-01T00:00:00Z",
+            "exit_time": "2024-05-01T01:00:00Z",
+            "entry": 100.0,
+            "exit": 105.0,
+            "size": 400.0,
+            "position_size": 4.0,
+            "strategy": "s5",
+            "outcome": "tp1_partial",
+        },
+        {
+            "trade_id": "10",
+            "symbol": "BTCUSDT",
+            "direction": "long",
+            "entry_time": "2024-05-01T00:00:00Z",
+            "exit_time": "2024-05-01T03:00:00Z",
+            "entry": 100.0,
+            "exit": 110.0,
+            "size": 600.0,
+            "position_size": 0.0,
+            "initial_size": 10.0,
+            "final_exit_size": 6.0,
+            "strategy": "s5",
+            "outcome": "tp3",
+        },
+    ]
+
+    df = pd.DataFrame(data)
+    hist_file = tmp_path / "final_exit.csv"
+    df.to_csv(hist_file, index=False)
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(hist_file))
+
+    result = trade_storage.load_trade_history_df()
+    trade = result.iloc[0]
+
+    # Final leg should contribute only the remaining 6 units instead of the
+    # original 10-unit initial position.
+    assert trade["position_size"] == pytest.approx(10.0)
+    assert trade["size_tp1"] == pytest.approx(4.0)
+    assert trade["size_tp3"] == pytest.approx(6.0)
+    assert trade["pnl"] == pytest.approx(80.0)
+
+
 def test_deduplicate_history_tp3_allocation(tmp_path, monkeypatch):
     data = [
         {
