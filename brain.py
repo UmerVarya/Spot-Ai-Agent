@@ -471,6 +471,25 @@ def prepare_trade_decision(
         )
 
     recent_summary = get_recent_trade_summary(symbol=symbol, pattern=pattern_name, max_entries=3)
+    example_approval_json = json.dumps(
+        {
+            "decision": "Yes",
+            "confidence": 7.8,
+            "reason": "Order flow aligns with bullish macro backdrop.",
+            "thesis": "Buyers dominate while macro data turns positive; expect continuation higher.",
+        },
+        indent=2,
+    )
+    example_rejection_json = json.dumps(
+        {
+            "decision": "No",
+            "confidence": 3.2,
+            "reason": "Momentum and order flow diverge from bullish case.",
+            "thesis": "Technical momentum is fading and sellers control order flow, increasing downside risk.",
+        },
+        indent=2,
+    )
+
     advisor_prompt = (
         "You are an experienced crypto-trading advisor. Review the following context and respond only with valid JSON.\n\n"
         f"### Trade Metadata\n"
@@ -505,19 +524,9 @@ def prepare_trade_decision(
         "Return a JSON object with exactly these keys: decision (\"Yes\" to approve the long trade, \"No\" to reject), confidence (0-10 float), reason (<=200 characters), thesis (2-3 sentences summarizing the trade idea).\n"
         "Do not include any additional commentary outside the JSON.\n\n"
         "Example Approval:\n"
-        "{\n"
-        "  \"decision\": \"Yes\",\n"
-        "  \"confidence\": 7.8,\n"
-        "  \"reason\": \"Order flow aligns with bullish macro backdrop.\",\n"
-        "  \"thesis\": \"Buyers dominate while macro data turns positive; expect continuation higher.\"\n"
-        "}\n"
+        f"{example_approval_json}\n"
         "Example Rejection:\n"
-        "{\n"
-        "  \"decision\": \"No\",\n"
-        "  \"confidence\": 3.2,\n"
-        "  \"reason\": \"Momentum and order flow diverge from bullish case.\",\n"
-        "  \"thesis\": \"Technical momentum is fading and sellers control order flow, increasing downside risk.\"\n"
-        "}\n"
+        f"{example_rejection_json}\n"
     )
 
     prepared = PreparedTradeDecision(
