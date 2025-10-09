@@ -1150,21 +1150,54 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     def _calc_fields(row: pd.Series) -> pd.Series:
+        def _to_float(value: object) -> Optional[float]:
+            try:
+                if value is None:
+                    return None
+                if isinstance(value, str):
+                    token = value.strip()
+                    if not token or token.upper() == MISSING_VALUE.upper():
+                        return None
+                    value = token
+                return float(value)
+            except Exception:
+                return None
+
         try:
-            entry = float(row.get("entry", 0))
-            exit_price = float(row.get("exit", 0))
-            qty = float(row.get("position_size", row.get("quantity", row.get("size", 0))))
-            if "position_size" not in row and "quantity" not in row:
-                size_field = float(row.get("size", 0))
+            entry = _to_float(row.get("entry")) or 0.0
+            exit_price = _to_float(row.get("exit")) or 0.0
+
+            size_field = _to_float(row.get("size"))
+            qty: Optional[float] = _to_float(row.get("position_size"))
+            if qty is None or qty <= 0:
+                for key in ("quantity", "initial_size", "final_exit_size"):
+                    candidate = _to_float(row.get(key))
+                    if candidate is not None and candidate > 0:
+                        qty = candidate
+                        break
+
+            if (qty is None or qty <= 0) and size_field is not None:
                 if SIZE_AS_NOTIONAL:
-                    qty = size_field / entry if entry != 0 else size_field
+                    qty = size_field / entry if entry not in (0, 0.0) else size_field
                 else:
                     qty = size_field
+
+            if qty is None:
+                qty = 0.0
+
             direction = str(row.get("direction", "")).lower()
             pnl = (exit_price - entry) * qty
             if direction == "short":
                 pnl = (entry - exit_price) * qty
-            notional = float(row.get("notional", entry * qty if entry and qty else 0))
+
+            notional = _to_float(row.get("notional"))
+            if notional is None and entry and qty:
+                notional = entry * qty
+            if notional is None and SIZE_AS_NOTIONAL and size_field is not None:
+                notional = size_field
+            if notional is None:
+                notional = 0.0
+
             return pd.Series(
                 {
                     "_gross_pnl": pnl,

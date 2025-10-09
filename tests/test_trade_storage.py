@@ -295,6 +295,39 @@ def test_size_as_notional_without_position_size(tmp_path, monkeypatch):
     assert float(row["pnl_pct"]) == 10.0
 
 
+def test_history_uses_initial_size_when_position_size_zero(tmp_path, monkeypatch):
+    csv_path = tmp_path / "history.csv"
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
+    monkeypatch.setattr(trade_storage, "SIZE_AS_NOTIONAL", True)
+    trade = {
+        "trade_id": "unit-test",
+        "symbol": "MNWUSDT",
+        "direction": "long",
+        "entry": 0.2914,
+        "entry_time": "2024-06-21T00:00:00Z",
+        "position_size": 0.0,
+        "initial_size": 381.6566,
+        "size": 0.0,
+        "total_pnl": 24.5,
+        "total_fees": 0.2,
+    }
+    trade_storage.log_trade_result(
+        trade,
+        outcome="time_exit",
+        exit_price=0.35638,
+        exit_time="2024-06-21T06:00:00Z",
+        fees=0.2,
+        slippage=0.0,
+    )
+    df = trade_storage.load_trade_history_df(str(csv_path))
+    assert len(df) == 1
+    expected_qty = 381.6566
+    expected_notional = pytest.approx(0.2914 * expected_qty, rel=1e-9)
+    expected_pnl = pytest.approx((0.35638 - 0.2914) * expected_qty - 0.2, rel=1e-9)
+    assert df.loc[0, "notional"] == expected_notional
+    assert df.loc[0, "pnl"] == expected_pnl
+
+
 def test_quantity_size_when_notional_disabled(tmp_path, monkeypatch):
     csv_path = tmp_path / "log.csv"
     monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
