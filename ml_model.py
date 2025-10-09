@@ -1431,6 +1431,12 @@ def predict_success_probability(
     try:
         # Use sklearn model if available
         if model_type in {'logistic', 'random_forest', 'gradient_boosting', 'mlp', 'xgboost', 'lightgbm', 'catboost'} and SKLEARN_AVAILABLE and os.path.exists(MODEL_PKL):
+            original_feature_len = 0
+            scaler_mean = metadata.get('scaler_mean')
+            if scaler_mean is not None:
+                original_feature_len = len(scaler_mean)
+            elif metadata.get('feature_names'):
+                original_feature_len = len(metadata['feature_names'])
             mean = _pad_metadata_vector(metadata.get('scaler_mean'), feature_names, lambda name: _FEATURE_FALLBACKS.get(name, 0.0))
             scale = _pad_metadata_vector(metadata.get('scaler_scale'), feature_names, lambda _name: 1.0)
             scale = np.where(scale == 0, 1.0, scale)
@@ -1439,6 +1445,8 @@ def predict_success_probability(
             selection_info = metadata.get('selection_info') if view == 'rfe' else None
             pca_params = metadata.get('pca') if view == 'pca' else None
             x_view = _transform_feature_vector(x_norm, view, selection_info, pca_params, feature_names)
+            if view == 'standard' and original_feature_len and np.shape(x_view)[-1] > original_feature_len:
+                x_view = np.asarray(x_view, dtype=float)[..., :original_feature_len]
             clf = joblib.load(MODEL_PKL)
             x_input = np.asarray(x_view, dtype=float).reshape(1, -1)
             if hasattr(clf, 'predict_proba'):
