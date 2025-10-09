@@ -1445,8 +1445,12 @@ def predict_success_probability(
             selection_info = metadata.get('selection_info') if view == 'rfe' else None
             pca_params = metadata.get('pca') if view == 'pca' else None
             x_view = _transform_feature_vector(x_norm, view, selection_info, pca_params, feature_names)
-            if view == 'standard' and original_feature_count and x_view.shape[0] > original_feature_count:
-                x_view = x_view[:original_feature_count]
+            if view == 'standard' and original_feature_count:
+                x_view = np.asarray(x_view, dtype=float)
+                if x_view.ndim == 1 and x_view.size > original_feature_count:
+                    x_view = x_view[:original_feature_count]
+                elif x_view.ndim > 1 and x_view.shape[-1] > original_feature_count:
+                    x_view = x_view[..., :original_feature_count]
             clf = joblib.load(MODEL_PKL)
             x_input = np.asarray(x_view, dtype=float).reshape(1, -1)
             if hasattr(clf, 'predict_proba'):
