@@ -192,16 +192,22 @@ async def analyze_news_with_llm_async(
 
     try:
         async with _client_session(session) as client:
+            handled_error: Optional[Exception] = None
             try:
                 response = await _post_groq_request(
                     client, payload_template, model_used=payload_template["model"]
                 )
+            except RuntimeError as err:
+                handled_error = err
             except Exception as err:
+                handled_error = err
+
+            if handled_error is not None:
                 if payload_template["model"] != config.DEFAULT_GROQ_MODEL:
                     logger.warning(
                         "Groq model %s unavailable (%s). Retrying with fallback model %s.",
                         payload_template["model"],
-                        err,
+                        handled_error,
                         config.DEFAULT_GROQ_MODEL,
                     )
                     fallback_payload = {**payload_template, "model": config.DEFAULT_GROQ_MODEL}
@@ -209,7 +215,7 @@ async def analyze_news_with_llm_async(
                         client, fallback_payload, model_used=config.DEFAULT_GROQ_MODEL
                     )
                 else:
-                    raise
+                    raise handled_error
 
             raw_reply = response.get("choices", [{}])[0].get("message", {}).get("content", "")
             safe_decision, reason = parse_llm_json(raw_reply, logger)
