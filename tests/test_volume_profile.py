@@ -1,8 +1,11 @@
 import math
 
+import numpy as np
+
 import pandas as pd
 
 from volume_profile import (
+    _safe_series,
     compute_volume_profile,
     compute_trend_leg_volume_profile,
     compute_reversion_leg_volume_profile,
@@ -31,6 +34,14 @@ def test_compute_volume_profile_basic():
     # Highest volume cluster is around 101
     assert abs(result.poc - 101.15) < 0.3
     assert result.lvns, "Expected at least one LVN"
+
+
+def test_safe_series_handles_numpy_input():
+    arr = np.array([100.0, np.nan, 101.5])
+    series = _safe_series(arr)
+    assert isinstance(series, pd.Series)
+    cleaned = series.dropna()
+    assert cleaned.tolist() == [100.0, 101.5]
 
 
 def test_trend_leg_profile_detects_breakout():

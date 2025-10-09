@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -119,8 +119,29 @@ class VolumeProfileResult:
         }
 
 
-def _safe_series(values: pd.Series) -> pd.Series:
-    return pd.to_numeric(values, errors="coerce").astype(float)
+def _safe_series(values: Union[pd.Series, Sequence[float], np.ndarray, pd.Index]) -> pd.Series:
+    """Return a float series while tolerating numpy array input."""
+
+    if isinstance(values, pd.Series):
+        numeric = pd.to_numeric(values, errors="coerce")
+        return numeric.astype(float)
+
+    if isinstance(values, pd.Index):
+        base_series = values.to_series(index=values)
+    elif isinstance(values, np.ndarray):
+        base_series = pd.Series(values)
+    elif isinstance(values, Sequence) and not isinstance(values, (str, bytes)):
+        base_series = pd.Series(values)
+    else:
+        base_series = pd.Series([values])
+
+    numeric = pd.to_numeric(base_series, errors="coerce")
+    if isinstance(numeric, pd.Series):
+        return numeric.astype(float)
+
+    # ``pd.to_numeric`` can return an ndarray for array-like input; wrap it back
+    # into a Series so callers always receive an object supporting ``dropna``.
+    return pd.Series(numeric, index=base_series.index, dtype=float)
 
 
 def _determine_bin_configuration(
