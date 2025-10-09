@@ -1422,7 +1422,13 @@ def predict_success_probability(
         overrides.update({k: float(v) for k, v in feature_overrides.items()})
     micro_norm = _normalise_feature_dict(micro_features)
     overrides.update(_augment_nonlinear_features(micro_norm))
-    feature_names = metadata.get('feature_names') or list(_FEATURE_FALLBACKS.keys())
+    persisted_feature_names = metadata.get('feature_names')
+    if persisted_feature_names:
+        original_feature_count = len(persisted_feature_names)
+    else:
+        scaler_mean = metadata.get('scaler_mean')
+        original_feature_count = len(scaler_mean) if scaler_mean is not None else 0
+    feature_names = persisted_feature_names or list(_FEATURE_FALLBACKS.keys())
     missing_features = [name for name in _FEATURE_FALLBACKS.keys() if name not in feature_names]
     if missing_features:
         feature_names = feature_names + missing_features
@@ -1439,6 +1445,8 @@ def predict_success_probability(
             selection_info = metadata.get('selection_info') if view == 'rfe' else None
             pca_params = metadata.get('pca') if view == 'pca' else None
             x_view = _transform_feature_vector(x_norm, view, selection_info, pca_params, feature_names)
+            if view == 'standard' and original_feature_count and x_view.shape[0] > original_feature_count:
+                x_view = x_view[:original_feature_count]
             clf = joblib.load(MODEL_PKL)
             x_input = np.asarray(x_view, dtype=float).reshape(1, -1)
             if hasattr(clf, 'predict_proba'):
