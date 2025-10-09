@@ -67,9 +67,12 @@ def test_deduplicate_history(tmp_path, monkeypatch):
     assert t1["notional"] == 100.0
     assert t1["notional_tp1"] == 50.0
     assert t1["notional_tp2"] == 50.0
+    assert t1["notional_tp3"] == 0.0
     assert t1["size"] == 100.0
     assert t1["size_tp1"] == 0.5
     assert t1["size_tp2"] == 0.5
+    assert t1["size_tp3"] == 0.0
+    assert t1["pnl_tp3"] == 0.0
     assert t1["position_size"] == 1.0
 
     # second trade remains separate
@@ -78,6 +81,56 @@ def test_deduplicate_history(tmp_path, monkeypatch):
     assert t2["pnl"] == 10.0
     assert not bool(t2["tp1_partial"])
     assert not bool(t2["tp2_partial"])
+    assert t2["pnl_tp3"] == 0.0
+
+
+def test_deduplicate_history_tp3_allocation(tmp_path, monkeypatch):
+    data = [
+        {
+            "trade_id": "5",
+            "symbol": "ETHUSDT",
+            "direction": "long",
+            "entry_time": "2024-04-01T00:00:00Z",
+            "exit_time": "2024-04-01T01:00:00Z",
+            "entry": 100.0,
+            "exit": 110.0,
+            "size": 50.0,
+            "position_size": 0.5,
+            "strategy": "s4",
+            "outcome": "tp1_partial",
+            "fees": 0.1,
+            "slippage": 0.0,
+        },
+        {
+            "trade_id": "5",
+            "symbol": "ETHUSDT",
+            "direction": "long",
+            "entry_time": "2024-04-01T00:00:00Z",
+            "exit_time": "2024-04-01T02:00:00Z",
+            "entry": 100.0,
+            "exit": 130.0,
+            "size": 50.0,
+            "position_size": 0.5,
+            "strategy": "s4",
+            "outcome": "tp3",
+            "fees": 0.4,
+            "slippage": 0.0,
+        },
+    ]
+
+    df = pd.DataFrame(data)
+    hist_file = tmp_path / "completed.csv"
+    df.to_csv(hist_file, index=False)
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(hist_file))
+
+    result = trade_storage.load_trade_history_df()
+    trade = result.iloc[0]
+
+    assert trade["pnl"] == pytest.approx(19.6)
+    assert trade["pnl_tp1"] == pytest.approx(4.9)
+    assert trade["pnl_tp3"] == pytest.approx(14.7)
+    assert trade["size_tp3"] == pytest.approx(0.5)
+    assert trade["notional_tp3"] == pytest.approx(50.0)
 
 
 def test_deduplicate_history_cumulative_fees(tmp_path, monkeypatch):

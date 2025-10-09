@@ -1918,10 +1918,13 @@ def render_live_tab() -> None:
         stage_map = {
             "pnl_tp1": "PnL TP1 ($)",
             "pnl_tp2": "PnL TP2 ($)",
+            "pnl_tp3": "PnL TP3 ($)",
             "size_tp1": "Size TP1",
             "size_tp2": "Size TP2",
+            "size_tp3": "Size TP3",
             "notional_tp1": "Notional TP1 ($)",
             "notional_tp2": "Notional TP2 ($)",
+            "notional_tp3": "Notional TP3 ($)",
         }
         hist_display = pd.DataFrame(index=hist_df.index)
         base_columns = [
@@ -1967,7 +1970,17 @@ def render_live_tab() -> None:
         if "Outcome Description" in hist_df.columns:
             hist_display["Outcome Description"] = hist_df["Outcome Description"]
         stage_display_order: list[str] = []
-        for key in ("pnl_tp1", "size_tp1", "notional_tp1", "pnl_tp2", "size_tp2", "notional_tp2"):
+        for key in (
+            "pnl_tp1",
+            "size_tp1",
+            "notional_tp1",
+            "pnl_tp2",
+            "size_tp2",
+            "notional_tp2",
+            "pnl_tp3",
+            "size_tp3",
+            "notional_tp3",
+        ):
             if key in hist_df.columns:
                 label = stage_map[key]
                 hist_display[label] = numcol(hist_df, key)

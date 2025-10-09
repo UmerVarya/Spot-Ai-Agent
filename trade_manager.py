@@ -200,6 +200,7 @@ def _finalize_trade_result(
     quantity: float,
     fees: float,
     slippage: float,
+    outcome: str,
 ) -> tuple[float, float]:
     """Combine partial leg results with the final exit leg."""
 
@@ -225,6 +226,19 @@ def _finalize_trade_result(
     trade["total_slippage"] = total_slippage
     trade["tp1_partial"] = bool(trade.get("tp1_partial"))
     trade["tp2_partial"] = bool(trade.get("tp2_partial"))
+    entry_val = _to_float(trade.get("entry"))
+    outcome_token = str(outcome or trade.get("outcome", "")).lower()
+    if "tp3" in outcome_token and "_partial" not in outcome_token:
+        trade["tp3_reached"] = True
+        trade["pnl_tp3"] = trade.get("pnl_tp3", 0.0) + final_leg_pnl
+        try:
+            qty_val = float(quantity)
+        except Exception:
+            qty_val = None
+        if qty_val is not None:
+            trade["size_tp3"] = qty_val
+        if entry_val is not None and qty_val is not None:
+            trade["notional_tp3"] = entry_val * qty_val
     return total_fees, total_slippage
 
 
@@ -280,6 +294,7 @@ def execute_exit_trade(
         quantity=qty_val,
         fees=fees,
         slippage=slippage,
+        outcome=outcome,
     )
     log_trade_result(
         trade,

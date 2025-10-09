@@ -1,5 +1,6 @@
 import csv
 import pandas as pd
+import pytest
 
 import trade_storage
 import trade_manager
@@ -46,10 +47,13 @@ def test_log_trade_result_extended_fields(tmp_path, monkeypatch):
     assert float(rows[0]["pnl_pct"]) == 10.0
     assert float(rows[0]["pnl_tp1"]) == 0.0
     assert float(rows[0]["pnl_tp2"]) == 0.0
+    assert float(rows[0]["pnl_tp3"]) == 0.0
     assert float(rows[0]["size_tp1"]) == 0.0
     assert float(rows[0]["size_tp2"]) == 0.0
+    assert float(rows[0]["size_tp3"]) == 0.0
     assert float(rows[0]["notional_tp1"]) == 0.0
     assert float(rows[0]["notional_tp2"]) == 0.0
+    assert float(rows[0]["notional_tp3"]) == 0.0
     assert rows[0]["tp1_partial"] == "False"
     assert rows[0]["tp2_partial"] == "False"
     assert rows[0]["pattern"] == "double_bottom"
@@ -104,7 +108,34 @@ def test_log_trade_result_partial_tp_fields(tmp_path, monkeypatch):
     assert float(row["size_tp1"]) == 0.5
     assert float(row["notional_tp1"]) == 500.0
     assert float(row["pnl_tp2"]) == 0.0
+    assert float(row["pnl_tp3"]) == 0.0
     assert row["tp1_partial"] == "True"
+    assert row["tp2_partial"] == "False"
+
+
+def test_log_trade_result_tp3_fields(tmp_path, monkeypatch):
+    csv_path = tmp_path / "log.csv"
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
+    trade = {
+        "symbol": "ETHUSDT",
+        "direction": "long",
+        "entry": 1000,
+        "size": 1000,
+        "position_size": 1,
+        "strategy": "test",
+        "session": "Asia",
+    }
+
+    trade_storage.log_trade_result(trade, outcome="tp3", exit_price=1200)
+
+    with open(csv_path, newline="") as f:
+        row = next(csv.DictReader(f))
+
+    assert float(row["pnl"]) == 200.0
+    assert float(row["pnl_tp3"]) == 200.0
+    assert float(row["size_tp3"]) == pytest.approx(1.0)
+    assert float(row["notional_tp3"]) == pytest.approx(1000.0)
+    assert row["tp1_partial"] == "False"
     assert row["tp2_partial"] == "False"
 
 

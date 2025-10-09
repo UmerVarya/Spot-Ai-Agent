@@ -753,6 +753,12 @@ def log_trade_result(
     outcome_lower = outcome_text.lower()
     tp1_flag = bool(trade.get("tp1_partial")) or "tp1_partial" in outcome_lower
     tp2_flag = bool(trade.get("tp2_partial")) or "tp2_partial" in outcome_lower
+    tp3_flag = (
+        bool(trade.get("tp3_reached"))
+        or ("tp3" in outcome_lower and "_partial" not in outcome_lower)
+        or (trade.get("pnl_tp3") is not None)
+        or (trade.get("size_tp3") is not None)
+    )
 
     volume_profile_summary = _ensure_mapping(trade.get("volume_profile"))
     volume_profile_poc = None
@@ -858,10 +864,13 @@ def log_trade_result(
         "tp2_partial": tp2_flag,
         "pnl_tp1": _optional_numeric_field(0.0),
         "pnl_tp2": _optional_numeric_field(0.0),
+        "pnl_tp3": _optional_numeric_field(0.0),
         "size_tp1": _optional_numeric_field(0.0),
         "size_tp2": _optional_numeric_field(0.0),
+        "size_tp3": _optional_numeric_field(0.0),
         "notional_tp1": _optional_numeric_field(0.0),
         "notional_tp2": _optional_numeric_field(0.0),
+        "notional_tp3": _optional_numeric_field(0.0),
         "auction_state": _optional_text_field(trade.get("auction_state")),
         "volume_profile_leg_type": _optional_text_field(volume_profile_leg_type),
         "volume_profile_poc": _optional_numeric_field(volume_profile_poc),
@@ -914,6 +923,28 @@ def log_trade_result(
         row["pnl_tp2"] = _optional_numeric_field(pnl_tp2_val)
         row["size_tp2"] = _optional_numeric_field(size_tp2_display)
         row["notional_tp2"] = _optional_numeric_field(notional_tp2_val)
+    if tp3_flag:
+        pnl_tp3_val = trade.get("pnl_tp3")
+        if pnl_tp3_val is None:
+            pnl_tp3_val = pnl_val
+        size_tp3_val = trade.get("size_tp3")
+        if size_tp3_val is None:
+            size_tp3_val = trade.get("final_exit_size", quantity)
+        notional_tp3_val = trade.get("notional_tp3")
+        if (
+            notional_tp3_val is None
+            and entry_val is not None
+            and size_tp3_val is not None
+        ):
+            try:
+                notional_tp3_val = float(size_tp3_val) * entry_val
+            except Exception:
+                notional_tp3_val = None
+        if notional_tp3_val is None:
+            notional_tp3_val = notional
+        row["pnl_tp3"] = _optional_numeric_field(pnl_tp3_val)
+        row["size_tp3"] = _optional_numeric_field(size_tp3_val)
+        row["notional_tp3"] = _optional_numeric_field(notional_tp3_val)
     if DB_CURSOR:
         try:
             DB_CURSOR.execute(
@@ -1217,16 +1248,25 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
                 row["pnl_pct"] = pnl_total / float(notional_val) * 100
             except Exception:
                 row["pnl_pct"] = None
-        tp1_rows = group[group["outcome"].astype(str).str.contains("tp1_partial", na=False)]
-        tp2_rows = group[group["outcome"].astype(str).str.contains("tp2_partial", na=False)]
+        if "outcome" in group:
+            outcomes = group["outcome"].astype(str)
+        else:
+            outcomes = pd.Series([""] * len(group), index=group.index, dtype=object)
+        tp1_rows = group[outcomes.str.contains("tp1_partial", na=False)]
+        tp2_rows = group[outcomes.str.contains("tp2_partial", na=False)]
+        tp3_mask = outcomes.str.contains("tp3", na=False) & ~outcomes.str.contains("_partial", na=False)
+        tp3_rows = group[tp3_mask]
         row["tp1_partial"] = not tp1_rows.empty
         row["tp2_partial"] = not tp2_rows.empty
         row["pnl_tp1"] = net_pnl_rows.loc[tp1_rows.index].sum()
         row["pnl_tp2"] = net_pnl_rows.loc[tp2_rows.index].sum()
+        row["pnl_tp3"] = net_pnl_rows.loc[tp3_rows.index].sum()
         row["size_tp1"] = tp1_rows["_size"].sum()
         row["size_tp2"] = tp2_rows["_size"].sum()
+        row["size_tp3"] = tp3_rows["_size"].sum()
         row["notional_tp1"] = tp1_rows["_notional"].sum()
         row["notional_tp2"] = tp2_rows["_notional"].sum()
+        row["notional_tp3"] = tp3_rows["_notional"].sum()
         return row
 
     collapsed = (
