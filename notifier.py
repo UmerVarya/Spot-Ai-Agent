@@ -78,7 +78,7 @@ def _format_percent(value: Any) -> str:
     number = _coerce_number(value)
     if number is None:
         return _format_text(value)
-    return f"{number:.2%}"
+    return f"{number:.2f}%"
 
 
 def _format_text(value: Any) -> str:
