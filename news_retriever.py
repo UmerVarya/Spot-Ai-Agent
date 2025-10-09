@@ -104,12 +104,21 @@ class NewsVectorStore:
 
         if not self.is_available or not self._index:
             # Fallback: naive keyword matching scored by occurrence count.
-            matches: list[RetrievedDocument] = []
-            lowered = text.lower()
-            for snippet, src in zip(self._documents[:top_k], self._sources[:top_k]):
-                score = sum(word in snippet.lower() for word in lowered.split())
-                matches.append(RetrievedDocument(text=snippet, score=float(score), source=src))
-            return matches
+            query_terms = text.lower().split()
+            scored_entries: list[tuple[float, int, str, str]] = []
+
+            for idx, snippet in enumerate(self._documents):
+                source = self._sources[idx] if idx < len(self._sources) else "headline"
+                snippet_lower = snippet.lower()
+                score = float(sum(term in snippet_lower for term in query_terms))
+                scored_entries.append((score, idx, snippet, source))
+
+            scored_entries.sort(key=lambda item: (-item[0], item[1]))
+
+            return [
+                RetrievedDocument(text=snippet, score=score, source=source)
+                for score, _, snippet, source in scored_entries[:top_k]
+            ]
 
         query_embedding = self._encode([text])
         scores, indices = self._index.search(query_embedding, top_k)
