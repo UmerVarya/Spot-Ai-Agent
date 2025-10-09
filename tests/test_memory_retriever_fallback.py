@@ -1,7 +1,10 @@
 """Tests for the memory retriever fallback behaviour."""
 
+from __future__ import annotations
+
 import pandas as pd
 
+import memory_retriever
 from memory_retriever import _fallback_recent_trades
 
 
@@ -59,3 +62,21 @@ def test_fallback_no_matches_returns_default_message() -> None:
     )
 
     assert summary == "No prior trades on record."
+
+
+def test_summary_filters_when_embeddings_unavailable(tmp_path, monkeypatch) -> None:
+    df = _build_df()
+    log_path = tmp_path / "trades.csv"
+    df.to_csv(log_path, index=False)
+
+    monkeypatch.setattr(memory_retriever, "LOG_FILE", str(log_path))
+    monkeypatch.setattr(
+        memory_retriever, "_load_trade_embeddings", lambda *_args, **_kwargs: None
+    )
+
+    summary = memory_retriever.get_recent_trade_summary(
+        symbol="BTCUSDT", pattern="Breakout", max_entries=5
+    )
+
+    assert "ETHUSDT" not in summary
+    assert "Breakout" in summary

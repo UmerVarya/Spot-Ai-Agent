@@ -131,6 +131,27 @@ def _format_trade_summary(row: pd.Series, similarity: float) -> str:
     return header
 
 
+def _apply_trade_filters(
+    df: pd.DataFrame, *, symbol: str, pattern: str
+) -> pd.DataFrame:
+    """Return a view of ``df`` filtered by ``symbol``/``pattern`` where possible."""
+
+    working_df = df
+
+    if symbol and "symbol" in working_df.columns:
+        working_df = working_df[working_df["symbol"].astype(str) == symbol]
+
+    normalized_pattern = (pattern or "").strip().lower()
+    if normalized_pattern and "pattern" in working_df.columns:
+        working_df = working_df[
+            working_df["pattern"].astype(str).str.lower() == normalized_pattern
+        ]
+
+    # ``copy`` ensures downstream callers can mutate without triggering
+    # pandas ``SettingWithCopy`` warnings.
+    return working_df.copy()
+
+
 def _fallback_recent_trades(
     df: pd.DataFrame,
     max_entries: int,
@@ -144,16 +165,7 @@ def _fallback_recent_trades(
     ``symbol``/``pattern`` filters so that the returned context remains relevant.
     """
 
-    working_df = df.copy()
-
-    if symbol and "symbol" in working_df.columns:
-        working_df = working_df[working_df["symbol"].astype(str) == symbol]
-
-    normalized_pattern = (pattern or "").strip().lower()
-    if normalized_pattern and "pattern" in working_df.columns:
-        working_df = working_df[
-            working_df["pattern"].astype(str).str.lower() == normalized_pattern
-        ]
+    working_df = _apply_trade_filters(df, symbol=symbol, pattern=pattern)
 
     if "timestamp" in working_df.columns:
         working_df = working_df.sort_values(by="timestamp", ascending=False)
@@ -218,13 +230,19 @@ def get_recent_trade_summary(symbol: str, pattern: str, max_entries: int = 3) ->
     file_mtime = os.path.getmtime(LOG_FILE)
     embedding_bundle = _load_trade_embeddings(df, file_mtime)
 
+    filtered_df = _apply_trade_filters(df, symbol=symbol, pattern=pattern)
+
     if embedding_bundle is None:
-        return _fallback_recent_trades(df, max_entries, symbol=symbol, pattern=pattern)
+        return _fallback_recent_trades(
+            filtered_df, max_entries, symbol=symbol, pattern=pattern
+        )
 
     embedding_df, embeddings = embedding_bundle
     model = _get_embedding_model()
     if model is None or np is None:
-        return _fallback_recent_trades(df, max_entries, symbol=symbol, pattern=pattern)
+        return _fallback_recent_trades(
+            filtered_df, max_entries, symbol=symbol, pattern=pattern
+        )
 
     query_description = {
         "symbol": symbol,
@@ -235,7 +253,9 @@ def get_recent_trade_summary(symbol: str, pattern: str, max_entries: int = 3) ->
     try:
         query_embedding = model.encode([query_document], convert_to_numpy=True, normalize_embeddings=True)[0]
     except Exception:
-        return _fallback_recent_trades(df, max_entries, symbol=symbol, pattern=pattern)
+        return _fallback_recent_trades(
+            filtered_df, max_entries, symbol=symbol, pattern=pattern
+        )
 
     similar_indices = list(
         _select_similar_trades(
@@ -249,7 +269,9 @@ def get_recent_trade_summary(symbol: str, pattern: str, max_entries: int = 3) ->
     )
 
     if not similar_indices:
-        return _fallback_recent_trades(df, max_entries, symbol=symbol, pattern=pattern)
+        return _fallback_recent_trades(
+            filtered_df, max_entries, symbol=symbol, pattern=pattern
+        )
 
     summary_lines = [
         _format_trade_summary(embedding_df.iloc[idx], similarity)
