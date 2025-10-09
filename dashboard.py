@@ -638,7 +638,10 @@ def _is_trade_closed(trade: dict) -> bool:
         for key, value in status_field.items():
             if _status_token_is_closed(key) and to_bool(value):
                 return True
-            if _status_token_is_closed(value):
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if _status_token_is_closed(value):
+                    return True
+            elif value and _status_token_is_closed(value):
                 return True
         # Nested state hints
         for nested_key in ("state", "status", "trade_status"):
