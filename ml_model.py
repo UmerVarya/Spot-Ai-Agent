@@ -387,6 +387,15 @@ def _transform_feature_vector(
         components = np.asarray(pca_params.get('components'))
         pca_mean = np.asarray(pca_params.get('mean'))
         if components.ndim == 2 and pca_mean.size:
+            n_components, original_features = components.shape
+            target_features = x.size
+            if original_features < target_features:
+                padding = np.zeros((n_components, target_features - original_features), dtype=components.dtype)
+                components = np.hstack([components, padding])
+                pca_mean = np.pad(pca_mean, (0, target_features - original_features), constant_values=0.0)
+            elif original_features > target_features:
+                components = components[:, :target_features]
+                pca_mean = pca_mean[:target_features]
             centered = x - pca_mean
             return centered @ components.T
     return x
@@ -1344,13 +1353,48 @@ def predict_success_probability(
     missing_features = [name for name in _FEATURE_FALLBACKS.keys() if name not in feature_names]
     if missing_features:
         feature_names = feature_names + missing_features
+    feature_defaults = np.array([
+        _FEATURE_FALLBACKS.get(name, 0.0) for name in feature_names
+    ], dtype=float)
+    scale_defaults = np.ones_like(feature_defaults)
+
+    def _vector_with_defaults(values: Optional[Any], defaults: np.ndarray) -> np.ndarray:
+        """Return a 1-D vector matching ``defaults`` length, padding with defaults."""
+
+        if values is None:
+            return defaults.copy()
+        try:
+            arr = np.asarray(values, dtype=float).reshape(-1)
+        except Exception:
+            arr = np.array([], dtype=float)
+        if arr.size < defaults.size:
+            arr = np.concatenate([arr, defaults[arr.size:]])
+        elif arr.size > defaults.size:
+            arr = arr[:defaults.size]
+        return arr
+
+    def _weights_with_defaults(values: Optional[Any], expected: int) -> np.ndarray:
+        """Return a weight vector of ``expected`` length, padding with zeros."""
+
+        if values is None:
+            return np.zeros(expected, dtype=float)
+        try:
+            arr = np.asarray(values, dtype=float).reshape(-1)
+        except Exception:
+            arr = np.array([], dtype=float)
+        if arr.size < expected:
+            arr = np.concatenate([arr, np.zeros(expected - arr.size, dtype=float)])
+        elif arr.size > expected:
+            arr = arr[:expected]
+        return arr
+
     x = _assemble_feature_vector(feature_names, base_features, overrides)
     model_type = metadata.get('model_type', 'manual')
     try:
         # Use sklearn model if available
         if model_type in {'logistic', 'random_forest', 'gradient_boosting', 'mlp', 'xgboost', 'lightgbm', 'catboost'} and SKLEARN_AVAILABLE and os.path.exists(MODEL_PKL):
-            mean = np.array(metadata.get('scaler_mean'), dtype=float)
-            scale = np.array(metadata.get('scaler_scale'), dtype=float)
+            mean = _vector_with_defaults(metadata.get('scaler_mean'), feature_defaults)
+            scale = _vector_with_defaults(metadata.get('scaler_scale'), scale_defaults)
             scale = np.where(scale == 0, 1.0, scale)
             x_norm = (x - mean) / scale
             view = metadata.get('feature_view', 'standard')
@@ -1368,9 +1412,9 @@ def predict_success_probability(
                 return float(pred[0])
         elif model_type == 'manual':
             # Manual logistic regression
-            mu = np.array(metadata.get('mu'))
-            sigma = np.array(metadata.get('sigma'))
-            weights = np.array(metadata.get('weights'))
+            mu = _vector_with_defaults(metadata.get('mu'), feature_defaults)
+            sigma = _vector_with_defaults(metadata.get('sigma'), scale_defaults)
+            weights = _weights_with_defaults(metadata.get('weights'), feature_defaults.size + 1)
             x_norm = (x - mu) / (sigma + 1e-8)
             x_aug = np.hstack([1.0, x_norm])
             z = float(x_aug @ weights)
