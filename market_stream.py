@@ -418,7 +418,6 @@ class BinanceMarketStream:
                 depth_socket = self._twm.start_depth_socket(
                     callback=_handle_depth,
                     symbol=mapped_symbol.lower(),
-                    depth=self._socket_depth,
                 )
             except Exception as exc:  # pragma: no cover - network dependent
                 logger.warning("Failed to subscribe to depth stream for %s: %s", mapped_symbol, exc)
