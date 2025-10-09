@@ -292,9 +292,18 @@ class OrderBookState:
 class BinanceMarketStream:
     """Manage Binance WebSocket subscriptions for depth and trade data."""
 
+    _SUPPORTED_SOCKET_DEPTHS: Tuple[int, ...] = (5, 10, 20)
+
     def __init__(self, depth: int = 50, trade_window_seconds: int = 120) -> None:
         self.depth = depth
         self.trade_window_seconds = trade_window_seconds
+        self._socket_depth = self._resolve_socket_depth(depth)
+        if self._socket_depth != depth:
+            logger.debug(
+                "Requested depth %s is not supported for Binance sockets; using %s.",
+                depth,
+                self._socket_depth,
+            )
         self._twm: Optional[ThreadedWebsocketManager] = None
         self._client: Optional[Client] = None
         self._manager_lock = threading.Lock()
@@ -346,6 +355,16 @@ class BinanceMarketStream:
                 except Exception:  # pragma: no cover - best effort
                     continue
 
+    def _resolve_socket_depth(self, requested_depth: int) -> int:
+        """Return the closest supported depth level for Binance sockets."""
+
+        if requested_depth <= 0:
+            return self._SUPPORTED_SOCKET_DEPTHS[0]
+        for level in self._SUPPORTED_SOCKET_DEPTHS:
+            if requested_depth <= level:
+                return level
+        return self._SUPPORTED_SOCKET_DEPTHS[-1]
+
     def _ensure_symbol(self, symbol: str) -> None:
         mapped_symbol = map_symbol_for_binance(symbol)
         if self._disabled:
@@ -357,7 +376,7 @@ class BinanceMarketStream:
         with symbol_lock:
             if mapped_symbol in self._symbol_streams:
                 return
-            state = OrderBookState(depth=self.depth)
+            state = OrderBookState(depth=min(self.depth, self._socket_depth))
             trades = RollingTradeStats(window_seconds=self.trade_window_seconds)
             snapshot_ok = False
             if self._client is not None:
@@ -399,6 +418,7 @@ class BinanceMarketStream:
                 depth_socket = self._twm.start_depth_socket(
                     callback=_handle_depth,
                     symbol=mapped_symbol.lower(),
+                    depth=self._socket_depth,
                 )
             except Exception as exc:  # pragma: no cover - network dependent
                 logger.warning("Failed to subscribe to depth stream for %s: %s", mapped_symbol, exc)
