@@ -1129,10 +1129,25 @@ def manage_trades() -> None:
                         if entry_price_val is not None:
                             trade['size'] = remaining_qty * entry_price_val
                         _persist_active_snapshot(updated_trades, active_trades, index)
-                        if tp1 is not None:
-                            _update_stop_loss(trade, tp1)
+                        desired_sl: Optional[float] = None
+                        current_sl = _to_float(trade.get('sl'))
+                        if trade.get('profit_riding') and target_price is not None:
+                            desired_sl = target_price
+                        elif tp1 is not None:
+                            desired_sl = tp1
+                        if (
+                            desired_sl is not None
+                            and (current_sl is None or desired_sl > current_sl)
+                        ):
+                            _update_stop_loss(trade, desired_sl)
                             _persist_active_snapshot(updated_trades, active_trades, index)
-                        logger.info("%s hit TP2 — sold 30% and moved SL to TP1", symbol)
+                            logger.info(
+                                "%s hit TP2 — sold 30%% and raised SL to %.6f",
+                                symbol,
+                                desired_sl,
+                            )
+                        else:
+                            logger.info("%s hit TP2 — sold 30%%", symbol)
                         send_email(
                             f"✅ TP2 Partial: {symbol}",
                             f"Partial exit qty: {sell_qty:.6f} @ {target_price} (PnL: {trade.get('pnl_tp2', 0.0):.4f})\n\n"
