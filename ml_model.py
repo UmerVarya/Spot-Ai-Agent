@@ -47,7 +47,7 @@ from __future__ import annotations
 import os
 import json
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Any, Optional, Mapping, Callable
+from typing import List, Tuple, Dict, Any, Optional, Mapping, Callable, Sequence
 import inspect
 
 import numpy as np
@@ -1267,6 +1267,50 @@ def _assemble_feature_vector(
     return np.array([values.get(name, 0.0) for name in feature_names], dtype=float)
 
 
+def _pad_metadata_vector(
+    values: Optional[Sequence[float]],
+    feature_names: Sequence[str],
+    default_provider: Callable[[str], float],
+) -> np.ndarray:
+    """Ensure persisted metadata vectors align with the active feature list."""
+
+    target_len = len(feature_names)
+    if target_len == 0:
+        return np.empty(0, dtype=float)
+    if values is None:
+        base = np.empty(0, dtype=float)
+    else:
+        base = np.atleast_1d(np.asarray(values, dtype=float)).astype(float)
+        if base.ndim > 1:
+            base = base.ravel()
+    if base.size >= target_len:
+        return base[:target_len]
+    padding = np.array([default_provider(feature_names[i]) for i in range(base.size, target_len)], dtype=float)
+    if base.size == 0:
+        return padding
+    return np.concatenate([base, padding])
+
+
+def _pad_weight_vector(values: Optional[Sequence[float]], feature_count: int) -> np.ndarray:
+    """Pad manual regression weights so the augmented vector matches the features."""
+
+    target_len = feature_count + 1
+    if target_len <= 0:
+        return np.empty(0, dtype=float)
+    if values is None:
+        base = np.empty(0, dtype=float)
+    else:
+        base = np.atleast_1d(np.asarray(values, dtype=float)).astype(float)
+        if base.ndim > 1:
+            base = base.ravel()
+    if base.size >= target_len:
+        return base[:target_len]
+    padding = np.zeros(target_len - base.size, dtype=float)
+    if base.size == 0:
+        return padding
+    return np.concatenate([base, padding])
+
+
 def predict_success_probability(
     score: float,
     confidence: float,
@@ -1349,8 +1393,8 @@ def predict_success_probability(
     try:
         # Use sklearn model if available
         if model_type in {'logistic', 'random_forest', 'gradient_boosting', 'mlp', 'xgboost', 'lightgbm', 'catboost'} and SKLEARN_AVAILABLE and os.path.exists(MODEL_PKL):
-            mean = np.array(metadata.get('scaler_mean'), dtype=float)
-            scale = np.array(metadata.get('scaler_scale'), dtype=float)
+            mean = _pad_metadata_vector(metadata.get('scaler_mean'), feature_names, lambda name: _FEATURE_FALLBACKS.get(name, 0.0))
+            scale = _pad_metadata_vector(metadata.get('scaler_scale'), feature_names, lambda _name: 1.0)
             scale = np.where(scale == 0, 1.0, scale)
             x_norm = (x - mean) / scale
             view = metadata.get('feature_view', 'standard')
@@ -1368,9 +1412,9 @@ def predict_success_probability(
                 return float(pred[0])
         elif model_type == 'manual':
             # Manual logistic regression
-            mu = np.array(metadata.get('mu'))
-            sigma = np.array(metadata.get('sigma'))
-            weights = np.array(metadata.get('weights'))
+            mu = _pad_metadata_vector(metadata.get('mu'), feature_names, lambda name: _FEATURE_FALLBACKS.get(name, 0.0))
+            sigma = _pad_metadata_vector(metadata.get('sigma'), feature_names, lambda _name: 1.0)
+            weights = _pad_weight_vector(metadata.get('weights'), len(feature_names))
             x_norm = (x - mu) / (sigma + 1e-8)
             x_aug = np.hstack([1.0, x_norm])
             z = float(x_aug @ weights)
