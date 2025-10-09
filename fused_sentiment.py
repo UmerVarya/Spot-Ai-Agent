@@ -177,16 +177,30 @@ def analyze_headlines(
         "fingpt": SentimentResult(score=float(s_fg), confidence=c_fg, rationale=rationale_fg),
     }
 
-    fused = sum(model_outputs[name].score * weights.get(name, 0.0) for name in weights)
+    available_weights = {name: weights.get(name, 0.0) for name in model_outputs}
+    total_available = sum(available_weights.values())
+    if total_available <= 0:
+        uniform_weight = 1.0 / len(available_weights) if available_weights else 0.0
+        available_weights = {name: uniform_weight for name in available_weights}
+    else:
+        available_weights = {
+            name: weight / total_available for name, weight in available_weights.items()
+        }
+
+    fused = sum(
+        model_outputs[name].score * available_weights.get(name, 0.0)
+        for name in model_outputs
+    )
     bias = "bullish" if fused > 0.15 else "bearish" if fused < -0.15 else "neutral"
     fused_conf = sum(
-        model_outputs[name].confidence * weights.get(name, 0.0) for name in weights
+        model_outputs[name].confidence * available_weights.get(name, 0.0)
+        for name in model_outputs
     )
     result: Dict[str, Dict[str, float]] = {
         "finllama": {"score": s_fl, "confidence": c_fl, "rationale": rationale_fl},
         "fingpt": {"score": s_fg, "confidence": c_fg, "rationale": rationale_fg},
         "fused": {"score": fused, "bias": bias, "confidence": fused_conf},
-        "weights": dict(weights),
+        "weights": dict(available_weights),
     }
     return result
 
