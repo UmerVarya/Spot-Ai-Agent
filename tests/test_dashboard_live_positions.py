@@ -40,6 +40,10 @@ def test_is_trade_closed_heuristics(monkeypatch):
     assert dashboard._is_trade_closed({"status": "closed"}) is True
     assert dashboard._is_trade_closed({"is_open": False}) is True
     assert dashboard._is_trade_closed({"status": {"closed": "true"}}) is True
+    assert dashboard._is_trade_closed({"status": {"is_open": False}}) is True
+    assert dashboard._is_trade_closed({"status": {"active": False}}) is True
+    assert dashboard._is_trade_closed({"status": {"open": "false"}}) is True
+    assert dashboard._is_trade_closed({"status": {"active": 0}}) is True
     assert dashboard._is_trade_closed({"status": {"closed": False}}) is False
     assert dashboard._is_trade_closed({"status": {"open": True}}) is False
     assert dashboard._is_trade_closed({"status": "open"}) is False

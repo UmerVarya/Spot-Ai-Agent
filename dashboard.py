@@ -567,6 +567,25 @@ def _normalise_live_positions_payload(payload) -> list[dict]:
     return []
 
 
+def _status_token_is_open(value) -> bool:
+    """Return ``True`` when ``value`` represents an open trade state."""
+
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return False
+    token = str(value).strip().lower()
+    if not token:
+        return False
+    open_tokens = {"open", "active", "running", "live", "entered"}
+    if token in open_tokens:
+        return True
+    for marker in open_tokens:
+        if marker in token:
+            return True
+    return False
+
+
 def _status_token_is_closed(value) -> bool:
     """Return ``True`` when ``value`` represents a closed trade state."""
 
@@ -604,10 +623,9 @@ def _status_token_is_closed(value) -> bool:
         "hit_sl",
         "stop_hit",
     }
-    open_tokens = {"open", "active", "running", "live", "entered"}
     if token in closed_tokens:
         return True
-    if token in open_tokens:
+    if _status_token_is_open(token):
         return False
     for marker in closed_tokens:
         if marker in token:
@@ -637,6 +655,28 @@ def _status_value_is_truthy(value) -> bool:
     return bool(value)
 
 
+def _status_value_is_explicitly_false(value) -> bool:
+    """Return ``True`` when ``value`` explicitly negates an open status."""
+
+    if isinstance(value, bool):
+        return value is False
+    if isinstance(value, (int, float)):
+        return float(value) == 0.0
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return False
+        lower = token.lower()
+        explicit_negatives = {"false", "no", "off"}
+        if lower in explicit_negatives:
+            return True
+        try:
+            return float(token) == 0.0
+        except ValueError:
+            return False
+    return False
+
+
 def _is_trade_closed(trade: dict) -> bool:
     """Return ``True`` if ``trade`` should be considered closed."""
 
@@ -663,6 +703,8 @@ def _is_trade_closed(trade: dict) -> bool:
     status_field = trade.get("status")
     if isinstance(status_field, dict):
         for key, value in status_field.items():
+            if _status_token_is_open(key) and _status_value_is_explicitly_false(value):
+                return True
             if _status_token_is_closed(key) and _status_value_is_truthy(value):
                 return True
             if _status_value_is_truthy(value) and _status_token_is_closed(value):
