@@ -693,9 +693,12 @@ def get_order_book(symbol: str, limit: int = 50) -> Optional[dict]:
             snapshot = stream.get_order_book(symbol, depth=limit)
             if snapshot:
                 raw_last_update_ts = float(snapshot.get("last_event_ts", 0.0) or 0.0)
-                # Convert millisecond timestamps (used after the first stream update)
-                # to seconds to align with ``time.time()`` for the staleness check.
-                if raw_last_update_ts > 1e11:  # ~3,000 years in seconds
+                # ``OrderBookState.snapshot`` starts reporting millisecond timestamps once
+                # live depth updates flow in. Convert these values back to seconds so the
+                # staleness check compares consistent units (``time.time()`` is seconds).
+                if raw_last_update_ts > now + 1:
+                    last_update_ts = raw_last_update_ts / 1000.0
+                elif raw_last_update_ts > 1e11:  # pragma: no cover - defensive cutoff
                     last_update_ts = raw_last_update_ts / 1000.0
                 else:
                     last_update_ts = raw_last_update_ts
