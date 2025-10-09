@@ -47,6 +47,14 @@ def test_is_trade_closed_heuristics(monkeypatch):
         dashboard._is_trade_closed({"status": {"tp1": "hit"}, "active": "yes"})
         is False
     )
+    assert (
+        dashboard._is_trade_closed({"status": {"filled_qty": 0}})
+        is False
+    )
+    assert (
+        dashboard._is_trade_closed({"status": {"status_code": 0}})
+        is True
+    )
 
 
 def test_trade_identity_prefers_trade_id(monkeypatch):
