@@ -615,6 +615,57 @@ def _status_token_is_closed(value) -> bool:
     return False
 
 
+def _status_value_indicates_closed(value, *, context_key: str | None = None) -> bool:
+    """Return ``True`` when ``value`` should be treated as a closed signal."""
+
+    if isinstance(value, bool):
+        # Bare booleans outside an explicit "closed" key are ambiguous.  Leave the
+        # decision to the surrounding heuristics.
+        return False
+    if isinstance(value, (int, float)):
+        if _status_context_allows_numeric_zero(context_key):
+            return float(value) == 0.0
+        return False
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return False
+        try:
+            numeric = float(token)
+        except ValueError:
+            numeric = None
+        if numeric is not None:
+            return _status_value_indicates_closed(numeric, context_key=context_key)
+        return _status_token_is_closed(token)
+    return _status_value_is_truthy(value) and _status_token_is_closed(value)
+
+
+def _status_context_allows_numeric_zero(context_key: str | None) -> bool:
+    """Return ``True`` when ``context_key`` implies numeric zeros mean "closed"."""
+
+    if context_key is None:
+        return False
+    token = str(context_key).strip().lower()
+    if not token:
+        return False
+    numeric_markers = {
+        "status",
+        "state",
+        "trade_status",
+        "position_status",
+        "status_name",
+        "status_code",
+        "status_id",
+        "status_value",
+    }
+    if token in numeric_markers:
+        return True
+    for marker in numeric_markers:
+        if marker in token:
+            return True
+    return False
+
+
 def _status_value_is_truthy(value) -> bool:
     """Return ``True`` when ``value`` affirms a closed status."""
 
@@ -665,22 +716,22 @@ def _is_trade_closed(trade: dict) -> bool:
         for key, value in status_field.items():
             if _status_token_is_closed(key) and _status_value_is_truthy(value):
                 return True
-            if _status_value_is_truthy(value) and _status_token_is_closed(value):
+            if _status_value_indicates_closed(value, context_key=str(key)):
                 return True
         # Nested state hints
         for nested_key in ("state", "status", "trade_status"):
             if nested_key in status_field:
                 nested_value = status_field[nested_key]
-                if _status_value_is_truthy(nested_value) and _status_token_is_closed(
-                    nested_value
+                if _status_value_indicates_closed(
+                    nested_value, context_key=str(nested_key)
                 ):
                     return True
-    elif _status_value_is_truthy(status_field) and _status_token_is_closed(status_field):
+    elif _status_value_indicates_closed(status_field):
         return True
     # Additional explicit status fields commonly emitted by the agent
     for alt_key in ("state", "position_status", "trade_status", "status_name"):
         alt_value = trade.get(alt_key)
-        if _status_value_is_truthy(alt_value) and _status_token_is_closed(alt_value):
+        if _status_value_indicates_closed(alt_value, context_key=str(alt_key)):
             return True
     return False
 
