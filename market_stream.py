@@ -365,6 +365,32 @@ class BinanceMarketStream:
                 return level
         return self._SUPPORTED_SOCKET_DEPTHS[-1]
 
+    def _process_depth_message(
+        self, state: OrderBookState, msg: dict, mapped_symbol: str
+    ) -> None:
+        """Apply a depth message to ``state`` handling diff and partial formats."""
+
+        if not isinstance(msg, dict):
+            return
+
+        if msg.get("e") == "depthUpdate":
+            state.apply_diff(msg)
+            if state.last_update_id == 0:
+                # Force resubscribe on gap
+                logger.debug(
+                    "Depth stream gap detected for %s; requesting resubscribe.", mapped_symbol
+                )
+                state.mark_stale()
+                self._reset_symbol(mapped_symbol)
+            return
+
+        if {"lastUpdateId", "bids", "asks"}.issubset(msg.keys()):
+            state.apply_snapshot(
+                msg.get("bids", []),
+                msg.get("asks", []),
+                msg.get("lastUpdateId", 0),
+            )
+
     def _ensure_symbol(self, symbol: str) -> None:
         mapped_symbol = map_symbol_for_binance(symbol)
         if self._disabled:
@@ -393,14 +419,7 @@ class BinanceMarketStream:
             self._trades[mapped_symbol] = trades
 
             def _handle_depth(msg: dict) -> None:
-                if not isinstance(msg, dict) or msg.get("e") != "depthUpdate":
-                    return
-                state.apply_diff(msg)
-                if state.last_update_id == 0:
-                    # Force resubscribe on gap
-                    logger.debug("Depth stream gap detected for %s; requesting resubscribe.", mapped_symbol)
-                    state.mark_stale()
-                    self._reset_symbol(mapped_symbol)
+                self._process_depth_message(state, msg, mapped_symbol)
 
             def _handle_trade(msg: dict) -> None:
                 if not isinstance(msg, dict):
