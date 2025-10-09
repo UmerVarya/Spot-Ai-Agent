@@ -1179,7 +1179,7 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
 
     # Indicate TP4 profit-riding mode when enabled
     if profit_riding:
-        status_flags.append("🚀 TP4 mode (Trailing)")
+        status_flags.append("🟦 Trailing (🚀 TP4 mode)")
 
     status_str = " | ".join(status_flags) if status_flags else "Running"
     approval_label = ""
