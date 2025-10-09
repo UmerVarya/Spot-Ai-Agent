@@ -18,10 +18,15 @@ If an error occurs or the API response is malformed, details are logged and
 the function returns 50.0 as a neutral default.
 """
 
+import time
+
 import requests
 from log_utils import setup_logger
 
 logger = setup_logger(__name__)
+
+
+_last_btc_dom = {"value": None, "timestamp": 0.0}
 
 
 def get_btc_dominance() -> float:
@@ -37,6 +42,15 @@ def get_btc_dominance() -> float:
     float
         Bitcoin dominance as a percentage of the global crypto market cap.
     """
+    global _last_btc_dom
+
+    now = time.time()
+    if (
+        _last_btc_dom["value"] is not None
+        and now - _last_btc_dom["timestamp"] < 300
+    ):
+        return _last_btc_dom["value"]
+
     url = "https://api.coingecko.com/api/v3/global"
     try:
         response = requests.get(url, timeout=10)
@@ -55,11 +69,15 @@ def get_btc_dominance() -> float:
             except (TypeError, ValueError):
                 dominance = None
         if dominance is not None:
-            return round(dominance, 2)
+            dominance = round(dominance, 2)
+            _last_btc_dom = {"value": dominance, "timestamp": now}
+            return dominance
         else:
             logger.warning("BTC dominance data missing in API response; using default 50.0")
             return 50.0
     except Exception as e:
         logger.warning("Failed to fetch BTC dominance: %s", e, exc_info=True)
         # Use neutral fallback
+        if _last_btc_dom["value"] is not None:
+            return _last_btc_dom["value"]
         return 50.0
