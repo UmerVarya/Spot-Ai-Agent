@@ -1170,7 +1170,7 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
             size_field = _to_float(row.get("size"))
             qty: Optional[float] = _to_float(row.get("position_size"))
             if qty is None or qty <= 0:
-                for key in ("quantity", "initial_size", "final_exit_size"):
+                for key in ("quantity", "final_exit_size", "initial_size"):
                     candidate = _to_float(row.get(key))
                     if candidate is not None and candidate > 0:
                         qty = candidate
