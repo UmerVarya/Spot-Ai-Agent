@@ -1349,7 +1349,25 @@ def predict_success_probability(
         overrides.update({k: float(v) for k, v in feature_overrides.items()})
     micro_norm = _normalise_feature_dict(micro_features)
     overrides.update(_augment_nonlinear_features(micro_norm))
-    feature_names = metadata.get('feature_names') or list(_FEATURE_FALLBACKS.keys())
+    metadata_feature_names = metadata.get('feature_names')
+
+    def _length_from_metadata(values: Optional[Any]) -> int:
+        try:
+            return int(np.asarray(values, dtype=float).reshape(-1).size)
+        except Exception:
+            return 0
+
+    persisted_feature_len = (
+        len(metadata_feature_names)
+        if isinstance(metadata_feature_names, (list, tuple))
+        else 0
+    )
+    if persisted_feature_len == 0:
+        persisted_feature_len = _length_from_metadata(metadata.get('scaler_mean'))
+    if persisted_feature_len == 0:
+        persisted_feature_len = _length_from_metadata(metadata.get('scaler_scale'))
+
+    feature_names = metadata_feature_names or list(_FEATURE_FALLBACKS.keys())
     missing_features = [name for name in _FEATURE_FALLBACKS.keys() if name not in feature_names]
     if missing_features:
         feature_names = feature_names + missing_features
@@ -1401,8 +1419,11 @@ def predict_success_probability(
             selection_info = metadata.get('selection_info') if view == 'rfe' else None
             pca_params = metadata.get('pca') if view == 'pca' else None
             x_view = _transform_feature_vector(x_norm, view, selection_info, pca_params)
+            x_array = np.asarray(x_view, dtype=float).reshape(-1)
+            if view == 'standard' and persisted_feature_len and x_array.size > persisted_feature_len:
+                x_array = x_array[:persisted_feature_len]
             clf = joblib.load(MODEL_PKL)
-            x_input = np.asarray(x_view, dtype=float).reshape(1, -1)
+            x_input = x_array.reshape(1, -1)
             if hasattr(clf, 'predict_proba'):
                 proba = clf.predict_proba(x_input)
                 prob = float(proba[0][1])
