@@ -23,6 +23,7 @@ import json
 import aiohttp
 import asyncio
 import time
+from collections import defaultdict
 from typing import Dict, Mapping, List, Tuple
 import config
 from log_utils import setup_logger
@@ -39,6 +40,85 @@ if GROQ_API_KEY:
     HEADERS["Authorization"] = f"Bearer {GROQ_API_KEY}"
 
 logger = setup_logger(__name__)
+
+
+def _normalise_header_name(name: str) -> str:
+    """Return a lowercase representation that is safe for comparisons."""
+
+    return str(name or "").lower()
+
+
+def _group_rate_limit_headers(headers: Mapping[str, str]) -> Dict[str, Dict[str, str]]:
+    """Organise Groq ``X-RateLimit-*`` headers by metric bucket.
+
+    Groq returns a set of headers such as ``X-RateLimit-Limit-Requests-1m`` and
+    ``X-RateLimit-Remaining-Requests-1m``.  Grouping them makes it easier to
+    report how close we are to exhausting each window without hard-coding the
+    available buckets.
+    """
+
+    grouped: Dict[str, Dict[str, str]] = defaultdict(dict)
+    prefix = "x-ratelimit-"
+    for raw_key, value in headers.items():
+        key = _normalise_header_name(raw_key)
+        if not key.startswith(prefix):
+            continue
+        remainder = key[len(prefix) :]
+        metric, _, bucket = remainder.partition("-")
+        if not metric or not bucket:
+            continue
+        grouped[bucket][metric] = str(value)
+    return dict(grouped)
+
+
+def _parse_numeric(value: str | None) -> float | None:
+    """Best-effort conversion of header values to ``float``."""
+
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _log_rate_limit_health(headers: Mapping[str, str] | None, status_code: int | None) -> None:
+    """Log actionable information about Groq rate limit usage.
+
+    The Groq dashboard surfaces multiple rate limit groups.  When the remaining
+    quota for any bucket is almost exhausted we emit a warning so operators can
+    throttle requests or request more capacity before a hard failure occurs.
+    """
+
+    if not headers:
+        return
+
+    grouped = _group_rate_limit_headers(headers)
+    if not grouped:
+        return
+
+    for bucket, metrics in grouped.items():
+        limit = _parse_numeric(metrics.get("limit"))
+        remaining = _parse_numeric(metrics.get("remaining"))
+        used = metrics.get("used")
+        reset = metrics.get("reset") or metrics.get("reset-requests")
+
+        if remaining is None or limit is None:
+            continue
+
+        message = (
+            "Groq rate limit for %s — remaining=%s of %s, used=%s, resets=%s"
+            % (bucket, metrics.get("remaining"), metrics.get("limit"), used or "?", reset or "?")
+        )
+
+        # Emit warnings when the window is almost consumed or a 429 is returned.
+        if status_code == 429 or remaining <= 1 or remaining <= max(1.0, limit * 0.1):
+            logger.warning(
+                "%s. Consider reducing request concurrency or requesting higher quota.",
+                message,
+            )
+        else:
+            logger.debug(message)
 
 
 def _sanitize_prompt(prompt: str, max_len: int = 3000) -> str:
@@ -87,6 +167,7 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
         }
         start = time.perf_counter()
         response = requests.post(GROQ_API_URL, headers=HEADERS, json=data)
+        _log_rate_limit_health(getattr(response, "headers", None), getattr(response, "status_code", None))
         latency = time.perf_counter() - start
         model_used = data["model"]
 
@@ -107,6 +188,7 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
                 data = {**data, "model": fallback_model}
                 start = time.perf_counter()
                 response = requests.post(GROQ_API_URL, headers=HEADERS, json=data)
+                _log_rate_limit_health(getattr(response, "headers", None), getattr(response, "status_code", None))
                 latency = time.perf_counter() - start
                 model_used = fallback_model
                 if response.status_code != 200:
@@ -166,6 +248,7 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
         async with aiohttp.ClientSession() as session:
             async with session.post(GROQ_API_URL, headers=HEADERS, json=data) as resp:
                 latency = time.perf_counter() - start
+                _log_rate_limit_health(resp.headers, resp.status)
                 if resp.status != 200:
                     error_text = await resp.text()
                     try:
@@ -190,6 +273,7 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
                             GROQ_API_URL, headers=HEADERS, json=retry_payload
                         ) as retry_resp:
                             latency = time.perf_counter() - start
+                            _log_rate_limit_health(retry_resp.headers, retry_resp.status)
                             if retry_resp.status == 200:
                                 result = await retry_resp.json()
                                 logger.info("Async LLM call succeeded in %.2fs", latency)
