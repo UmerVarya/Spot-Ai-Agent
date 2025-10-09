@@ -637,6 +637,26 @@ def _status_value_is_truthy(value) -> bool:
     return bool(value)
 
 
+def _status_value_indicates_closed(value) -> bool:
+    """Return ``True`` when ``value`` conveys closed semantics."""
+
+    if _status_value_is_truthy(value):
+        return True
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return float(value) == 0.0
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return False
+        try:
+            return float(token) == 0.0
+        except ValueError:
+            return False
+    return False
+
+
 def _is_trade_closed(trade: dict) -> bool:
     """Return ``True`` if ``trade`` should be considered closed."""
 
@@ -663,24 +683,24 @@ def _is_trade_closed(trade: dict) -> bool:
     status_field = trade.get("status")
     if isinstance(status_field, dict):
         for key, value in status_field.items():
-            if _status_token_is_closed(key) and _status_value_is_truthy(value):
+            if _status_token_is_closed(key) and _status_value_indicates_closed(value):
                 return True
-            if _status_value_is_truthy(value) and _status_token_is_closed(value):
+            if _status_value_indicates_closed(value) and _status_token_is_closed(value):
                 return True
         # Nested state hints
         for nested_key in ("state", "status", "trade_status"):
             if nested_key in status_field:
                 nested_value = status_field[nested_key]
-                if _status_value_is_truthy(nested_value) and _status_token_is_closed(
+                if _status_value_indicates_closed(nested_value) and _status_token_is_closed(
                     nested_value
                 ):
                     return True
-    elif _status_value_is_truthy(status_field) and _status_token_is_closed(status_field):
+    elif _status_value_indicates_closed(status_field) and _status_token_is_closed(status_field):
         return True
     # Additional explicit status fields commonly emitted by the agent
     for alt_key in ("state", "position_status", "trade_status", "status_name"):
         alt_value = trade.get(alt_key)
-        if _status_value_is_truthy(alt_value) and _status_token_is_closed(alt_value):
+        if _status_value_indicates_closed(alt_value) and _status_token_is_closed(alt_value):
             return True
     return False
 
