@@ -228,17 +228,30 @@ def analyze_headlines(
         "fingpt": SentimentResult(score=float(s_fg), confidence=c_fg, rationale=rationale_fg),
     }
 
-    fused = sum(model_outputs[name].score * weights.get(name, 0.0) for name in weights)
+    active_weights = {
+        name: weights.get(name, 0.0)
+        for name, result in model_outputs.items()
+        if result.confidence > 0.0
+    }
+    if not active_weights:
+        active_weights = dict(weights)
+    fused_weights = _normalise_weights(active_weights)
+
+    fused = sum(
+        model_outputs[name].score * fused_weights.get(name, 0.0)
+        for name in fused_weights
+    )
     bias = "bullish" if fused > 0.15 else "bearish" if fused < -0.15 else "neutral"
     fused_conf = sum(
-        model_outputs[name].confidence * weights.get(name, 0.0) for name in weights
+        model_outputs[name].confidence * fused_weights.get(name, 0.0)
+        for name in fused_weights
     )
     return {
         "finbert": {"score": s_fb, "confidence": c_fb, "details": fb_details},
         "finllama": {"score": s_fl, "confidence": c_fl, "rationale": rationale_fl},
         "fingpt": {"score": s_fg, "confidence": c_fg, "rationale": rationale_fg},
         "fused": {"score": fused, "bias": bias, "confidence": fused_conf},
-        "weights": dict(weights),
+        "weights": dict(fused_weights),
     }
 
 
