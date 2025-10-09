@@ -23,7 +23,10 @@ import json
 import os
 import csv
 import logging
+import threading
+import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Mapping, Optional, Sequence
 from log_utils import ensure_symlink
@@ -38,6 +41,8 @@ from trade_schema import (
 
 logger = logging.getLogger(__name__)
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_HISTORY_LOCK = threading.RLock()
+_LOCK_STATE = threading.local()
 
 # When ``SIZE_AS_NOTIONAL`` is true (default), the ``size`` field provided to
 # :func:`log_trade_result` is interpreted as the notional dollar amount of the
@@ -133,6 +138,77 @@ def _archive_legacy_history_file(path: str) -> Optional[str]:
         return None
     logger.info("Archived legacy trade log %s -> %s", path, backup_path)
     return backup_path
+
+
+@contextmanager
+def _history_file_lock(path: Optional[str] = None):
+    """Context manager acquiring an inter-process lock for ``path``."""
+
+    history_path = path or TRADE_HISTORY_FILE
+    if not history_path:
+        yield
+        return
+
+    depth = getattr(_LOCK_STATE, "depth", 0)
+    if depth > 0:
+        _LOCK_STATE.depth = depth + 1
+        try:
+            yield
+        finally:
+            _LOCK_STATE.depth = depth
+        return
+
+    lock_path = f"{history_path}.lock"
+    directory = os.path.dirname(lock_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    try:
+        with _HISTORY_LOCK:
+            _acquire_file_lock(fd)
+            _LOCK_STATE.depth = 1
+            try:
+                yield
+            finally:
+                _LOCK_STATE.depth = 0
+                _release_file_lock(fd)
+    finally:
+        os.close(fd)
+
+
+def _acquire_file_lock(fd: int) -> None:
+    """Acquire an exclusive advisory lock for ``fd`` across platforms."""
+
+    if os.name == "nt":  # pragma: no cover - windows-specific branch
+        import msvcrt
+
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                break
+            except OSError as exc:  # pragma: no cover - windows-specific handling
+                if getattr(exc, "winerror", None) == 33:  # Lock violation
+                    time.sleep(0.05)
+                    continue
+                raise
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _release_file_lock(fd: int) -> None:
+    """Release an advisory file lock for ``fd`` across platforms."""
+
+    if os.name == "nt":  # pragma: no cover - windows-specific branch
+        import msvcrt
+
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def _to_utc_iso(ts: Optional[str] = None) -> str:
@@ -1000,18 +1076,21 @@ def log_trade_result(
         else:
             final_row[column] = _serialise_extra_field(value)
 
-    df_row = pd.DataFrame([{col: final_row.get(col, MISSING_VALUE) for col in headers}], columns=headers)
-    df_row.to_csv(
-        TRADE_HISTORY_FILE,
-        mode="a",
-        header=header_needed,
-        index=False,
-        quoting=csv.QUOTE_MINIMAL,
+    df_row = pd.DataFrame(
+        [{col: final_row.get(col, MISSING_VALUE) for col in headers}], columns=headers
     )
-    try:
-        _consolidate_trade_history_file()
-    except Exception:  # pragma: no cover - consolidation best effort
-        logger.exception("Failed to consolidate trade history after append")
+    with _history_file_lock():
+        df_row.to_csv(
+            TRADE_HISTORY_FILE,
+            mode="a",
+            header=header_needed,
+            index=False,
+            quoting=csv.QUOTE_MINIMAL,
+        )
+        try:
+            _consolidate_trade_history_file()
+        except Exception:  # pragma: no cover - consolidation best effort
+            logger.exception("Failed to consolidate trade history after append")
 
     _maybe_send_llm_performance_email()
 
@@ -1172,59 +1251,62 @@ def _consolidate_trade_history_file(path: Optional[str] = None) -> None:
     if not history_path:
         return
 
-    df = load_trade_history_df(path=history_path)
-    # ``load_trade_history_df`` returns an empty frame with the expected columns
-    # when the file is missing or unreadable. In that case we still want to
-    # ensure the on-disk file contains a header so future appends remain
-    # aligned.
-    ordered_cols = list(TRADE_HISTORY_HEADERS)
-    if df.empty:
-        df = pd.DataFrame(columns=ordered_cols)
-    else:
-        for col in ordered_cols:
-            if col not in df.columns:
-                df[col] = MISSING_VALUE
-    extra_cols = [col for col in df.columns if col not in ordered_cols]
-    all_columns = ordered_cols + extra_cols
-
-    time_columns = [
-        col
-        for col in ("timestamp", "entry_time", "exit_time")
-        if col in df.columns
-    ]
-    for col in time_columns:
-        try:
-            df[col] = df[col].apply(
-                lambda ts: (
-                    ts.isoformat().replace("+00:00", "Z")
-                    if hasattr(ts, "isoformat")
-                    else str(ts)
-                )
-                if pd.notna(ts)
-                else MISSING_VALUE
-            )
-        except Exception:
-            # If the column is not datetime-like we leave it untouched.
-            pass
-
-    tmp_path = f"{history_path}.tmp"
-    try:
+    with _history_file_lock(history_path):
+        df = load_trade_history_df(path=history_path)
+        # ``load_trade_history_df`` returns an empty frame with the expected columns
+        # when the file is missing or unreadable. In that case we still want to
+        # ensure the on-disk file contains a header so future appends remain
+        # aligned.
+        ordered_cols = list(TRADE_HISTORY_HEADERS)
         if df.empty:
-            with open(tmp_path, "w", encoding="utf-8", newline="") as fh:
-                writer = csv.DictWriter(fh, fieldnames=all_columns or TRADE_HISTORY_HEADERS)
-                writer.writeheader()
+            df = pd.DataFrame(columns=ordered_cols)
         else:
-            df = df.reindex(columns=all_columns)
-            df.to_csv(tmp_path, index=False)
-        os.replace(tmp_path, history_path)
-    except FileNotFoundError:
-        # Nothing to consolidate yet; clean up any partial temp file.
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise
+            for col in ordered_cols:
+                if col not in df.columns:
+                    df[col] = MISSING_VALUE
+        extra_cols = [col for col in df.columns if col not in ordered_cols]
+        all_columns = ordered_cols + extra_cols
+
+        time_columns = [
+            col
+            for col in ("timestamp", "entry_time", "exit_time")
+            if col in df.columns
+        ]
+        for col in time_columns:
+            try:
+                df[col] = df[col].apply(
+                    lambda ts: (
+                        ts.isoformat().replace("+00:00", "Z")
+                        if hasattr(ts, "isoformat")
+                        else str(ts)
+                    )
+                    if pd.notna(ts)
+                    else MISSING_VALUE
+                )
+            except Exception:
+                # If the column is not datetime-like we leave it untouched.
+                pass
+
+        tmp_path = f"{history_path}.tmp"
+        try:
+            if df.empty:
+                with open(tmp_path, "w", encoding="utf-8", newline="") as fh:
+                    writer = csv.DictWriter(
+                        fh, fieldnames=all_columns or TRADE_HISTORY_HEADERS
+                    )
+                    writer.writeheader()
+            else:
+                df = df.reindex(columns=all_columns)
+                df.to_csv(tmp_path, index=False)
+            os.replace(tmp_path, history_path)
+        except FileNotFoundError:
+            # Nothing to consolidate yet; clean up any partial temp file.
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
 
 
 def _read_history_frame(path: str) -> pd.DataFrame:
