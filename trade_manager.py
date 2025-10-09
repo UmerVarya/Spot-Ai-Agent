@@ -746,8 +746,9 @@ def manage_trades() -> None:
                 observed_price = float(recent_low)
             except Exception:
                 observed_price = None
+        profit_riding_mode = "🚀 TP4" if trade.get('profit_riding', False) else "—"
         logger.debug(
-            "Managing %s | Price=%s High=%s Low=%s SL=%s TP1=%s TP2=%s TP3=%s Status=%s ProfitRiding=%s",
+            "Managing %s | Price=%s High=%s Low=%s SL=%s TP1=%s TP2=%s TP3=%s Status=%s Mode=%s",
             symbol,
             current_price,
             recent_high,
@@ -757,7 +758,7 @@ def manage_trades() -> None:
             tp2,
             tp3,
             status_flags,
-            trade.get('profit_riding', False),
+            profit_riding_mode,
         )
         execution_plan = None
         sell_pressure_signal = None
@@ -1156,11 +1157,18 @@ def manage_trades() -> None:
                         ):
                             _update_stop_loss(trade, desired_sl)
                             _persist_active_snapshot(updated_trades, active_trades, index)
-                            logger.info(
-                                "%s hit TP2 — sold 30%% and raised SL to %.6f",
-                                symbol,
-                                desired_sl,
-                            )
+                            if trade.get('profit_riding'):
+                                logger.info(
+                                    "%s 🚀 TP4 prep — SL raised to %.6f",
+                                    symbol,
+                                    desired_sl,
+                                )
+                            else:
+                                logger.info(
+                                    "%s hit TP2 — sold 30%% and raised SL to %.6f",
+                                    symbol,
+                                    desired_sl,
+                                )
                         else:
                             logger.info("%s hit TP2 — sold 30%%", symbol)
                         send_email(
@@ -1285,7 +1293,7 @@ def manage_trades() -> None:
                         new_sl = max(current_sl or 0, next_tp)
                         _update_stop_loss(trade, new_sl)
                         _persist_active_snapshot(updated_trades, active_trades, index)
-                        logger.info("%s TP Trail: SL moved to %s", symbol, new_sl)
+                        logger.info("%s 🚀 TP4 trail: SL moved to %s", symbol, new_sl)
                         remaining_qty = qty - sell_qty
                         trade['position_size'] = remaining_qty
                         if entry is not None:
@@ -1302,7 +1310,7 @@ def manage_trades() -> None:
                 macd_cross = macd_line_prev > macd_signal_prev and macd_line_last < macd_signal_last
                 price_below_kc = current_price < kc_lower_val
                 if current_price is not None and adx_drop and (macd_cross or price_below_kc):
-                    logger.warning("%s momentum reversal — exiting TP4", symbol)
+                    logger.warning("%s 🚨 TP4 trailing exit triggered", symbol)
                     qty = _to_float(trade.get('position_size', 1)) or 0.0
                     exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                     execute_exit_trade(
@@ -1329,7 +1337,7 @@ def manage_trades() -> None:
                 if trail_sl > trade['sl']:
                     _update_stop_loss(trade, trail_sl)
                     _persist_active_snapshot(updated_trades, active_trades, index)
-                    logger.info("%s TP4 ride: SL trailed to %s", symbol, trail_sl)
+                    logger.info("%s 🚀 TP4 ride: SL trailed to %s", symbol, trail_sl)
                     actions.append("tp4_trail_sl")
         # Add the trade back to the updated list if still active
         logger.debug("%s actions: %s", symbol, actions if actions else "none")
