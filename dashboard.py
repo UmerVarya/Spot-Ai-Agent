@@ -567,6 +567,9 @@ def _normalise_live_positions_payload(payload) -> list[dict]:
     return []
 
 
+_OPEN_STATUS_HINTS = {"is_open", "open", "active", "is_active", "running", "live", "entered"}
+
+
 def _status_token_is_closed(value) -> bool:
     """Return ``True`` when ``value`` represents a closed trade state."""
 
@@ -636,6 +639,13 @@ def _is_trade_closed(trade: dict) -> bool:
     status_field = trade.get("status")
     if isinstance(status_field, dict):
         for key, value in status_field.items():
+            if isinstance(value, bool):
+                if _status_token_is_closed(key) and value:
+                    return True
+                key_token = str(key).strip().lower() if key is not None else ""
+                if not value and key_token in _OPEN_STATUS_HINTS:
+                    return True
+                continue
             if _status_token_is_closed(key) and to_bool(value):
                 return True
             if isinstance(value, (int, float)) and not isinstance(value, bool):
