@@ -19,10 +19,11 @@ These changes are backward compatible with existing logs because
 from ``entry`` and ``size`` when absent.
 """
 
-import json
-import os
+import contextlib
 import csv
+import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, Sequence
@@ -35,6 +36,16 @@ from trade_schema import (
     build_rename_map,
     normalise_history_columns,
 )
+
+try:  # pragma: no cover - platform specific import
+    import fcntl
+except ImportError:  # pragma: no cover - windows fallback
+    fcntl = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - platform specific import
+    import msvcrt
+except ImportError:  # pragma: no cover - linux / macOS
+    msvcrt = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -249,6 +260,36 @@ _EXPECTED_HISTORY_KEYS = ("timestamp", "entry_time", "exit_time", "symbol")
 ensure_symlink(ACTIVE_TRADES_FILE, os.path.join(_REPO_ROOT, "active_trades.json"))
 ensure_symlink(TRADE_HISTORY_FILE, os.path.join(_REPO_ROOT, "historical_trades.csv"))
 ensure_symlink(TRADE_HISTORY_FILE, os.path.join(_REPO_ROOT, "completed_trades.csv"))
+
+
+@contextlib.contextmanager
+def _trade_history_lock(path: Optional[str] = None):
+    """Serialise access to the trade history CSV across processes."""
+
+    history_path = path or TRADE_HISTORY_FILE
+    if not history_path:
+        yield
+        return
+
+    lock_dir = os.path.dirname(history_path)
+    if lock_dir:
+        os.makedirs(lock_dir, exist_ok=True)
+    lock_path = f"{history_path}.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if fcntl is not None:  # pragma: no branch - platform specific
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        elif msvcrt is not None:  # pragma: no cover - Windows fallback
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        yield
+    finally:
+        try:
+            if fcntl is not None:  # pragma: no branch - platform specific
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover - Windows fallback
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        finally:
+            os.close(fd)
 
 
 def load_active_trades() -> list:
@@ -741,88 +782,91 @@ def log_trade_result(
     # as the header, effectively hiding it from the dashboard.  We treat
     # an empty file the same as a missing file so the header is written
     # on the next append.
-    file_exists = os.path.exists(TRADE_HISTORY_FILE) and os.path.getsize(
-        TRADE_HISTORY_FILE
-    ) > 0
+    with _trade_history_lock():
+        file_exists = os.path.exists(TRADE_HISTORY_FILE) and os.path.getsize(
+            TRADE_HISTORY_FILE
+        ) > 0
 
-    header_needed = True
-    if file_exists:
+        header_needed = True
+        if file_exists:
+            try:
+                with open(TRADE_HISTORY_FILE, "r", encoding="utf-8") as f:
+                    first_line = f.readline()
+            except OSError as exc:  # pragma: no cover - filesystem specific
+                logger.warning(
+                    "Unable to inspect trade history header %s: %s", TRADE_HISTORY_FILE, exc
+                )
+                first_line = ""
+            if _header_is_compatible(first_line, headers):
+                header_needed = False
+                existing_headers = _parse_header_columns(first_line)
+                if existing_headers:
+                    headers = existing_headers
+                    try:
+                        header_rename_map = build_rename_map(existing_headers)
+                    except Exception:
+                        header_rename_map = {col: col for col in existing_headers}
+            else:
+                backup_path = _archive_legacy_history_file(TRADE_HISTORY_FILE)
+                if backup_path is None:
+                    try:
+                        with open(TRADE_HISTORY_FILE, "w", encoding="utf-8") as f:
+                            f.truncate(0)
+                    except OSError as exc:  # pragma: no cover - filesystem specific
+                        logger.exception(
+                            "Failed to reset legacy trade log %s: %s", TRADE_HISTORY_FILE, exc
+                        )
+                        raise
+                file_exists = False
+                header_needed = True
+
+        if header_needed:
+            header_rename_map = {col: col for col in headers}
+            for key in trade.keys():
+                if key not in header_rename_map:
+                    headers.append(key)
+                    header_rename_map[key] = key
+
+        if not header_rename_map:
+            header_rename_map = {col: col for col in headers}
+
+        os.makedirs(os.path.dirname(TRADE_HISTORY_FILE), exist_ok=True)
+        final_row: dict[str, object] = {}
+        for column in headers:
+            canonical = header_rename_map.get(column, column)
+            value = None
+            if canonical in row:
+                value = row[canonical]
+            elif column in row:
+                value = row[column]
+            elif canonical in trade:
+                value = trade.get(canonical)
+            elif column in trade:
+                value = trade.get(column)
+
+            if value is None:
+                final_row[column] = MISSING_VALUE
+            elif isinstance(value, (int, float, bool)):
+                final_row[column] = value
+            elif column in row or canonical in row:
+                final_row[column] = value
+            else:
+                final_row[column] = _serialise_extra_field(value)
+
+        df_row = pd.DataFrame(
+            [{col: final_row.get(col, MISSING_VALUE) for col in headers}], columns=headers
+        )
+        df_row.to_csv(
+            TRADE_HISTORY_FILE,
+            mode="a",
+            header=header_needed,
+            index=False,
+            quoting=csv.QUOTE_MINIMAL,
+        )
         try:
-            with open(TRADE_HISTORY_FILE, "r", encoding="utf-8") as f:
-                first_line = f.readline()
-        except OSError as exc:  # pragma: no cover - filesystem specific
-            logger.warning(
-                "Unable to inspect trade history header %s: %s", TRADE_HISTORY_FILE, exc
-            )
-            first_line = ""
-        if _header_is_compatible(first_line, headers):
-            header_needed = False
-            existing_headers = _parse_header_columns(first_line)
-            if existing_headers:
-                headers = existing_headers
-                try:
-                    header_rename_map = build_rename_map(existing_headers)
-                except Exception:
-                    header_rename_map = {col: col for col in existing_headers}
-        else:
-            backup_path = _archive_legacy_history_file(TRADE_HISTORY_FILE)
-            if backup_path is None:
-                try:
-                    with open(TRADE_HISTORY_FILE, "w", encoding="utf-8") as f:
-                        f.truncate(0)
-                except OSError as exc:  # pragma: no cover - filesystem specific
-                    logger.exception(
-                        "Failed to reset legacy trade log %s: %s", TRADE_HISTORY_FILE, exc
-                    )
-                    raise
-            file_exists = False
-            header_needed = True
-
-    if header_needed:
-        header_rename_map = {col: col for col in headers}
-        for key in trade.keys():
-            if key not in header_rename_map:
-                headers.append(key)
-                header_rename_map[key] = key
-
-    if not header_rename_map:
-        header_rename_map = {col: col for col in headers}
-
-    os.makedirs(os.path.dirname(TRADE_HISTORY_FILE), exist_ok=True)
-    final_row: dict[str, object] = {}
-    for column in headers:
-        canonical = header_rename_map.get(column, column)
-        value = None
-        if canonical in row:
-            value = row[canonical]
-        elif column in row:
-            value = row[column]
-        elif canonical in trade:
-            value = trade.get(canonical)
-        elif column in trade:
-            value = trade.get(column)
-
-        if value is None:
-            final_row[column] = MISSING_VALUE
-        elif isinstance(value, (int, float, bool)):
-            final_row[column] = value
-        elif column in row or canonical in row:
-            final_row[column] = value
-        else:
-            final_row[column] = _serialise_extra_field(value)
-
-    df_row = pd.DataFrame([{col: final_row.get(col, MISSING_VALUE) for col in headers}], columns=headers)
-    df_row.to_csv(
-        TRADE_HISTORY_FILE,
-        mode="a",
-        header=header_needed,
-        index=False,
-        quoting=csv.QUOTE_MINIMAL,
-    )
-    try:
-        _consolidate_trade_history_file()
-    except Exception:  # pragma: no cover - consolidation best effort
-        logger.exception("Failed to consolidate trade history after append")
+            _consolidate_trade_history_file(lock=False)
+        except Exception:  # pragma: no cover - consolidation best effort
+            logger.exception("Failed to consolidate trade history after append")
 
     _maybe_send_llm_performance_email()
 
@@ -967,7 +1011,9 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
     return collapsed.drop(columns=["_gross_pnl", "_size", "_notional"], errors="ignore")
 
 
-def _consolidate_trade_history_file(path: Optional[str] = None) -> None:
+def _consolidate_trade_history_file(
+    path: Optional[str] = None, *, lock: bool = True
+) -> None:
     """Rewrite the trade history file with de-duplicated rows.
 
     The live system occasionally records multiple rows for the same ``trade_id``
@@ -981,6 +1027,11 @@ def _consolidate_trade_history_file(path: Optional[str] = None) -> None:
 
     history_path = path or TRADE_HISTORY_FILE
     if not history_path:
+        return
+
+    if lock:
+        with _trade_history_lock(history_path):
+            _consolidate_trade_history_file(history_path, lock=False)
         return
 
     df = load_trade_history_df(path=history_path)
