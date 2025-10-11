@@ -21,6 +21,9 @@ Set the following environment variables as needed:
   Defaults to `/home/ubuntu/spot_data/trades/historical_trades.csv`.
 - `RUN_DASHBOARD` – set to `1` to launch the Streamlit dashboard from the agent,
   or `0` to rely on the separate `spot-ai-dashboard` service
+- `OLLAMA_URL` – base URL for the Ollama server used by the local LLM fallback.
+  Defaults to `http://localhost:11434`, but can point to a remote deployment
+  such as the Render service endpoint.
 
 ## Sentiment Fusion
 
