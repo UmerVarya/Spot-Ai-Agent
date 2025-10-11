@@ -2,7 +2,6 @@ CRYPTO_PANIC_RSS = "https://cryptopanic.com/news/rss"
 COINDESK_RSS = "https://www.coindesk.com/arc/outboundfeeds/rss/"
 FOREX_FACTORY_RSS = "https://www.forexfactory.com/calendar.php?week=this&day=this&month=this&rss=1"
 
-import requests
 import feedparser
 from datetime import datetime
 from log_utils import setup_logger

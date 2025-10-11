@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import json
 import asyncio
@@ -6,9 +8,17 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Callable, Coroutine
 
-import aiohttp
+try:  # pragma: no cover - optional dependency for HTTP client
+    import aiohttp
+except ModuleNotFoundError:  # pragma: no cover
+    aiohttp = None  # type: ignore[assignment]
+
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
+try:  # pragma: no cover - optional dependency
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover
+    def load_dotenv(*_args, **_kwargs):  # type: ignore
+        return False
 import config
 from groq_safe import describe_error
 from news_guardrails import (
@@ -76,6 +86,9 @@ async def fetch_macro_news(session: aiohttp.ClientSession) -> List[Dict[str, str
 
 @asynccontextmanager
 async def _client_session(session: Optional[aiohttp.ClientSession]):
+    if aiohttp is None:
+        raise RuntimeError("aiohttp dependency not available")
+
     own_session = session is None
     if own_session:
         session = aiohttp.ClientSession()
@@ -92,6 +105,10 @@ async def run_news_fetcher_async(
 ) -> List[Dict[str, str]]:
     """Asynchronously fetch and cache crypto + macro news events."""
 
+    if aiohttp is None:
+        logger.warning("aiohttp unavailable; returning empty news list")
+        return []
+
     async with _client_session(session) as client:
         crypto, macro = await asyncio.gather(
             fetch_crypto_news(client), fetch_macro_news(client)
@@ -104,6 +121,9 @@ async def run_news_fetcher_async(
 
 def run_news_fetcher(path: str = "news_events.json") -> List[Dict[str, str]]:
     """Synchronous wrapper for fetching news events."""
+    if aiohttp is None:
+        logger.warning("aiohttp unavailable; returning empty news list")
+        return []
     return _run_coroutine(lambda: run_news_fetcher_async(path))
 
 

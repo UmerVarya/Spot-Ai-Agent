@@ -74,7 +74,6 @@ from groq_llm import async_batch_llm_judgment
 from ml_model import predict_success_probability
 from sequence_model import predict_next_return, train_sequence_model, SEQ_PKL
 from drawdown_guard import is_trading_blocked
-import numpy as np
 from rl_policy import RLPositionSizer
 from trade_utils import get_rl_state
 from microstructure import plan_execution
@@ -113,6 +112,15 @@ NEWS_INTERVAL = 3600
 RUN_DASHBOARD = os.getenv("RUN_DASHBOARD", "0") == "1"
 USE_RL_POSITION_SIZER = False
 rl_sizer = RLPositionSizer() if USE_RL_POSITION_SIZER else None
+
+
+def _is_nan(value) -> bool:
+    """Return ``True`` when ``value`` represents a NaN float."""
+
+    try:
+        return math.isnan(float(value))
+    except (TypeError, ValueError):
+        return False
 
 # Time-to-live for alternative data fetches
 ALT_DATA_REFRESH_INTERVAL = float(os.getenv("ALT_DATA_REFRESH_INTERVAL", "300"))
@@ -224,7 +232,7 @@ def dynamic_max_active_trades(fear_greed: int, bias: str, volatility: float | No
     elif fear_greed > 70 and bias == "bullish":
         max_trades = MAX_ACTIVE_TRADES + 1
 
-    if volatility is not None and not np.isnan(volatility):
+    if volatility is not None and not _is_nan(volatility):
         if volatility > 0.75:
             max_trades = max(1, max_trades - 1)
         elif volatility < 0.25:
@@ -1023,7 +1031,7 @@ def run_agent_loop() -> None:
                     except Exception:
                         atr_val = None
                     trade_usd = calculate_dynamic_trade_size(final_conf, ml_prob, score)
-                    if atr_val is not None and not np.isnan(atr_val) and atr_val > 0:
+                    if atr_val is not None and not _is_nan(atr_val) and atr_val > 0:
                         sl_dist = atr_val * 2.0
                     else:
                         atr_val = entry_price * 0.02

@@ -17,7 +17,10 @@ the raw response is returned for backward compatibility.
 """
 
 import os
-import requests
+try:  # pragma: no cover - optional dependency
+    import requests
+except ModuleNotFoundError:  # pragma: no cover
+    requests = None  # type: ignore[assignment]
 import re
 import json
 import aiohttp
@@ -147,6 +150,17 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
     The model is instructed to respond with a JSON object containing the
     decision (Yes/No), confidence (0–10), reason and a 2–3 sentence thesis.
     """
+    if requests is None:
+        logger.warning("requests library unavailable; returning fallback judgement")
+        return json.dumps(
+            {
+                "decision": "No",
+                "confidence": 0.0,
+                "reason": "HTTP client unavailable",
+                "thesis": "Unable to query Groq without requests installed.",
+            }
+        )
+
     try:
         safe_prompt = _sanitize_prompt(prompt)
         user_prompt = (

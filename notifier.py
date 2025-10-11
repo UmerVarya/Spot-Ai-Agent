@@ -9,7 +9,11 @@ from email.mime.multipart import MIMEMultipart
 from html import escape
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from dotenv import load_dotenv
+try:  # pragma: no cover - optional dependency in lean test envs
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover
+    def load_dotenv(*_args, **_kwargs):  # type: ignore
+        return False
 
 from log_utils import setup_logger, ensure_symlink
 

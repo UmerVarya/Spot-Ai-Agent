@@ -1,7 +1,23 @@
 """Central configuration loader for environment variables."""
 from __future__ import annotations
 
-from dotenv import load_dotenv
+try:  # pragma: no cover - optional dependency during tests
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - graceful fallback when optional dependency missing
+    def load_dotenv(*_args, **_kwargs):  # type: ignore
+        """Fallback ``load_dotenv`` that simply returns ``False``.
+
+        The production environment installs :mod:`python-dotenv`, but our
+        lightweight CI environment used in the kata purposely omits optional
+        third-party packages.  Importing :mod:`config` would previously raise a
+        :class:`ModuleNotFoundError`, preventing any module that transitively
+        depended on configuration helpers from loading.  Providing a no-op
+        implementation keeps the import side effect free while still allowing
+        real deployments (where :func:`load_dotenv` is available) to populate the
+        process environment.
+        """
+
+        return False
 
 # Load environment variables once when this module is imported.
 load_dotenv()

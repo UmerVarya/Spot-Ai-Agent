@@ -20,7 +20,10 @@ the function returns 50.0 as a neutral default.
 
 import time
 
-import requests
+try:  # pragma: no cover - optional dependency for offline tests
+    import requests
+except ModuleNotFoundError:  # pragma: no cover
+    requests = None  # type: ignore[assignment]
 from log_utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -50,6 +53,9 @@ def get_btc_dominance() -> float:
         and now - _last_btc_dom["timestamp"] < 300
     ):
         return _last_btc_dom["value"]
+
+    if requests is None:
+        return 50.0
 
     url = "https://api.coingecko.com/api/v3/global"
     try:

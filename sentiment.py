@@ -1,8 +1,16 @@
 import os
 import json
 import re
-import requests
-from dotenv import load_dotenv
+try:  # pragma: no cover - optional dependency
+    import requests
+except ModuleNotFoundError:  # pragma: no cover
+    requests = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover
+    def load_dotenv(*_args, **_kwargs):  # type: ignore
+        return False
 from log_utils import setup_logger
 import config
 from groq_safe import (
@@ -29,7 +37,7 @@ logger = setup_logger(__name__)
 
 def analyze_macro_news(news_text: str) -> dict:
     """Analyze combined macro news headlines using the Groq LLM API and return bias, confidence, summary."""
-    if not GROQ_API_KEY:
+    if not GROQ_API_KEY or requests is None:
         # No API key available, return default neutral sentiment
         return {"bias": "neutral", "confidence": 5.0, "summary": "LLM analysis not available"}
     # Prepare the prompt for the LLM

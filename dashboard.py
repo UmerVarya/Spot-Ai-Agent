@@ -20,7 +20,68 @@ Additional summary metrics such as profit factor and average trade PnL
 could be added in future iterations.
 """
 
-import streamlit as st
+# ``streamlit`` is only required when rendering the live dashboard.  Many of the
+# unit tests import :mod:`dashboard` purely for helpers such as :func:`to_bool`
+# or file path constants.  Importing Streamlit in environments where the
+# dependency is unavailable raised a :class:`ModuleNotFoundError`, preventing the
+# helpers from being tested.  We therefore provide a very small stub that
+# exposes the attributes used in the code base when the real package is absent.
+try:  # pragma: no cover - optional dependency
+    import streamlit as st
+except ModuleNotFoundError:  # pragma: no cover - exercised in stripped CI image
+    class _StreamlitStub:
+        """Minimal stub mimicking the subset of Streamlit used in tests.
+
+        The stub deliberately avoids rendering or stateful behaviour; it simply
+        returns benign defaults so that helper functions can be imported without
+        requiring the heavy Streamlit dependency.
+        """
+
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {}
+            self.sidebar = self
+
+        # ------------------------------------------------------------------
+        # Decorators and layout helpers
+        # ------------------------------------------------------------------
+        def cache_data(self, *args, **kwargs):  # type: ignore[override]
+            def decorator(func):
+                return func
+
+            return decorator
+
+        def columns(self, spec, **_kwargs):  # type: ignore[override]
+            count = spec if isinstance(spec, int) else len(list(spec))
+            return [self for _ in range(max(count, 0))]
+
+        def tabs(self, labels):  # type: ignore[override]
+            return [self for _ in labels]
+
+        # ------------------------------------------------------------------
+        # Common widget helpers
+        # ------------------------------------------------------------------
+        def slider(self, *args, **kwargs):  # type: ignore[override]
+            return kwargs.get("value")
+
+        def selectbox(self, *args, **kwargs):  # type: ignore[override]
+            options = kwargs.get("options")
+            if isinstance(options, (list, tuple)) and options:
+                return options[0]
+            return kwargs.get("index", 0)
+
+        def file_uploader(self, *args, **kwargs):  # type: ignore[override]
+            return None
+
+        # ------------------------------------------------------------------
+        # Fallback for any other attribute access - return a callable no-op.
+        # ------------------------------------------------------------------
+        def __getattr__(self, name):  # pragma: no cover - simple dynamic helper
+            def _noop(*_args, **_kwargs):
+                return None
+
+            return _noop
+
+    st = _StreamlitStub()  # type: ignore
 import pandas as pd
 import numpy as np
 import csv
@@ -32,7 +93,10 @@ from log_utils import setup_logger, LOG_FILE
 from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
 from backtest import compute_buy_and_hold_pnl, generate_trades_from_ohlcv
 from ml_model import train_model
-import requests
+try:  # pragma: no cover - optional dependency for offline tests
+    import requests
+except ModuleNotFoundError:  # pragma: no cover
+    requests = None  # type: ignore[assignment]
 
 BINANCE_FEE_RATE = 0.00075
 
@@ -815,7 +879,7 @@ def _trade_identity(trade: dict) -> str:
 def fetch_live_positions() -> tuple[list[dict], str, str | None]:
     """Return live position data, preferring the API over local storage."""
 
-    if LIVE_POSITIONS_ENDPOINT:
+    if LIVE_POSITIONS_ENDPOINT and requests is not None:
         try:
             response = requests.get(LIVE_POSITIONS_ENDPOINT, timeout=LIVE_POSITIONS_TIMEOUT)
             response.raise_for_status()

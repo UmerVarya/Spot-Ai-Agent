@@ -36,7 +36,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-import requests
+try:  # pragma: no cover - optional dependency, network disabled in tests
+    import requests
+except ModuleNotFoundError:  # pragma: no cover
+    requests = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,12 @@ except Exception:  # pragma: no cover - best-effort fallback
     analyze_headlines = None
     logger.warning(
         "fused_sentiment unavailable; social sentiment will default to neutral"
+    )
+
+_REQUESTS_AVAILABLE = requests is not None
+if not _REQUESTS_AVAILABLE:  # pragma: no cover - visible in dependency-light tests
+    logger.warning(
+        "requests library not installed; alternative data will fall back to neutral defaults"
     )
 
 GLASSNODE_API_KEY = os.getenv("GLASSNODE_API_KEY", "")
@@ -158,6 +167,8 @@ def _symbol_to_asset(symbol: str) -> str:
 def _glassnode_latest(endpoint: str, asset: str) -> Optional[float]:
     if not GLASSNODE_API_KEY:
         return None
+    if not _REQUESTS_AVAILABLE:
+        return None
     url = f"{_GLASSNODE_BASE}/{endpoint}"
     params = {"a": asset, "api_key": GLASSNODE_API_KEY}
     try:
@@ -235,6 +246,8 @@ def fetch_onchain_metrics(symbol: str) -> OnChainMetrics:
 def _fetch_twitter_posts(query: str, limit: int) -> List[str]:
     if not TWITTER_BEARER_TOKEN or limit <= 0:
         return []
+    if not _REQUESTS_AVAILABLE:
+        return []
     params = {
         "query": f"({query}) (crypto OR bitcoin OR btc) -is:retweet lang:en",
         "max_results": max(10, min(limit, 100)),
@@ -263,6 +276,8 @@ def _fetch_twitter_posts(query: str, limit: int) -> List[str]:
 
 def _fetch_reddit_posts(query: str, limit: int) -> List[str]:
     if not ENABLE_REDDIT_SCRAPE or limit <= 0:
+        return []
+    if not _REQUESTS_AVAILABLE:
         return []
     params = {"q": query, "limit": max(10, min(limit, 100)), "sort": "new", "t": "day"}
     headers = {"User-Agent": REDDIT_USER_AGENT}
