@@ -14,7 +14,14 @@ from typing import Any, Mapping
 
 import requests
 
-__all__ = ["LLMError", "generate", "chat", "warm_up"]
+__all__ = [
+    "LLMError",
+    "generate",
+    "chat",
+    "warm_up",
+    "set_base_url",
+    "get_base_url",
+]
 
 
 class LLMError(RuntimeError):
@@ -28,14 +35,51 @@ def _env(key: str, default: str) -> str:
     return value
 
 
-OLLAMA_URL = _env("OLLAMA_URL", "http://localhost:11434")
-DEFAULT_MODEL = _env("OLLAMA_MODEL", "llama3.2:3b")
+_DEFAULT_BASE_URL = _env("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+_CURRENT_BASE_URL = _DEFAULT_BASE_URL
+
+
+def get_base_url() -> str:
+    """Return the base URL used for Ollama requests."""
+
+    return _CURRENT_BASE_URL
+
+
+def set_base_url(url: str | None) -> None:
+    """Override the Ollama base URL for subsequent requests."""
+
+    global _CURRENT_BASE_URL, OLLAMA_URL
+    if url and url.strip():
+        _CURRENT_BASE_URL = url.rstrip("/")
+    else:
+        _CURRENT_BASE_URL = _DEFAULT_BASE_URL
+    OLLAMA_URL = _CURRENT_BASE_URL
+
+
+def _resolve_default_model() -> str:
+    explicit = os.getenv("OLLAMA_MODEL")
+    if explicit and explicit.strip():
+        return explicit.strip()
+    model_id = os.getenv("MODEL_ID")
+    if model_id and model_id.strip():
+        return model_id.strip()
+    return "llama3.2:3b"
+
+
+OLLAMA_URL = get_base_url()
+DEFAULT_MODEL = _resolve_default_model()
 _DEFAULT_NUM_THREADS = os.getenv("OLLAMA_NUM_THREADS")
 _DEFAULT_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "120"))
 
 
-def _post(path: str, payload: Mapping[str, Any], timeout: float | None = None) -> Mapping[str, Any]:
-    url = f"{OLLAMA_URL}{path}"
+def _post(
+    path: str,
+    payload: Mapping[str, Any],
+    timeout: float | None = None,
+    *,
+    base_url: str | None = None,
+) -> Mapping[str, Any]:
+    url = f"{(base_url or get_base_url()).rstrip('/')}{path}"
     response = requests.post(url, json=payload, timeout=timeout or _DEFAULT_TIMEOUT)
     if response.status_code >= 400:
         raise LLMError(f"{response.status_code} {response.text}")
@@ -69,6 +113,7 @@ def generate(
     num_thread: int | None = None,
     retries: int = 2,
     timeout: float | None = None,
+    base_url: str | None = None,
 ) -> str:
     """Call ``/api/generate`` and return the ``response`` field."""
 
@@ -80,7 +125,7 @@ def generate(
     }
     for attempt in range(retries + 1):
         try:
-            result = _post("/api/generate", body, timeout=timeout)
+            result = _post("/api/generate", body, timeout=timeout, base_url=base_url)
             return str(result.get("response", ""))
         except Exception:
             if attempt == retries:
@@ -98,6 +143,7 @@ def chat(
     num_thread: int | None = None,
     retries: int = 2,
     timeout: float | None = None,
+    base_url: str | None = None,
 ) -> str:
     """Call ``/api/chat`` and return the assistant message content."""
 
@@ -109,7 +155,7 @@ def chat(
     }
     for attempt in range(retries + 1):
         try:
-            result = _post("/api/chat", body, timeout=timeout)
+            result = _post("/api/chat", body, timeout=timeout, base_url=base_url)
             message = result.get("message", {})
             return str(message.get("content", ""))
         except Exception:
@@ -119,11 +165,23 @@ def chat(
     raise LLMError("chat failed after retries")
 
 
-def warm_up(prompt: str = "OK", *, temperature: float = 0.0) -> bool:
+def warm_up(
+    prompt: str = "OK",
+    *,
+    temperature: float = 0.0,
+    base_url: str | None = None,
+) -> bool:
     """Fire a fast request to warm the local model into memory."""
 
     try:
-        generate(prompt, temperature=temperature, num_ctx=256, retries=0, timeout=15)
+        generate(
+            prompt,
+            temperature=temperature,
+            num_ctx=256,
+            retries=0,
+            timeout=15,
+            base_url=base_url,
+        )
         return True
     except Exception:
         return False

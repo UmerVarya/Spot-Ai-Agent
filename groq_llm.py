@@ -33,6 +33,12 @@ from groq_safe import (
     is_model_decommissioned_error,
 )
 
+try:  # Optional import for logging fallback details
+    from llm_client import get_base_url as _get_ollama_base_url
+except Exception:  # pragma: no cover - optional dependency path
+    def _get_ollama_base_url() -> str:
+        return "unknown"
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 HEADERS = {"Content-Type": "application/json"}
@@ -40,6 +46,12 @@ if GROQ_API_KEY:
     HEADERS["Authorization"] = f"Bearer {GROQ_API_KEY}"
 
 logger = setup_logger(__name__)
+
+
+if GROQ_API_KEY:
+    logger.info("LLM backend active: Groq (model=%s)", config.get_groq_model())
+else:
+    logger.info("LLM backend active: Ollama (base_url=%s)", _get_ollama_base_url())
 
 
 class GroqRequestError(RuntimeError):
