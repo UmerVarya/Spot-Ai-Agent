@@ -83,6 +83,7 @@ from volatility_regime import atr_percentile
 from realtime_signal_cache import RealTimeSignalCache
 from auction_state import get_auction_state
 from alternative_data import get_alternative_data
+from risk_veto import minutes_until_next_event
 
 
 BREAKOUT_PATTERNS = {
@@ -126,6 +127,7 @@ ALT_DATA_REFRESH_INTERVAL = float(os.getenv("ALT_DATA_REFRESH_INTERVAL", "300"))
 # Explicit USD bounds for trade sizing (fixed at 500 USD per trade)
 MIN_TRADE_USD = 500.0
 MAX_TRADE_USD = 500.0
+VOLATILITY_SPIKE_THRESHOLD = float(os.getenv("VOLATILITY_SPIKE_THRESHOLD", "0.9"))
 
 logger.info(
     "Paths: LOG_FILE=%s TRADE_HISTORY=%s ACTIVE_TRADES=%s REJECTED_TRADES=%s LEARNING_LOG=%s",
@@ -338,14 +340,30 @@ def run_agent_loop() -> None:
                 time.sleep(SCAN_INTERVAL)
                 continue
             btc_vol = float("nan")
+            btc_trend_bias = "flat"
             try:
                 btc_df = asyncio.run(get_price_data_async("BTCUSDT"))
                 if btc_df is not None:
                     btc_vol = atr_percentile(
                         btc_df["high"], btc_df["low"], btc_df["close"]
                     )
+                    try:
+                        btc_indicators = calculate_indicators(btc_df.tail(200))
+                        ema20 = btc_indicators["ema_20"].iloc[-1]
+                        ema50 = btc_indicators["ema_50"].iloc[-1]
+                        if math.isfinite(float(ema20)) and math.isfinite(float(ema50)):
+                            if float(ema20) > float(ema50) * 1.001:
+                                btc_trend_bias = "up"
+                            elif float(ema20) < float(ema50) * 0.999:
+                                btc_trend_bias = "down"
+                            else:
+                                btc_trend_bias = "flat"
+                    except Exception as trend_exc:
+                        logger.debug("BTC trend estimation failed: %s", trend_exc, exc_info=True)
+                        btc_trend_bias = "flat"
             except Exception as e:
                 logger.warning("Could not compute BTC volatility: %s", e)
+                btc_trend_bias = "flat"
             max_active_trades = dynamic_max_active_trades(
                 fg, sentiment_bias, btc_vol
             )
@@ -363,17 +381,20 @@ def run_agent_loop() -> None:
 
             macro_news_assessment = {"safe": True, "reason": "No events analyzed"}
             macro_news_summary = ""
+            next_news_minutes = None
             try:
                 events = _run_async_task(lambda: run_news_fetcher_async())
                 if events:
                     macro_news_assessment = _run_async_task(
                         lambda: analyze_news_with_llm_async(events)
                     )
+                    next_news_minutes = minutes_until_next_event(events)
                 macro_news_summary = str(macro_news_assessment.get("reason", ""))
             except Exception as news_exc:
                 logger.debug("Macro news analysis unavailable: %s", news_exc, exc_info=True)
                 macro_news_assessment = {"safe": True, "reason": "LLM error"}
                 macro_news_summary = ""
+                next_news_minutes = minutes_until_next_event(None)
             # Load active trades and ensure only long trades remain (spot mode)
             active_trades_raw = load_active_trades()
             active_trades = []
@@ -994,30 +1015,11 @@ def run_agent_loop() -> None:
                     "setup_type": setup_type if isinstance(setup_type, str) else None,
                     "max_trades": max_active_trades,
                     "open_positions": len(active_trades),
+                    "btc_trend": btc_trend_bias,
+                    "time_to_news_minutes": next_news_minutes,
+                    "volatility_threshold": VOLATILITY_SPIKE_THRESHOLD,
+                    "max_rr": 2.0,
                 }
-                risk_review = run_pretrade_risk_check(risk_payload)
-                if isinstance(risk_review, dict):
-                    approve_value = risk_review.get("approve", True)
-                    if isinstance(approve_value, str):
-                        approve = approve_value.strip().lower() not in {"false", "no", "0"}
-                    else:
-                        approve = bool(approve_value)
-                    if not approve:
-                        comment = str(risk_review.get("comment", "Local risk guard veto"))
-                        flags = risk_review.get("risk_flags")
-                        if isinstance(flags, (list, tuple, set)):
-                            flag_text = ", ".join(str(flag) for flag in flags if flag)
-                        else:
-                            flag_text = str(flags) if flags else ""
-                        logger.info(
-                            "Local risk guard vetoed %s: %s%s",
-                            symbol,
-                            comment,
-                            f" (flags: {flag_text})" if flag_text else "",
-                        )
-                        log_rejection(symbol, f"Local risk guard: {comment}")
-                        continue
-
                 volume_profile_note = None
                 if volume_profile_result is not None:
                     try:
@@ -1037,9 +1039,44 @@ def run_agent_loop() -> None:
                     "context": narrative or llm_signal,
                 }
                 signal_summary = generate_signal_explainer(explainer_payload)
+                risk_review = run_pretrade_risk_check(risk_payload)
+                if not isinstance(risk_review, dict):
+                    risk_review = {
+                        "enter": True,
+                        "reasons": ["risk check unavailable"],
+                        "conflicts": [],
+                        "max_rr": 2.0,
+                    }
+                risk_enter = bool(risk_review.get("enter", True))
+                conflicts = [str(item) for item in (risk_review.get("conflicts") or []) if item]
+                reasons_list = [str(item) for item in (risk_review.get("reasons") or []) if item]
+                decision_label = "approved" if risk_enter else "veto"
                 if signal_summary:
-                    logger.info("[Signal Explainer] %s", signal_summary.replace("\n", " "))
-
+                    logger.info(
+                        "[Signal Explainer][%s] %s",
+                        decision_label,
+                        signal_summary.replace("\n", " "),
+                    )
+                else:
+                    logger.info("[Signal Explainer][%s] unavailable", decision_label)
+                if not risk_enter:
+                    conflict_text = ", ".join(conflicts) if conflicts else ", ".join(reasons_list)
+                    logger.info(
+                        "Risk vetoed %s | conflicts=%s | reasons=%s | max_rr=%.2f",
+                        symbol,
+                        ", ".join(conflicts) if conflicts else "none",
+                        ", ".join(reasons_list) if reasons_list else "none",
+                        float(risk_review.get("max_rr", 0.0)),
+                    )
+                    log_rejection(symbol, f"Risk veto: {conflict_text or 'guardrail failure'}")
+                    continue
+                else:
+                    logger.info(
+                        "Risk approved %s | reasons=%s | max_rr=%.2f",
+                        symbol,
+                        ", ".join(reasons_list) if reasons_list else "none",
+                        float(risk_review.get("max_rr", 0.0)),
+                    )
                 if position_size <= 0:
                     logger.info(
                         "[SKIP] %s: computed position size <= 0 after ML veto integration", symbol

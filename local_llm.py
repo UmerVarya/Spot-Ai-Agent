@@ -12,9 +12,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Mapping
 
 from log_utils import setup_logger
+from risk_veto import evaluate_risk_veto
 
 try:
     from llm_client import chat, generate, warm_up as _warm_up
@@ -110,53 +111,107 @@ def build_risk_check_prompt(payload: Mapping[str, Any]) -> str:
     """Format the guardrail prompt instructing the model to return JSON."""
 
     return (
-        "You are a risk manager ensuring trades obey guardrails. Review the metrics and return JSON with keys"
-        " approve (true/false), risk_flags (array of short strings), and comment (short guidance).\n"
+        "You are a crypto risk manager. Respond ONLY with a JSON object containing the keys"
+        " `enter` (boolean), `reasons` (array of short strings), `conflicts` (array of short strings),"
+        " and `max_rr` (float).\n"
         f"Symbol: {payload.get('symbol')}\n"
         f"Direction: {payload.get('direction')}\n"
         f"Model Confidence: {payload.get('confidence')}\n"
         f"ML Win Probability: {payload.get('ml_probability')}\n"
         f"Volatility Percentile: {payload.get('volatility')}\n"
         f"HTF Trend %: {payload.get('htf_trend_pct')}\n"
+        f"BTC Trend: {payload.get('btc_trend')}\n"
+        f"Minutes To News: {payload.get('time_to_news_minutes')}\n"
         f"Order Flow Note: {payload.get('orderflow')}\n"
         f"Macro Bias: {payload.get('macro_bias')}\n"
         f"Session: {payload.get('session')}\n"
         f"Setup Type: {payload.get('setup_type')}\n"
         f"Risk Limits: max_trades={payload.get('max_trades')} open_positions={payload.get('open_positions')}\n"
-        "Be conservative if volatility is extreme, conviction is low, or risk flags conflict."
+        "Respect the deterministic guardrails; if any conflicts exist, set `enter` to false and explain succinctly."
     )
 
 
 def _parse_risk_json(raw: str) -> Mapping[str, Any] | None:
     try:
         data = json.loads(raw)
-        if not isinstance(data, MutableMapping):
-            return None
-        return data
     except Exception:
         return None
+    if not isinstance(data, Mapping):
+        return None
+    enter = data.get("enter")
+    reasons = data.get("reasons")
+    conflicts = data.get("conflicts")
+    max_rr = data.get("max_rr")
+    if not isinstance(enter, bool):
+        return None
+    if not isinstance(reasons, list) or not all(isinstance(item, str) for item in reasons):
+        return None
+    if not isinstance(conflicts, list) or not all(isinstance(item, str) for item in conflicts):
+        return None
+    try:
+        max_rr_val = float(max_rr)
+    except (TypeError, ValueError):
+        return None
+    cleaned = {
+        "enter": enter,
+        "reasons": [item.strip() for item in reasons if item],
+        "conflicts": [item.strip() for item in conflicts if item],
+        "max_rr": max_rr_val,
+    }
+    return cleaned
 
 
-def run_pretrade_risk_check(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+def _merge_veto_results(base: Mapping[str, Any], llm: Mapping[str, Any]) -> dict[str, Any]:
+    merged = {
+        "enter": bool(base.get("enter", True)) and bool(llm.get("enter", True)),
+        "reasons": [],
+        "conflicts": [],
+        "max_rr": float(base.get("max_rr", llm.get("max_rr", 0.0))),
+    }
+    reasons = list(base.get("reasons", [])) + list(llm.get("reasons", []))
+    conflicts = list(base.get("conflicts", [])) + list(llm.get("conflicts", []))
+    seen: set[str] = set()
+    for item in reasons:
+        if not isinstance(item, str):
+            continue
+        stripped = item.strip()
+        if stripped and stripped not in seen:
+            seen.add(stripped)
+            merged["reasons"].append(stripped)
+    seen.clear()
+    for item in conflicts:
+        if not isinstance(item, str):
+            continue
+        stripped = item.strip()
+        if stripped and stripped not in seen:
+            seen.add(stripped)
+            merged["conflicts"].append(stripped)
+    try:
+        merged["max_rr"] = float(min(base.get("max_rr", float("inf")), llm.get("max_rr", float("inf"))))
+    except Exception:
+        merged["max_rr"] = float(base.get("max_rr", llm.get("max_rr", 0.0)))
+    if merged["conflicts"]:
+        merged["enter"] = False
+    return merged
+
+
+def run_pretrade_risk_check(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     """Ask the local model to vet a trade before it is submitted."""
 
-    if not is_enabled():
-        return None
+    base = evaluate_risk_veto(payload)
+    if not is_enabled() or not base.get("enter", True):
+        return base
     prompt = build_risk_check_prompt(payload)
     try:
         raw = generate(prompt, temperature=0.1, num_ctx=_DEFAULT_CTX)
     except Exception as exc:
         logger.debug("Local risk check failed: %s", exc)
-        return None
+        return base
     parsed = _parse_risk_json(raw)
     if parsed is None:
         logger.debug("Local risk check returned unparseable payload: %s", raw)
-        return {
-            "approve": True,
-            "risk_flags": ["unparsed_response"],
-            "comment": str(raw)[:200],
-        }
-    return parsed
+        return base
+    return _merge_veto_results(base, parsed)
 
 
 def build_signal_explainer_prompt(payload: Mapping[str, Any]) -> str:
@@ -206,14 +261,21 @@ def build_post_trade_summary_prompt(payload: Mapping[str, Any]) -> str:
 
 
 def generate_post_trade_summary(payload: Mapping[str, Any]) -> str | None:
+    base_summary = (
+        f"{payload.get('symbol', 'Unknown')} {payload.get('direction', '').upper()} trade "
+        f"closed at {payload.get('exit_price')} (entry {payload.get('entry_price')}). "
+        f"Outcome: {payload.get('outcome', 'n/a')} | PnL: {payload.get('pnl')} "
+        f"| Hold: {payload.get('holding_minutes')}m."
+    )
     if not is_enabled():
-        return None
+        return base_summary
     prompt = build_post_trade_summary_prompt(payload)
     try:
-        return generate(prompt, temperature=0.2, num_ctx=_DEFAULT_CTX)
+        response = generate(prompt, temperature=0.2, num_ctx=_DEFAULT_CTX)
+        return response or base_summary
     except Exception as exc:
         logger.debug("Post-trade summary generation failed: %s", exc)
-        return None
+        return base_summary
 
 
 async def async_structured_judgment(prompt: str, *, temperature: float = 0.2, num_ctx: int | None = None) -> str | None:
