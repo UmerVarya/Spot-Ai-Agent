@@ -9,13 +9,16 @@ back to remote providers when the local service fails.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Any, Mapping
 
 import requests
+from log_utils import setup_logger
 
 __all__ = [
     "LLMError",
+    "CircuitOpenError",
     "generate",
     "chat",
     "warm_up",
@@ -26,6 +29,10 @@ __all__ = [
 
 class LLMError(RuntimeError):
     """Raised when the Ollama API returns an error response."""
+
+
+class CircuitOpenError(LLMError):
+    """Raised when the Ollama circuit breaker is open."""
 
 
 def _env(key: str, default: str) -> str:
@@ -70,6 +77,61 @@ OLLAMA_URL = get_base_url()
 DEFAULT_MODEL = _resolve_default_model()
 _DEFAULT_NUM_THREADS = os.getenv("OLLAMA_NUM_THREADS")
 _DEFAULT_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "120"))
+_INITIAL_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT_INITIAL", "60"))
+_RETRY_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT_RETRY", "25"))
+_BACKOFF_SCHEDULE = [0.5, 1.5, 3.0]
+_MAX_FAILURES = 3
+_CIRCUIT_OPEN_SECONDS = 60.0
+
+_CALL_LOCK = threading.Lock()
+_CIRCUIT_LOCK = threading.Lock()
+_FAILURE_COUNT = 0
+_CIRCUIT_OPEN_UNTIL = 0.0
+
+_logger = setup_logger(__name__)
+
+
+def _timeout_for_attempt(attempt: int, override: float | None) -> float:
+    if override is not None:
+        return override
+    return _INITIAL_TIMEOUT if attempt == 0 else _RETRY_TIMEOUT
+
+
+def _ensure_circuit_allows() -> None:
+    global _CIRCUIT_OPEN_UNTIL
+    now = time.time()
+    with _CIRCUIT_LOCK:
+        if _CIRCUIT_OPEN_UNTIL and now < _CIRCUIT_OPEN_UNTIL:
+            remaining = int(_CIRCUIT_OPEN_UNTIL - now)
+            raise CircuitOpenError(f"Ollama circuit breaker open for {remaining}s")
+        if _CIRCUIT_OPEN_UNTIL and now >= _CIRCUIT_OPEN_UNTIL:
+            _CIRCUIT_OPEN_UNTIL = 0.0
+
+
+def _record_success() -> None:
+    global _FAILURE_COUNT
+    with _CIRCUIT_LOCK:
+        _FAILURE_COUNT = 0
+
+
+def _record_failure() -> bool:
+    global _FAILURE_COUNT, _CIRCUIT_OPEN_UNTIL
+    with _CIRCUIT_LOCK:
+        _FAILURE_COUNT += 1
+        if _FAILURE_COUNT >= _MAX_FAILURES:
+            _CIRCUIT_OPEN_UNTIL = time.time() + _CIRCUIT_OPEN_SECONDS
+            _FAILURE_COUNT = 0
+            return True
+    return False
+
+
+def _log_call(path: str, model: str, status: str, latency: float, attempt: int, error: Exception | None = None) -> None:
+    message = (
+        f"ollama_call path={path} model={model} status={status} latency={latency:.2f}s attempt={attempt}"
+    )
+    if error is not None:
+        message = f"{message} error={type(error).__name__}: {error}"[:500]
+    _logger.info(message)
 
 
 def _post(
@@ -80,7 +142,8 @@ def _post(
     base_url: str | None = None,
 ) -> Mapping[str, Any]:
     url = f"{(base_url or get_base_url()).rstrip('/')}{path}"
-    response = requests.post(url, json=payload, timeout=timeout or _DEFAULT_TIMEOUT)
+    with _CALL_LOCK:
+        response = requests.post(url, json=payload, timeout=timeout or _DEFAULT_TIMEOUT)
     if response.status_code >= 400:
         raise LLMError(f"{response.status_code} {response.text}")
     try:
@@ -123,14 +186,29 @@ def generate(
         "stream": False,
         "options": _build_options(temperature, num_ctx, num_thread),
     }
-    for attempt in range(retries + 1):
+    attempts = retries + 1
+    for attempt in range(attempts):
+        _ensure_circuit_allows()
+        timeout_value = _timeout_for_attempt(attempt, timeout)
+        start = time.perf_counter()
         try:
-            result = _post("/api/generate", body, timeout=timeout, base_url=base_url)
+            result = _post("/api/generate", body, timeout=timeout_value, base_url=base_url)
+            latency = time.perf_counter() - start
+            _record_success()
+            _log_call("/api/generate", model, "ok", latency, attempt + 1)
             return str(result.get("response", ""))
-        except Exception:
-            if attempt == retries:
+        except Exception as exc:
+            latency = time.perf_counter() - start
+            _log_call("/api/generate", model, "error", latency, attempt + 1, exc)
+            if isinstance(exc, CircuitOpenError):
                 raise
-            time.sleep(1.2 * (attempt + 1))
+            circuit_tripped = _record_failure()
+            if circuit_tripped:
+                raise LLMError("Ollama circuit breaker tripped after repeated failures") from exc
+            if attempt == attempts - 1:
+                raise
+            backoff = _BACKOFF_SCHEDULE[min(attempt, len(_BACKOFF_SCHEDULE) - 1)]
+            time.sleep(backoff)
     raise LLMError("generate failed after retries")
 
 
@@ -153,15 +231,30 @@ def chat(
         "stream": False,
         "options": _build_options(temperature, num_ctx, num_thread),
     }
-    for attempt in range(retries + 1):
+    attempts = retries + 1
+    for attempt in range(attempts):
+        _ensure_circuit_allows()
+        timeout_value = _timeout_for_attempt(attempt, timeout)
+        start = time.perf_counter()
         try:
-            result = _post("/api/chat", body, timeout=timeout, base_url=base_url)
+            result = _post("/api/chat", body, timeout=timeout_value, base_url=base_url)
+            latency = time.perf_counter() - start
+            _record_success()
+            _log_call("/api/chat", model, "ok", latency, attempt + 1)
             message = result.get("message", {})
             return str(message.get("content", ""))
-        except Exception:
-            if attempt == retries:
+        except Exception as exc:
+            latency = time.perf_counter() - start
+            _log_call("/api/chat", model, "error", latency, attempt + 1, exc)
+            if isinstance(exc, CircuitOpenError):
                 raise
-            time.sleep(1.2 * (attempt + 1))
+            circuit_tripped = _record_failure()
+            if circuit_tripped:
+                raise LLMError("Ollama circuit breaker tripped after repeated failures") from exc
+            if attempt == attempts - 1:
+                raise
+            backoff = _BACKOFF_SCHEDULE[min(attempt, len(_BACKOFF_SCHEDULE) - 1)]
+            time.sleep(backoff)
     raise LLMError("chat failed after retries")
 
 
