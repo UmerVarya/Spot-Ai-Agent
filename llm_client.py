@@ -8,11 +8,15 @@ back to remote providers when the local service fails.
 
 from __future__ import annotations
 
+import json
 import os
+import threading
 import time
 from typing import Any, Mapping
 
 import requests
+
+from log_utils import setup_logger
 
 __all__ = ["LLMError", "generate", "chat", "warm_up"]
 
@@ -31,7 +35,59 @@ def _env(key: str, default: str) -> str:
 OLLAMA_URL = _env("OLLAMA_URL", "http://localhost:11434")
 DEFAULT_MODEL = _env("OLLAMA_MODEL", "llama3.2:3b")
 _DEFAULT_NUM_THREADS = os.getenv("OLLAMA_NUM_THREADS")
-_DEFAULT_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "120"))
+_DEFAULT_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "30"))
+_DEFAULT_TIMEOUT = max(20.0, min(60.0, _DEFAULT_TIMEOUT))
+
+_CALL_LOCK = threading.Lock()
+_CIRCUIT_LOCK = threading.Lock()
+_CIRCUIT_FAILURES = 0
+_CIRCUIT_OPEN_UNTIL = 0.0
+
+_RETRY_BACKOFF = (0.5, 1.5, 3.0)
+
+
+logger = setup_logger(__name__)
+
+
+def _log_call(*, path: str, latency: float, prompt_tag: str, fallback_from: str, ok: bool, err: Exception | None, model: str) -> None:
+    payload = {
+        "llm": "ollama",
+        "model": model,
+        "path": path,
+        "lat_ms": int(latency * 1000),
+        "prompt_tag": prompt_tag,
+        "fallback_from": fallback_from,
+        "ok": ok,
+        "err": None if err is None else str(err),
+    }
+    logger.info(json.dumps(payload, sort_keys=True))
+
+
+def _circuit_open(now: float | None = None) -> bool:
+    global _CIRCUIT_OPEN_UNTIL, _CIRCUIT_FAILURES
+    ts = now or time.time()
+    with _CIRCUIT_LOCK:
+        if _CIRCUIT_OPEN_UNTIL and ts < _CIRCUIT_OPEN_UNTIL:
+            return True
+        if _CIRCUIT_OPEN_UNTIL and ts >= _CIRCUIT_OPEN_UNTIL:
+            _CIRCUIT_OPEN_UNTIL = 0.0
+            _CIRCUIT_FAILURES = 0
+        return False
+
+
+def _record_failure() -> None:
+    global _CIRCUIT_FAILURES, _CIRCUIT_OPEN_UNTIL
+    with _CIRCUIT_LOCK:
+        _CIRCUIT_FAILURES += 1
+        if _CIRCUIT_FAILURES >= 3:
+            _CIRCUIT_OPEN_UNTIL = time.time() + 60.0
+
+
+def _record_success() -> None:
+    global _CIRCUIT_FAILURES, _CIRCUIT_OPEN_UNTIL
+    with _CIRCUIT_LOCK:
+        _CIRCUIT_FAILURES = 0
+        _CIRCUIT_OPEN_UNTIL = 0.0
 
 
 def _post(path: str, payload: Mapping[str, Any], timeout: float | None = None) -> Mapping[str, Any]:
@@ -69,6 +125,8 @@ def generate(
     num_thread: int | None = None,
     retries: int = 2,
     timeout: float | None = None,
+    prompt_tag: str = "default",
+    fallback_from: str = "none",
 ) -> str:
     """Call ``/api/generate`` and return the ``response`` field."""
 
@@ -78,15 +136,46 @@ def generate(
         "stream": False,
         "options": _build_options(temperature, num_ctx, num_thread),
     }
-    for attempt in range(retries + 1):
-        try:
-            result = _post("/api/generate", body, timeout=timeout)
-            return str(result.get("response", ""))
-        except Exception:
-            if attempt == retries:
-                raise
-            time.sleep(1.2 * (attempt + 1))
-    raise LLMError("generate failed after retries")
+    effective_timeout = timeout or _DEFAULT_TIMEOUT
+    effective_timeout = max(15.0, min(60.0, effective_timeout))
+    with _CALL_LOCK:
+        if _circuit_open():
+            raise LLMError("Ollama circuit breaker open; retry after cooldown")
+        last_exc: Exception | None = None
+        total_attempts = min(retries + 1, len(_RETRY_BACKOFF))
+        for attempt in range(total_attempts):
+            start = time.perf_counter()
+            try:
+                result = _post("/api/generate", body, timeout=effective_timeout)
+                _record_success()
+                latency = time.perf_counter() - start
+                _log_call(
+                    path="/api/generate",
+                    latency=latency,
+                    prompt_tag=prompt_tag,
+                    fallback_from=fallback_from,
+                    ok=True,
+                    err=None,
+                    model=model,
+                )
+                return str(result.get("response", ""))
+            except Exception as exc:
+                latency = time.perf_counter() - start
+                _record_failure()
+                _log_call(
+                    path="/api/generate",
+                    latency=latency,
+                    prompt_tag=prompt_tag,
+                    fallback_from=fallback_from,
+                    ok=False,
+                    err=exc,
+                    model=model,
+                )
+                last_exc = exc
+                if attempt >= total_attempts - 1:
+                    raise
+                time.sleep(_RETRY_BACKOFF[attempt])
+        raise LLMError("generate failed after retries") from last_exc
 
 
 def chat(
@@ -98,6 +187,8 @@ def chat(
     num_thread: int | None = None,
     retries: int = 2,
     timeout: float | None = None,
+    prompt_tag: str = "default",
+    fallback_from: str = "none",
 ) -> str:
     """Call ``/api/chat`` and return the assistant message content."""
 
@@ -107,23 +198,61 @@ def chat(
         "stream": False,
         "options": _build_options(temperature, num_ctx, num_thread),
     }
-    for attempt in range(retries + 1):
-        try:
-            result = _post("/api/chat", body, timeout=timeout)
-            message = result.get("message", {})
-            return str(message.get("content", ""))
-        except Exception:
-            if attempt == retries:
-                raise
-            time.sleep(1.2 * (attempt + 1))
-    raise LLMError("chat failed after retries")
+    effective_timeout = timeout or _DEFAULT_TIMEOUT
+    effective_timeout = max(15.0, min(60.0, effective_timeout))
+    with _CALL_LOCK:
+        if _circuit_open():
+            raise LLMError("Ollama circuit breaker open; retry after cooldown")
+        last_exc: Exception | None = None
+        total_attempts = min(retries + 1, len(_RETRY_BACKOFF))
+        for attempt in range(total_attempts):
+            start = time.perf_counter()
+            try:
+                result = _post("/api/chat", body, timeout=effective_timeout)
+                _record_success()
+                latency = time.perf_counter() - start
+                _log_call(
+                    path="/api/chat",
+                    latency=latency,
+                    prompt_tag=prompt_tag,
+                    fallback_from=fallback_from,
+                    ok=True,
+                    err=None,
+                    model=model,
+                )
+                message = result.get("message", {})
+                return str(message.get("content", ""))
+            except Exception as exc:
+                latency = time.perf_counter() - start
+                _record_failure()
+                _log_call(
+                    path="/api/chat",
+                    latency=latency,
+                    prompt_tag=prompt_tag,
+                    fallback_from=fallback_from,
+                    ok=False,
+                    err=exc,
+                    model=model,
+                )
+                last_exc = exc
+                if attempt >= total_attempts - 1:
+                    raise
+                time.sleep(_RETRY_BACKOFF[attempt])
+        raise LLMError("chat failed after retries") from last_exc
 
 
-def warm_up(prompt: str = "OK", *, temperature: float = 0.0) -> bool:
+def warm_up(prompt: str = "ping", *, temperature: float = 0.0) -> bool:
     """Fire a fast request to warm the local model into memory."""
 
     try:
-        generate(prompt, temperature=temperature, num_ctx=256, retries=0, timeout=15)
+        generate(
+            prompt,
+            temperature=temperature,
+            num_ctx=256,
+            retries=0,
+            timeout=60,
+            prompt_tag="warmup",
+        )
         return True
     except Exception:
         return False

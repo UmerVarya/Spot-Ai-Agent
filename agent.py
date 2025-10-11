@@ -23,7 +23,7 @@ import os
 import sys
 import asyncio
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 # Centralized configuration loader
 import config
@@ -338,6 +338,8 @@ def run_agent_loop() -> None:
                 time.sleep(SCAN_INTERVAL)
                 continue
             btc_vol = float("nan")
+            btc_trend_pct = 0.0
+            btc_df = None
             try:
                 btc_df = asyncio.run(get_price_data_async("BTCUSDT"))
                 if btc_df is not None:
@@ -346,6 +348,14 @@ def run_agent_loop() -> None:
                     )
             except Exception as e:
                 logger.warning("Could not compute BTC volatility: %s", e)
+            if btc_df is not None:
+                try:
+                    last_close = float(btc_df["close"].iloc[-1])
+                    prev_close = float(btc_df["close"].iloc[-5])
+                    if prev_close:
+                        btc_trend_pct = ((last_close - prev_close) / prev_close) * 100.0
+                except Exception:
+                    btc_trend_pct = 0.0
             max_active_trades = dynamic_max_active_trades(
                 fg, sentiment_bias, btc_vol
             )
@@ -363,6 +373,7 @@ def run_agent_loop() -> None:
 
             macro_news_assessment = {"safe": True, "reason": "No events analyzed"}
             macro_news_summary = ""
+            events: list[dict[str, Any]] = []
             try:
                 events = _run_async_task(lambda: run_news_fetcher_async())
                 if events:
@@ -374,6 +385,25 @@ def run_agent_loop() -> None:
                 logger.debug("Macro news analysis unavailable: %s", news_exc, exc_info=True)
                 macro_news_assessment = {"safe": True, "reason": "LLM error"}
                 macro_news_summary = ""
+            minutes_to_next_event = None
+            if events:
+                now_ts = datetime.utcnow()
+                best_minutes = None
+                for evt in events:
+                    dt_raw = evt.get("datetime")
+                    if not isinstance(dt_raw, str):
+                        continue
+                    try:
+                        event_dt = datetime.fromisoformat(dt_raw.replace("Z", ""))
+                    except ValueError:
+                        continue
+                    delta_minutes = (event_dt - now_ts).total_seconds() / 60.0
+                    if delta_minutes < 0:
+                        continue
+                    if best_minutes is None or delta_minutes < best_minutes:
+                        best_minutes = delta_minutes
+                if best_minutes is not None:
+                    minutes_to_next_event = round(best_minutes, 2)
             # Load active trades and ensure only long trades remain (spot mode)
             active_trades_raw = load_active_trades()
             active_trades = []
@@ -874,6 +904,8 @@ def run_agent_loop() -> None:
                     "sym_vol_pct": sym_vol_pct,
                     "sym_vol": sym_vol,
                     "htf_trend_pct": htf_trend_pct,
+                    "btc_trend_pct": btc_trend_pct,
+                    "minutes_to_news": minutes_to_next_event,
                     "signal_snapshot": signal_snapshot,
                     "macro_ind": macro_ind,
                     "pre_result": pre_result,
@@ -981,43 +1013,6 @@ def run_agent_loop() -> None:
 
                 final_conf = round((final_conf + ml_prob * 10) / 2.0, 2)
 
-                risk_payload = {
-                    "symbol": symbol,
-                    "direction": "long",
-                    "confidence": final_conf,
-                    "ml_probability": ml_prob,
-                    "volatility": sym_vol_pct,
-                    "htf_trend_pct": htf_trend_pct,
-                    "orderflow": orderflow,
-                    "macro_bias": sentiment_bias,
-                    "session": session,
-                    "setup_type": setup_type if isinstance(setup_type, str) else None,
-                    "max_trades": max_active_trades,
-                    "open_positions": len(active_trades),
-                }
-                risk_review = run_pretrade_risk_check(risk_payload)
-                if isinstance(risk_review, dict):
-                    approve_value = risk_review.get("approve", True)
-                    if isinstance(approve_value, str):
-                        approve = approve_value.strip().lower() not in {"false", "no", "0"}
-                    else:
-                        approve = bool(approve_value)
-                    if not approve:
-                        comment = str(risk_review.get("comment", "Local risk guard veto"))
-                        flags = risk_review.get("risk_flags")
-                        if isinstance(flags, (list, tuple, set)):
-                            flag_text = ", ".join(str(flag) for flag in flags if flag)
-                        else:
-                            flag_text = str(flags) if flags else ""
-                        logger.info(
-                            "Local risk guard vetoed %s: %s%s",
-                            symbol,
-                            comment,
-                            f" (flags: {flag_text})" if flag_text else "",
-                        )
-                        log_rejection(symbol, f"Local risk guard: {comment}")
-                        continue
-
                 volume_profile_note = None
                 if volume_profile_result is not None:
                     try:
@@ -1025,7 +1020,9 @@ def run_agent_loop() -> None:
                             f"POC {float(volume_profile_result.poc):.4f} ({volume_profile_result.leg_type})"
                         )
                     except Exception:
-                        volume_profile_note = volume_profile_result.leg_type if volume_profile_result else None
+                        volume_profile_note = (
+                            volume_profile_result.leg_type if volume_profile_result else None
+                        )
                 explainer_payload = {
                     "symbol": symbol,
                     "pattern": pattern_name,
@@ -1037,8 +1034,59 @@ def run_agent_loop() -> None:
                     "context": narrative or llm_signal,
                 }
                 signal_summary = generate_signal_explainer(explainer_payload)
+
+                risk_payload = {
+                    "symbol": symbol,
+                    "direction": "long",
+                    "confidence": final_conf,
+                    "ml_probability": ml_prob,
+                    "volatility": sym_vol_pct,
+                    "htf_trend_pct": htf_trend_pct,
+                    "btc_trend_pct": context.get("btc_trend_pct"),
+                    "orderflow": orderflow,
+                    "macro_bias": sentiment_bias,
+                    "session": session,
+                    "setup_type": setup_type if isinstance(setup_type, str) else None,
+                    "max_trades": max_active_trades,
+                    "open_positions": len(active_trades),
+                    "minutes_to_news": context.get("minutes_to_news"),
+                    "max_rr": 1.6,
+                }
+                risk_review = run_pretrade_risk_check(risk_payload)
+                risk_enter = True
+                risk_reasons: list[str] = []
+                risk_conflicts: list[str] = []
+                max_rr = 1.6
+                if isinstance(risk_review, dict):
+                    risk_enter = bool(risk_review.get("enter", True))
+                    reasons_val = risk_review.get("reasons")
+                    if isinstance(reasons_val, (list, tuple, set)):
+                        risk_reasons = [str(item) for item in reasons_val if str(item).strip()]
+                    conflicts_val = risk_review.get("conflicts")
+                    if isinstance(conflicts_val, (list, tuple, set)):
+                        risk_conflicts = [str(item) for item in conflicts_val if str(item).strip()]
+                    try:
+                        max_rr = float(risk_review.get("max_rr", max_rr))
+                    except (TypeError, ValueError):
+                        max_rr = 1.6
                 if signal_summary:
-                    logger.info("[Signal Explainer] %s", signal_summary.replace("\n", " "))
+                    status = "APPROVED" if risk_enter else "VETO"
+                    summary_text = signal_summary.replace("\n", " ")
+                    if risk_conflicts:
+                        summary_text = f"{summary_text} | Conflicts: {', '.join(risk_conflicts)}"
+                    elif risk_enter:
+                        summary_text = f"{summary_text} | maxRR {max_rr:.2f}"
+                    logger.info("[Signal Explainer][%s] %s", status, summary_text)
+                if not risk_enter:
+                    reason_text = ", ".join(risk_reasons) if risk_reasons else "Risk veto"
+                    logger.info(
+                        "Local risk guard vetoed %s: %s%s",
+                        symbol,
+                        reason_text,
+                        f" (conflicts: {', '.join(risk_conflicts)})" if risk_conflicts else "",
+                    )
+                    log_rejection(symbol, f"Risk veto: {reason_text}")
+                    continue
 
                 if position_size <= 0:
                     logger.info(
