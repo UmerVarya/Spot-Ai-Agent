@@ -44,6 +44,7 @@ from trade_storage import (
 from rl_policy import RLPositionSizer
 from microstructure import plan_execution, detect_sell_pressure
 from orderflow import detect_aggression
+from local_llm import generate_post_trade_summary
 
 # === Constants ===
 
@@ -310,6 +311,25 @@ def execute_exit_trade(
         exit_price_val,
         reason,
     )
+    entry_dt = _coerce_to_utc_datetime(trade.get("entry_time"))
+    exit_dt = _coerce_to_utc_datetime(exit_time)
+    holding_minutes = None
+    if entry_dt and exit_dt:
+        holding_minutes = round((exit_dt - entry_dt).total_seconds() / 60.0, 2)
+    summary_payload = {
+        "symbol": symbol,
+        "direction": trade.get("direction"),
+        "entry_price": trade.get("entry"),
+        "exit_price": exit_price_val,
+        "outcome": outcome,
+        "reason": reason,
+        "pnl": trade.get("realized_pnl"),
+        "holding_minutes": holding_minutes,
+        "notes": trade.get("notes") or trade.get("narrative"),
+    }
+    post_summary = generate_post_trade_summary(summary_payload)
+    if post_summary:
+        logger.info("[Post-trade Summary] %s", post_summary.replace("\n", " "))
     return qty_val, total_fees, total_slippage
 
 def _update_rl(trade: dict, exit_price: float) -> None:
