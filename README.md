@@ -23,7 +23,14 @@ Set the following environment variables as needed:
   or `0` to rely on the separate `spot-ai-dashboard` service
 - `OLLAMA_URL` – base URL for the Ollama server used by the local LLM fallback.
   Defaults to `http://localhost:11434`, but can point to a remote deployment
-  such as the Render service endpoint.
+  such as the Render service endpoint. Override at runtime when pointing to a
+  different service instance.
+- `MODEL_ID` – overrides the default Ollama model (`llama3.2:3b`). The legacy
+  `OLLAMA_MODEL` variable remains supported.
+- `OLLAMA_TIMEOUT` – request timeout (seconds) for the Ollama client. Defaults
+  to `120`.
+- `OLLAMA_CONCURRENCY` – advisory concurrency limit for callers when sharing a
+  remote Ollama deployment.
 
 ## Sentiment Fusion
 
