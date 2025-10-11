@@ -432,10 +432,12 @@ def run_agent_loop() -> None:
                 sym for sym in top_symbols if not any(t.get("symbol") == sym for t in active_trades)
             ]
             signal_cache.update_universe(symbols_to_fetch)
+            cache_miss_symbols: list[str] = []
             for symbol in symbols_to_fetch:
                 try:
                     cached_signal = signal_cache.get(symbol)
                     if cached_signal is None:
+                        cache_miss_symbols.append(symbol)
                         logger.debug("No fresh cache entry for %s yet; skipping this cycle.", symbol)
                         continue
                     price_data = cached_signal.price_data
@@ -675,6 +677,18 @@ def run_agent_loop() -> None:
                 except Exception as e:
                     logger.error("Error evaluating %s: %s", symbol, e, exc_info=True)
                     continue
+            if not symbol_scores:
+                if cache_miss_symbols:
+                    preview = ", ".join(cache_miss_symbols[:5])
+                    if len(cache_miss_symbols) > 5:
+                        preview = f"{preview}, …"
+                    logger.info(
+                        "Signal cache still warming up; %d symbols waiting for fresh data (%s).",
+                        len(cache_miss_symbols),
+                        preview or "none",
+                    )
+                else:
+                    logger.info("No symbol evaluations completed this cycle.")
             # Sort by score and select diversified signals
             potential_trades.sort(key=lambda x: x['score'], reverse=True)
             allowed_new = max_active_trades - len(active_trades)
