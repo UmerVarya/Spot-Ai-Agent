@@ -432,10 +432,22 @@ def run_agent_loop() -> None:
                 sym for sym in top_symbols if not any(t.get("symbol") == sym for t in active_trades)
             ]
             signal_cache.update_universe(symbols_to_fetch)
+            cache_miss_symbols: list[str] = []
+            cache_miss_details: list[dict[str, object]] = []
             for symbol in symbols_to_fetch:
                 try:
                     cached_signal = signal_cache.get(symbol)
                     if cached_signal is None:
+                        cache_miss_symbols.append(symbol)
+                        try:
+                            cache_miss_details.append(signal_cache.describe_symbol(symbol))
+                        except Exception as diag_exc:
+                            logger.debug(
+                                "Failed to collect cache diagnostics for %s: %s",
+                                symbol,
+                                diag_exc,
+                                exc_info=True,
+                            )
                         logger.debug("No fresh cache entry for %s yet; skipping this cycle.", symbol)
                         continue
                     price_data = cached_signal.price_data
@@ -675,6 +687,51 @@ def run_agent_loop() -> None:
                 except Exception as e:
                     logger.error("Error evaluating %s: %s", symbol, e, exc_info=True)
                     continue
+            if not symbol_scores:
+                if cache_miss_symbols:
+                    total_pending = len(cache_miss_symbols)
+                    descriptions: list[str] = []
+                    for detail in cache_miss_details[:5]:
+                        symbol = str(detail.get("symbol", "?"))
+                        state = detail.get("state")
+                        reason_bits: list[str] = []
+                        age = detail.get("age")
+                        since_requested = detail.get("since_requested")
+                        last_error = detail.get("last_error")
+                        last_error_age = detail.get("last_error_age")
+                        if state == "missing":
+                            reason_bits.append("awaiting first refresh")
+                        elif state == "stale" and isinstance(age, (int, float)):
+                            reason_bits.append(f"stale {age:.1f}s")
+                        elif state == "fresh":
+                            reason_bits.append("refresh pending")
+                        if isinstance(since_requested, (int, float)):
+                            reason_bits.append(f"+{since_requested:.1f}s since request")
+                        if last_error:
+                            if isinstance(last_error_age, (int, float)):
+                                reason_bits.append(f"error {last_error_age:.1f}s ago: {last_error}")
+                            else:
+                                reason_bits.append(f"error: {last_error}")
+                        description = f"{symbol} ({'; '.join(reason_bits) or 'pending'})"
+                        descriptions.append(description)
+                    if total_pending > len(cache_miss_details):
+                        # Add any symbols we could not gather diagnostics for.
+                        missing_details = [
+                            sym
+                            for sym in cache_miss_symbols
+                            if sym not in {d.get("symbol") for d in cache_miss_details}
+                        ]
+                        if missing_details:
+                            descriptions.extend(missing_details[: max(0, 5 - len(descriptions))])
+                    if total_pending > 5:
+                        descriptions.append("…")
+                    logger.info(
+                        "Signal cache still warming up; %d symbols waiting for fresh data (%s).",
+                        total_pending,
+                        "; ".join(descriptions) or "details unavailable",
+                    )
+                else:
+                    logger.info("No symbol evaluations completed this cycle.")
             # Sort by score and select diversified signals
             potential_trades.sort(key=lambda x: x['score'], reverse=True)
             allowed_new = max_active_trades - len(active_trades)

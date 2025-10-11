@@ -67,6 +67,8 @@ class RealTimeSignalCache:
         self._stale_after = float(stale_after) if stale_after is not None else self._refresh_interval * 3
         self._symbols: set[str] = set()
         self._cache: Dict[str, CachedSignal] = {}
+        self._symbol_requested_at: Dict[str, float] = {}
+        self._symbol_errors: Dict[str, tuple[str, float]] = {}
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
@@ -100,14 +102,20 @@ class RealTimeSignalCache:
         """Update the symbol universe tracked by the cache."""
 
         normalized = {str(sym).upper() for sym in symbols if sym}
+        now = time.time()
         with self._lock:
-            if normalized == self._symbols:
+            current = set(self._symbols)
+            if normalized == current:
                 return
+            removed = current - normalized
+            added = normalized - current
             self._symbols = normalized
-            # Remove cache entries for symbols no longer tracked to free memory
-            stale_keys = [key for key in self._cache.keys() if key not in normalized]
-            for key in stale_keys:
+            for key in removed:
                 self._cache.pop(key, None)
+                self._symbol_requested_at.pop(key, None)
+                self._symbol_errors.pop(key, None)
+            for key in added:
+                self._symbol_requested_at[key] = now
         self._wake_event.set()
 
     def get(self, symbol: str) -> Optional[CachedSignal]:
@@ -135,6 +143,41 @@ class RealTimeSignalCache:
         with self._lock:
             if sentiment_bias is not None:
                 self._context["sentiment_bias"] = sentiment_bias
+
+    def describe_symbol(self, symbol: str) -> Dict[str, object]:
+        """Return diagnostic details for ``symbol``.
+
+        The response includes whether a cached entry exists, its age, how long the
+        symbol has been tracked, and the most recent error (if any).  The
+        information is intended for logging and troubleshooting and should not be
+        used to drive trading decisions directly.
+        """
+
+        key = str(symbol).upper()
+        now = time.time()
+        with self._lock:
+            entry = self._cache.get(key)
+            requested_at = self._symbol_requested_at.get(key)
+            error = self._symbol_errors.get(key)
+
+        info: Dict[str, object] = {"symbol": key}
+        if entry is None:
+            info["state"] = "missing"
+            info["age"] = None
+        else:
+            age = now - entry.updated_at
+            info["age"] = age
+            info["state"] = "fresh" if age <= self._stale_after else "stale"
+
+        if requested_at is not None:
+            info["since_requested"] = now - requested_at
+
+        if error is not None:
+            message, ts = error
+            info["last_error"] = message
+            info["last_error_age"] = now - ts
+
+        return info
 
     def _run_loop(self) -> None:
         """Background worker that refreshes the cache in near real time."""
@@ -166,10 +209,14 @@ class RealTimeSignalCache:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for symbol, result in zip(symbols, results):
             if isinstance(result, Exception):
+                message = f"price fetch failed: {result}"
                 logger.debug("Price fetch failed for %s: %s", symbol, result)
+                self._record_error(symbol, message)
                 continue
             if result is None or result.empty:
+                message = "price data unavailable"
                 logger.debug("No price data available for %s", symbol)
+                self._record_error(symbol, message)
                 continue
             try:
                 with self._lock:
@@ -182,8 +229,9 @@ class RealTimeSignalCache:
                     sentiment_bias=sentiment_bias,
                 )
                 latency = time.perf_counter() - eval_start
-            except Exception:
+            except Exception as exc:
                 logger.exception("Signal evaluation failed for %s", symbol)
+                self._record_error(symbol, f"evaluation failed: {exc}")
                 continue
             cached = CachedSignal(
                 symbol=symbol,
@@ -197,4 +245,12 @@ class RealTimeSignalCache:
             )
             with self._lock:
                 self._cache[symbol] = cached
+                self._symbol_errors.pop(symbol, None)
+
+    def _record_error(self, symbol: str, message: str) -> None:
+        """Store the latest error encountered while refreshing ``symbol``."""
+
+        key = str(symbol).upper()
+        with self._lock:
+            self._symbol_errors[key] = (message, time.time())
 
