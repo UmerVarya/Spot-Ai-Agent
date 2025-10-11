@@ -679,13 +679,45 @@ def run_agent_loop() -> None:
                     continue
             if not symbol_scores:
                 if cache_miss_symbols:
-                    preview = ", ".join(cache_miss_symbols[:5])
-                    if len(cache_miss_symbols) > 5:
-                        preview = f"{preview}, …"
+                    diagnostics = signal_cache.pending_diagnostics()
+                    pending_lookup = {entry["symbol"]: entry for entry in diagnostics}
+                    preview_infos = [
+                        pending_lookup[symbol]
+                        for symbol in cache_miss_symbols
+                        if symbol in pending_lookup
+                    ]
+                    preview_infos = preview_infos[:5]
+                    preview_parts: list[str] = []
+                    for info in preview_infos:
+                        details: list[str] = []
+                        waiting_for = info.get("waiting_for")
+                        if isinstance(waiting_for, (int, float)):
+                            details.append(f"pending={waiting_for:.1f}s")
+                        stale_age = info.get("stale_age")
+                        if isinstance(stale_age, (int, float)):
+                            details.append(f"stale={stale_age:.1f}s")
+                        request_wait = info.get("request_wait")
+                        if isinstance(request_wait, (int, float)):
+                            details.append(f"wait={request_wait:.1f}s")
+                        last_error = info.get("last_error")
+                        if last_error:
+                            error_age = info.get("error_age")
+                            if isinstance(error_age, (int, float)):
+                                details.append(f"error {error_age:.1f}s ago: {last_error}")
+                            else:
+                                details.append(f"error: {last_error}")
+                        descriptor = "; ".join(details)
+                        if descriptor:
+                            preview_parts.append(f"{info['symbol']} ({descriptor})")
+                        else:
+                            preview_parts.append(info["symbol"])
+                    remaining = len(cache_miss_symbols) - len(preview_infos)
+                    if remaining > 0:
+                        preview_parts.append(f"+{remaining} more")
                     logger.info(
-                        "Signal cache still warming up; %d symbols waiting for fresh data (%s).",
+                        "Signal cache still warming up; %d symbols waiting for fresh data. Pending: %s",
                         len(cache_miss_symbols),
-                        preview or "none",
+                        "; ".join(preview_parts) if preview_parts else ", ".join(cache_miss_symbols[:5]),
                     )
                 else:
                     logger.info("No symbol evaluations completed this cycle.")

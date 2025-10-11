@@ -15,7 +15,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -72,6 +72,9 @@ class RealTimeSignalCache:
         self._wake_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._context: Dict[str, object] = {}
+        self._symbol_added_at: Dict[str, float] = {}
+        self._symbol_last_attempt: Dict[str, float] = {}
+        self._symbol_last_error: Dict[str, Tuple[float, str]] = {}
 
     @property
     def stale_after(self) -> float:
@@ -101,13 +104,24 @@ class RealTimeSignalCache:
 
         normalized = {str(sym).upper() for sym in symbols if sym}
         with self._lock:
-            if normalized == self._symbols:
+            added = normalized - self._symbols
+            removed = self._symbols - normalized
+            if not added and not removed:
                 return
             self._symbols = normalized
             # Remove cache entries for symbols no longer tracked to free memory
             stale_keys = [key for key in self._cache.keys() if key not in normalized]
             for key in stale_keys:
                 self._cache.pop(key, None)
+            for key in removed:
+                self._symbol_added_at.pop(key, None)
+                self._symbol_last_attempt.pop(key, None)
+                self._symbol_last_error.pop(key, None)
+            now = time.time()
+            for key in added:
+                self._symbol_added_at[key] = now
+                self._symbol_last_attempt.pop(key, None)
+                self._symbol_last_error.pop(key, None)
         self._wake_event.set()
 
     def get(self, symbol: str) -> Optional[CachedSignal]:
@@ -135,6 +149,57 @@ class RealTimeSignalCache:
         with self._lock:
             if sentiment_bias is not None:
                 self._context["sentiment_bias"] = sentiment_bias
+
+    def pending_diagnostics(self, limit: Optional[int] = None) -> List[Dict[str, object]]:
+        """Return diagnostic metadata for symbols missing fresh cache entries."""
+
+        now = time.time()
+        with self._lock:
+            symbols = tuple(self._symbols)
+            cache_snapshot = dict(self._cache)
+            added_at = dict(self._symbol_added_at)
+            last_attempt = dict(self._symbol_last_attempt)
+            last_error = dict(self._symbol_last_error)
+
+        pending: List[Dict[str, object]] = []
+        for symbol in symbols:
+            entry = cache_snapshot.get(symbol)
+            if entry is not None and entry.is_fresh(self._stale_after):
+                continue
+            waiting_for = None
+            if symbol in added_at:
+                waiting_for = max(0.0, now - added_at[symbol])
+            stale_age = entry.age() if entry is not None else None
+            request_wait = None
+            if symbol in last_attempt:
+                request_wait = max(0.0, now - last_attempt[symbol])
+            error_msg: Optional[str] = None
+            error_age: Optional[float] = None
+            if symbol in last_error:
+                err_ts, msg = last_error[symbol]
+                error_msg = msg
+                error_age = max(0.0, now - err_ts)
+            pending.append(
+                {
+                    "symbol": symbol,
+                    "waiting_for": waiting_for,
+                    "stale_age": stale_age,
+                    "request_wait": request_wait,
+                    "last_error": error_msg,
+                    "error_age": error_age,
+                }
+            )
+
+        pending.sort(
+            key=lambda item: (
+                item["waiting_for"] if item["waiting_for"] is not None else 0.0,
+                item["stale_age"] if item["stale_age"] is not None else 0.0,
+            ),
+            reverse=True,
+        )
+        if limit is not None:
+            pending = pending[: int(limit)]
+        return pending
 
     def _run_loop(self) -> None:
         """Background worker that refreshes the cache in near real time."""
@@ -165,10 +230,13 @@ class RealTimeSignalCache:
         tasks = [self._price_fetcher(sym) for sym in symbols]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for symbol, result in zip(symbols, results):
+            attempt_ts = time.time()
             if isinstance(result, Exception):
+                self._record_refresh_error(symbol, f"fetch error: {result}", attempt_ts=attempt_ts)
                 logger.debug("Price fetch failed for %s: %s", symbol, result)
                 continue
             if result is None or result.empty:
+                self._record_refresh_error(symbol, "no price data returned", attempt_ts=attempt_ts)
                 logger.debug("No price data available for %s", symbol)
                 continue
             try:
@@ -183,6 +251,7 @@ class RealTimeSignalCache:
                 )
                 latency = time.perf_counter() - eval_start
             except Exception:
+                self._record_refresh_error(symbol, "evaluation error", attempt_ts=attempt_ts)
                 logger.exception("Signal evaluation failed for %s", symbol)
                 continue
             cached = CachedSignal(
@@ -196,5 +265,20 @@ class RealTimeSignalCache:
                 compute_latency=float(latency),
             )
             with self._lock:
+                self._symbol_last_attempt[symbol] = attempt_ts
                 self._cache[symbol] = cached
+                self._symbol_last_error.pop(symbol, None)
+
+    def _record_refresh_error(
+        self, symbol: str, message: str, *, attempt_ts: Optional[float] = None
+    ) -> None:
+        """Record the most recent refresh error for a symbol."""
+
+        ts = attempt_ts or time.time()
+        normalized_message = " ".join(str(message).strip().split())
+        if len(normalized_message) > 160:
+            normalized_message = f"{normalized_message[:157]}..."
+        with self._lock:
+            self._symbol_last_attempt[symbol] = ts
+            self._symbol_last_error[symbol] = (ts, normalized_message)
 
