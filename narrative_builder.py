@@ -21,12 +21,15 @@ import os
 from dotenv import load_dotenv
 import config
 from groq_safe import safe_chat_completion
+from local_llm import generate_local_narrative
+from log_utils import setup_logger
 
 load_dotenv()
 
 # Retrieve API key from environment and initialise the client once
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
+logger = setup_logger(__name__)
 
 
 def generate_trade_narrative(*args, **kwargs) -> str:
@@ -88,4 +91,8 @@ Write a short, confident explanation justifying the trade in plain English. End 
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
+        logger.warning("Groq narrative generation failed: %s", e)
+        fallback = generate_local_narrative(trade_data)
+        if fallback:
+            return fallback
         return f"⚠️ Error generating narrative: {e}"

@@ -74,6 +74,7 @@ from groq_llm import async_batch_llm_judgment
 from ml_model import predict_success_probability
 from sequence_model import predict_next_return, train_sequence_model, SEQ_PKL
 from drawdown_guard import is_trading_blocked
+from local_llm import warm_up_local_llm, run_pretrade_risk_check, generate_signal_explainer
 import numpy as np
 from rl_policy import RLPositionSizer
 from trade_utils import get_rl_state
@@ -113,6 +114,11 @@ NEWS_INTERVAL = 3600
 RUN_DASHBOARD = os.getenv("RUN_DASHBOARD", "0") == "1"
 USE_RL_POSITION_SIZER = False
 rl_sizer = RLPositionSizer() if USE_RL_POSITION_SIZER else None
+LOCAL_LLM_READY = warm_up_local_llm()
+if LOCAL_LLM_READY:
+    logger.info("Local LLM warm-up completed")
+else:
+    logger.info("Local LLM warm-up skipped or unavailable")
 
 # Time-to-live for alternative data fetches
 ALT_DATA_REFRESH_INTERVAL = float(os.getenv("ALT_DATA_REFRESH_INTERVAL", "300"))
@@ -974,6 +980,65 @@ def run_agent_loop() -> None:
                     continue
 
                 final_conf = round((final_conf + ml_prob * 10) / 2.0, 2)
+
+                risk_payload = {
+                    "symbol": symbol,
+                    "direction": "long",
+                    "confidence": final_conf,
+                    "ml_probability": ml_prob,
+                    "volatility": sym_vol_pct,
+                    "htf_trend_pct": htf_trend_pct,
+                    "orderflow": orderflow,
+                    "macro_bias": sentiment_bias,
+                    "session": session,
+                    "setup_type": setup_type if isinstance(setup_type, str) else None,
+                    "max_trades": max_active_trades,
+                    "open_positions": len(active_trades),
+                }
+                risk_review = run_pretrade_risk_check(risk_payload)
+                if isinstance(risk_review, dict):
+                    approve_value = risk_review.get("approve", True)
+                    if isinstance(approve_value, str):
+                        approve = approve_value.strip().lower() not in {"false", "no", "0"}
+                    else:
+                        approve = bool(approve_value)
+                    if not approve:
+                        comment = str(risk_review.get("comment", "Local risk guard veto"))
+                        flags = risk_review.get("risk_flags")
+                        if isinstance(flags, (list, tuple, set)):
+                            flag_text = ", ".join(str(flag) for flag in flags if flag)
+                        else:
+                            flag_text = str(flags) if flags else ""
+                        logger.info(
+                            "Local risk guard vetoed %s: %s%s",
+                            symbol,
+                            comment,
+                            f" (flags: {flag_text})" if flag_text else "",
+                        )
+                        log_rejection(symbol, f"Local risk guard: {comment}")
+                        continue
+
+                volume_profile_note = None
+                if volume_profile_result is not None:
+                    try:
+                        volume_profile_note = (
+                            f"POC {float(volume_profile_result.poc):.4f} ({volume_profile_result.leg_type})"
+                        )
+                    except Exception:
+                        volume_profile_note = volume_profile_result.leg_type if volume_profile_result else None
+                explainer_payload = {
+                    "symbol": symbol,
+                    "pattern": pattern_name,
+                    "score": score,
+                    "confidence": final_conf,
+                    "macro_bias": sentiment_bias,
+                    "orderflow": orderflow,
+                    "volume_profile": volume_profile_note,
+                    "context": narrative or llm_signal,
+                }
+                signal_summary = generate_signal_explainer(explainer_payload)
+                if signal_summary:
+                    logger.info("[Signal Explainer] %s", signal_summary.replace("\n", " "))
 
                 if position_size <= 0:
                     logger.info(
