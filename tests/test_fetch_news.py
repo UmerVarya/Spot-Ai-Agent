@@ -121,6 +121,52 @@ def test_analyze_news_with_llm_async_retries_on_runtime_error(monkeypatch):
     assert calls == ["custom-model", fetch_news.config.DEFAULT_GROQ_MODEL]
 
 
+def test_analyze_news_with_llm_async_uses_local_fallback(monkeypatch):
+    import fetch_news
+
+    monkeypatch.setattr(fetch_news, "GROQ_API_KEY", "test-key", raising=False)
+    monkeypatch.setattr(fetch_news.config, "get_groq_model", lambda: "custom-model", raising=False)
+
+    async def fake_post(session, payload, *, model_used):
+        raise RuntimeError("Groq LLM request failed")
+
+    monkeypatch.setattr(fetch_news, "_post_groq_request", fake_post, raising=False)
+
+    monkeypatch.setattr(
+        fetch_news,
+        "quantify_event_risk",
+        lambda events: {
+            "considered_events": len(events),
+            "events_in_window": events,
+            "window_hours": 6,
+            "high_impact_events": 1,
+            "risk_score": 3.5,
+        },
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        fetch_news,
+        "reconcile_with_quant_filters",
+        lambda decision, reason, metrics: (decision, 0.4, f"LOCAL:{reason}"),
+        raising=False,
+    )
+
+    def fake_adapter():
+        return (
+            lambda: True,
+            lambda prompt, temperature=0.1: json.dumps(
+                {"safe_decision": "no", "reason": "Local fallback"}
+            ),
+        )
+
+    monkeypatch.setattr(fetch_news, "_get_local_llm_adapter", fake_adapter, raising=False)
+
+    result = asyncio.run(fetch_news.analyze_news_with_llm_async(_example_events()))
+
+    assert result == {"safe": False, "sensitivity": 0.4, "reason": "LOCAL:Local fallback"}
+
+
 def test_analyze_news_with_llm_async_handles_non_json(monkeypatch):
     import fetch_news
 

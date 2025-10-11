@@ -4,7 +4,7 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Callable, Coroutine
+from typing import Any, Dict, List, Mapping, Optional, Callable, Coroutine, Tuple
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -29,6 +29,16 @@ GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 HEADERS = {"Content-Type": "application/json"}
 if GROQ_API_KEY:
     HEADERS["Authorization"] = f"Bearer {GROQ_API_KEY}"
+
+
+def _get_local_llm_adapter() -> Optional[Tuple[Callable[[], bool], Callable[..., str]]]:
+    """Return callables for the local Ollama fallback when available."""
+
+    try:
+        from local_llm import is_enabled as local_is_enabled, generate as local_generate
+    except Exception:
+        return None
+    return local_is_enabled, local_generate
 
 
 def _run_coroutine(coro_factory: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
@@ -165,57 +175,92 @@ async def analyze_news_with_llm_async(
         }
 
     prompt = _build_llm_payload(metrics)
+    system_prompt = (
+        "You are a crypto macro risk analyst. Respond ONLY with a JSON object "
+        "containing the keys `safe_decision` (\"yes\" or \"no\") and `reason` (string). "
+        "Do not include any additional commentary or keys."
+    )
+    user_prompt = (
+        "Assess the market impact of the following events occurring within the next "
+        f"{metrics['window_hours']} hours. There are {metrics['considered_events']} "
+        "events under review, including "
+        f"{metrics['high_impact_events']} high-impact entries. Respond with the "
+        "required JSON structure.\n"
+        f"Events:\n{prompt}"
+    )
+
     payload_template: Dict[str, Any] = {
         "model": config.get_groq_model(),
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a crypto macro risk analyst. Respond ONLY with a JSON object "
-                    "containing the keys `safe_decision` (\"yes\" or \"no\") and `reason` (string). "
-                    "Do not include any additional commentary or keys."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    "Assess the market impact of the following events occurring within the next "
-                    f"{metrics['window_hours']} hours. There are {metrics['considered_events']} "
-                    "events under review, including "
-                    f"{metrics['high_impact_events']} high-impact entries. Respond with the "
-                    "required JSON structure.\n"
-                    f"Events:\n{prompt}"
-                ),
-            },
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
         ],
     }
 
+    async def _run_local_news_fallback() -> Optional[Dict[str, Any]]:
+        adapter = _get_local_llm_adapter()
+        if adapter is None:
+            return None
+        is_enabled, generate = adapter
+        if not is_enabled():
+            return None
+
+        combined_prompt = f"{system_prompt}\n\n{user_prompt}"
+        loop = asyncio.get_running_loop()
+        try:
+            raw_reply = await loop.run_in_executor(
+                None, lambda: generate(combined_prompt, temperature=0.1)
+            )
+        except Exception as exc:
+            logger.warning("Local news fallback failed: %s", exc, exc_info=True)
+            return None
+
+        safe_decision, reason = parse_llm_json(raw_reply, logger)
+        if safe_decision is None:
+            return {"safe": True, "sensitivity": 0, "reason": reason or "Local LLM error"}
+
+        safe, sensitivity, reconciled_reason = reconcile_with_quant_filters(
+            safe_decision, reason or "No reason provided.", metrics
+        )
+        logger.info("Used local LLM fallback for news analysis")
+        return {"safe": safe, "sensitivity": sensitivity, "reason": reconciled_reason}
+
     try:
         async with _client_session(session) as client:
-            handled_error: Optional[Exception] = None
-            try:
-                response = await _post_groq_request(
-                    client, payload_template, model_used=payload_template["model"]
-                )
-            except RuntimeError as err:
-                handled_error = err
-            except Exception as err:
-                handled_error = err
+            response: Optional[Dict[str, Any]] = None
+            last_error: Optional[Exception] = None
+            models_to_try = [payload_template["model"]]
+            if payload_template["model"] != config.DEFAULT_GROQ_MODEL:
+                models_to_try.append(config.DEFAULT_GROQ_MODEL)
 
-            if handled_error is not None:
-                if payload_template["model"] != config.DEFAULT_GROQ_MODEL:
-                    logger.warning(
-                        "Groq model %s unavailable (%s). Retrying with fallback model %s.",
-                        payload_template["model"],
-                        handled_error,
-                        config.DEFAULT_GROQ_MODEL,
-                    )
-                    fallback_payload = {**payload_template, "model": config.DEFAULT_GROQ_MODEL}
+            for index, model_name in enumerate(models_to_try):
+                payload = {**payload_template, "model": model_name}
+                try:
                     response = await _post_groq_request(
-                        client, fallback_payload, model_used=config.DEFAULT_GROQ_MODEL
+                        client, payload, model_used=model_name
                     )
-                else:
-                    raise handled_error
+                    break
+                except Exception as err:
+                    last_error = err
+                    if (
+                        index == 0
+                        and len(models_to_try) > 1
+                        and model_name != config.DEFAULT_GROQ_MODEL
+                    ):
+                        logger.warning(
+                            "Groq model %s unavailable (%s). Retrying with fallback model %s.",
+                            model_name,
+                            err,
+                            config.DEFAULT_GROQ_MODEL,
+                        )
+
+            if response is None:
+                fallback_result = await _run_local_news_fallback()
+                if fallback_result is not None:
+                    return fallback_result
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError("Groq LLM request failed")
 
             raw_reply = response.get("choices", [{}])[0].get("message", {}).get("content", "")
             safe_decision, reason = parse_llm_json(raw_reply, logger)
