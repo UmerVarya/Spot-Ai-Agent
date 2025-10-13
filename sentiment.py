@@ -1,7 +1,8 @@
 import os
 import json
-import re
 from dotenv import load_dotenv
+
+from json_utils import parse_llm_json_response
 
 from groq import (
     APIConnectionError,
@@ -70,48 +71,15 @@ def analyze_macro_news(news_text: str) -> dict:
         logger.error("Error connecting to Groq API: %s", err, exc_info=True)
         return {"bias": "neutral", "confidence": 5.0, "summary": "No analysis (API error)"}
 
-    result_text = str(result_text or "")
-    # ✅ Robust JSON parsing from LLM output
-    result_text = result_text.strip()
-    parsed = {}
-    if result_text:
-        # Remove any markdown code fences or extraneous text
-        if result_text.startswith("```"):
-            # Strip markdown formatting
-            result_text = result_text.strip('`')
-            if result_text.lower().startswith("json"):
-                brace_index = result_text.find('{')
-                if brace_index != -1:
-                    result_text = result_text[brace_index:]
-        # Try direct JSON parsing
-        try:
-            parsed = json.loads(result_text)
-        except Exception:
-            # Attempt regex extraction of JSON
-            match = re.search(r'\{.*\}', result_text)
-            if match:
-                json_str = match.group(0)
-                try:
-                    parsed = json.loads(json_str)
-                except Exception:
-                    # Last resort: find first and last curly braces
-                    first = result_text.find('{')
-                    last = result_text.rfind('}')
-                    if first != -1 and last != -1 and last > first:
-                        json_str = result_text[first:last+1]
-                        try:
-                            parsed = json.loads(json_str)
-                        except Exception:
-                            parsed = {}
-            else:
-                parsed = {}
-    # Ensure required fields with defaults
-    if not parsed or "bias" not in parsed:
-        parsed["bias"] = "neutral"
-    if "confidence" not in parsed:
-        parsed["confidence"] = 5.0
-    if "summary" not in parsed:
-        parsed["summary"] = "No summary available"
+    parsed, _ = parse_llm_json_response(
+        result_text,
+        defaults={
+            "bias": "neutral",
+            "confidence": 5.0,
+            "summary": "No summary available",
+        },
+        logger=logger,
+    )
     # Normalize data types
     try:
         parsed["confidence"] = float(parsed["confidence"])
