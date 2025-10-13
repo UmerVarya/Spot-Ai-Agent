@@ -657,28 +657,93 @@ def finalize_trade_decision(
     }
 
 
+def _strip_json_code_fence(text: str) -> str:
+    """Remove Markdown style code fences and ``json`` labels from the text."""
+
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        # Remove opening fence (optionally labelled ``json``) and closing fence
+        cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    if cleaned.lower().startswith("json"):
+        cleaned = cleaned[4:].strip()
+        cleaned = cleaned.lstrip(":").strip()
+    return cleaned
+
+
+def _load_json_from_text(text: str) -> Dict[str, Any] | None:
+    """Attempt to deserialize JSON from a raw LLM response string."""
+
+    candidates: list[str] = []
+
+    def _add_candidate(value: str) -> None:
+        value = value.strip()
+        if value and value not in candidates:
+            candidates.append(value)
+
+    _add_candidate(text)
+    stripped = _strip_json_code_fence(text)
+    _add_candidate(stripped)
+
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, list) and data:
+                first = data[0]
+                if isinstance(first, Mapping):
+                    return dict(first)
+            if isinstance(data, Mapping):
+                return dict(data)
+        except Exception:
+            continue
+
+    search_text = stripped or text
+    match = re.search(r"\{.*\}", search_text, flags=re.DOTALL)
+    if match:
+        snippet = match.group(0)
+        try:
+            data = json.loads(snippet)
+            if isinstance(data, Mapping):
+                return dict(data)
+        except Exception:
+            pass
+
+    first_brace = search_text.find("{")
+    last_brace = search_text.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        snippet = search_text[first_brace : last_brace + 1]
+        try:
+            data = json.loads(snippet)
+            if isinstance(data, Mapping):
+                return dict(data)
+        except Exception:
+            return None
+    return None
+
+
 def _parse_llm_response(resp: str) -> Tuple[bool | None, float | None, str, str]:
     """Attempt to parse a JSON response from the LLM.
 
     Returns a tuple ``(decision_bool, advisor_rating, reason, thesis)``.  If
     parsing fails, returns ``(None, None, raw_response, "")``.
     """
-    try:
-        data = json.loads(resp)
-        decision = data.get("decision", "No")
-        rating = data.get("confidence", None)
-        reason = data.get("reason", "")
-        thesis = data.get("thesis", "")
-        decision_bool = str(decision).strip().lower().startswith("y")
-        rating_val: float | None = None
-        if isinstance(rating, (int, float, str)):
-            try:
-                rating_val = float(rating)  # type: ignore[arg-type]
-            except Exception:
-                rating_val = None
-        return decision_bool, rating_val, reason, thesis
-    except Exception:
+
+    data = _load_json_from_text(resp)
+    if data is None:
         return None, None, resp, ""
+
+    decision = data.get("decision", "No")
+    rating = data.get("confidence", None)
+    reason = data.get("reason", "")
+    thesis = data.get("thesis", "")
+    decision_bool = str(decision).strip().lower().startswith("y")
+    rating_val: float | None = None
+    if isinstance(rating, (int, float, str)):
+        try:
+            rating_val = float(rating)  # type: ignore[arg-type]
+        except Exception:
+            rating_val = None
+    return decision_bool, rating_val, str(reason), str(thesis)
 
 
 
