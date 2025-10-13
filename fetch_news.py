@@ -1,16 +1,23 @@
 import os
 import json
 import asyncio
-import time
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Callable, Coroutine, Tuple
+from typing import Any, Callable, Coroutine, Dict, List, Mapping, Optional, Tuple
 
 import aiohttp
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import config
-from groq_safe import describe_error
+from groq import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    APITimeoutError,
+    RateLimitError,
+)
+from groq_client import get_groq_client
+from groq_safe import safe_chat_completion
 from news_guardrails import (
     parse_llm_json,
     quantify_event_risk,
@@ -24,11 +31,6 @@ logger = setup_logger(__name__)
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-
-HEADERS = {"Content-Type": "application/json"}
-if GROQ_API_KEY:
-    HEADERS["Authorization"] = f"Bearer {GROQ_API_KEY}"
 
 
 def _get_local_llm_adapter() -> Optional[Tuple[Callable[[], bool], Callable[..., str]]]:
@@ -127,33 +129,37 @@ def _build_llm_payload(metrics: Dict[str, Any]) -> str:
     return json.dumps(metrics["events_in_window"], indent=2)
 
 
-async def _post_groq_request(
-    session: aiohttp.ClientSession,
-    payload: Mapping[str, Any],
-    *,
-    model_used: str,
-) -> Dict[str, Any]:
-    """Send a POST request to the Groq chat completion endpoint."""
+def _extract_message_content(response: Any) -> str:
+    """Return the first message content from a Groq chat completion."""
 
-    start = time.perf_counter()
-    async with session.post(GROQ_API_URL, headers=HEADERS, json=payload) as resp:
-        latency = time.perf_counter() - start
-        if resp.status != 200:
-            error_payload = await resp.text()
-            try:
-                parsed = json.loads(error_payload)
-            except Exception:
-                parsed = error_payload
-            logger.error(
-                "Groq LLM request failed in %.2fs: %s, %s",
-                latency,
-                resp.status,
-                describe_error(parsed) or error_payload,
-            )
-            raise RuntimeError("Groq LLM request failed")
-        data = await resp.json()
-        logger.info("Groq LLM call succeeded in %.2fs (model=%s)", latency, model_used)
-        return data
+    try:
+        choice = response.choices[0]
+        return str(getattr(choice.message, "content", "") or "").strip()
+    except Exception:
+        return ""
+
+
+async def _chat_completion_async(
+    messages: List[Mapping[str, str]],
+    *,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+):
+    """Execute a Groq chat completion using the shared SDK client."""
+
+    client = get_groq_client()
+    if client is None:
+        raise RuntimeError("Groq client unavailable")
+
+    return await asyncio.to_thread(
+        safe_chat_completion,
+        client,
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
 
 
 async def analyze_news_with_llm_async(
@@ -162,6 +168,8 @@ async def analyze_news_with_llm_async(
     session: Optional[aiohttp.ClientSession] = None,
 ) -> Dict[str, str]:
     """Asynchronously analyze news events with the Groq LLM."""
+
+    _ = session  # Retained for compatibility; Groq SDK manages HTTP connections internally.
 
     if not GROQ_API_KEY:
         return {"safe": True, "sensitivity": 0, "reason": "No API key"}
@@ -226,51 +234,94 @@ async def analyze_news_with_llm_async(
         return {"safe": safe, "sensitivity": sensitivity, "reason": reconciled_reason}
 
     try:
-        async with _client_session(session) as client:
-            response: Optional[Dict[str, Any]] = None
-            last_error: Optional[Exception] = None
-            models_to_try = [payload_template["model"]]
-            if payload_template["model"] != config.DEFAULT_GROQ_MODEL:
-                models_to_try.append(config.DEFAULT_GROQ_MODEL)
+        response: Optional[Any] = None
+        last_error: Optional[Exception] = None
+        models_to_try = [payload_template["model"]]
+        if payload_template["model"] != config.DEFAULT_GROQ_MODEL:
+            models_to_try.append(config.DEFAULT_GROQ_MODEL)
 
-            for index, model_name in enumerate(models_to_try):
-                payload = {**payload_template, "model": model_name}
-                try:
-                    response = await _post_groq_request(
-                        client, payload, model_used=model_name
-                    )
-                    break
-                except Exception as err:
-                    last_error = err
-                    if (
-                        index == 0
-                        and len(models_to_try) > 1
-                        and model_name != config.DEFAULT_GROQ_MODEL
-                    ):
-                        logger.warning(
-                            "Groq model %s unavailable (%s). Retrying with fallback model %s.",
-                            model_name,
-                            err,
-                            config.DEFAULT_GROQ_MODEL,
-                        )
-
-            if response is None:
+        for index, model_name in enumerate(models_to_try):
+            messages = [
+                payload_template["messages"][0],
+                {"role": "user", "content": user_prompt},
+            ]
+            try:
+                response = await _chat_completion_async(
+                    messages,
+                    model=model_name,
+                    temperature=0.1,
+                    max_tokens=300,
+                )
+                break
+            except RateLimitError as err:
+                last_error = err
+                logger.warning(
+                    "Groq rate limit during news analysis (model=%s): %s",
+                    model_name,
+                    err,
+                )
                 fallback_result = await _run_local_news_fallback()
                 if fallback_result is not None:
                     return fallback_result
-                if last_error is not None:
-                    raise last_error
-                raise RuntimeError("Groq LLM request failed")
+                break
+            except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
+                last_error = err
+                if (
+                    index == 0
+                    and len(models_to_try) > 1
+                    and model_name != config.DEFAULT_GROQ_MODEL
+                ):
+                    logger.warning(
+                        "Groq model %s failed (%s). Retrying with fallback model %s.",
+                        model_name,
+                        err,
+                        config.DEFAULT_GROQ_MODEL,
+                    )
+                    continue
+                logger.error(
+                    "Groq news analysis failed with model %s: %s",
+                    model_name,
+                    err,
+                )
+            except Exception as err:
+                last_error = err
+                if (
+                    index == 0
+                    and len(models_to_try) > 1
+                    and model_name != config.DEFAULT_GROQ_MODEL
+                ):
+                    logger.warning(
+                        "Unexpected Groq error for model %s (%s). Retrying with fallback model %s.",
+                        model_name,
+                        err,
+                        config.DEFAULT_GROQ_MODEL,
+                    )
+                    continue
+                logger.error(
+                    "Unexpected Groq error for model %s: %s",
+                    model_name,
+                    err,
+                    exc_info=True,
+                )
+                break
 
-            raw_reply = response.get("choices", [{}])[0].get("message", {}).get("content", "")
-            safe_decision, reason = parse_llm_json(raw_reply, logger)
-            if safe_decision is None:
-                return {"safe": True, "sensitivity": 0, "reason": reason or "LLM error"}
+        if response is None:
+            fallback_result = await _run_local_news_fallback()
+            if fallback_result is not None:
+                return fallback_result
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("Groq LLM request failed")
 
-            safe, sensitivity, reconciled_reason = reconcile_with_quant_filters(
-                safe_decision, reason or "No reason provided.", metrics
-            )
-            return {"safe": safe, "sensitivity": sensitivity, "reason": reconciled_reason}
+        raw_reply = _extract_message_content(response)
+        safe_decision, reason = parse_llm_json(raw_reply, logger)
+        if safe_decision is None:
+            return {"safe": True, "sensitivity": 0, "reason": reason or "LLM error"}
+
+        safe, sensitivity, reconciled_reason = reconcile_with_quant_filters(
+            safe_decision, reason or "No reason provided.", metrics
+        )
+        return {"safe": safe, "sensitivity": sensitivity, "reason": reconciled_reason}
     except Exception as exc:
         logger.error("Groq LLM analysis failed: %s", exc, exc_info=True)
         return {"safe": True, "sensitivity": 0, "reason": "LLM error"}

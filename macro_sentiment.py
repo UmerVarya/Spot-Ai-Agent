@@ -1,14 +1,12 @@
 import os
 from news_scraper import get_combined_headlines
 from news_retriever import build_retrieval_context, load_structured_events
-from groq import Groq
 from log_utils import setup_logger
 
 # Centralised configuration loader
 import config
+from groq_client import get_groq_client
 from groq_safe import safe_chat_completion
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-client = Groq(api_key=GROQ_API_KEY)
 
 logger = setup_logger(__name__)
 
@@ -52,6 +50,15 @@ Summary: <concise summary>
 Bias: <bullish / bearish / neutral>
 Confidence: <0-10 score>
 """
+
+    client = get_groq_client()
+    if client is None:
+        logger.warning("Groq client unavailable for macro sentiment; returning default")
+        return {
+            "summary": "LLM analysis unavailable.",
+            "bias": "neutral",
+            "confidence": 0,
+        }
 
     try:
         response = safe_chat_completion(

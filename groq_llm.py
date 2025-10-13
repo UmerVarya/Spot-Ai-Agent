@@ -17,21 +17,25 @@ the raw response is returned for backward compatibility.
 """
 
 import os
-import requests
 import re
 import json
-import aiohttp
 import asyncio
 import time
 from collections import defaultdict
-from typing import Dict, Mapping, List, Tuple
-import config
-from log_utils import setup_logger
-from groq_safe import (
-    describe_error,
-    extract_error_payload,
-    is_model_decommissioned_error,
+from typing import Any, Dict, Mapping, List, Tuple
+
+from groq import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    APITimeoutError,
+    RateLimitError,
 )
+
+import config
+from groq_client import get_groq_client
+from groq_safe import safe_chat_completion
+from log_utils import setup_logger
 
 try:  # Optional import for logging fallback details
     from llm_client import get_base_url as _get_ollama_base_url
@@ -40,10 +44,6 @@ except Exception:  # pragma: no cover - optional dependency path
         return "unknown"
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-HEADERS = {"Content-Type": "application/json"}
-if GROQ_API_KEY:
-    HEADERS["Authorization"] = f"Bearer {GROQ_API_KEY}"
 
 logger = setup_logger(__name__)
 
@@ -52,15 +52,6 @@ if GROQ_API_KEY:
     logger.info("LLM backend active: Groq (model=%s)", config.get_groq_model())
 else:
     logger.info("LLM backend active: Ollama (base_url=%s)", _get_ollama_base_url())
-
-
-class GroqRequestError(RuntimeError):
-    """Raised when a Groq HTTP request fails irrecoverably."""
-
-    def __init__(self, status: int, detail: object | None = None):
-        self.status = status
-        self.detail = detail
-        super().__init__(f"Groq request failed with status {status}")
 
 
 def _normalise_header_name(name: str) -> str:
@@ -140,6 +131,27 @@ def _log_rate_limit_health(headers: Mapping[str, str] | None, status_code: int |
             )
         else:
             logger.debug(message)
+
+
+def _format_exception(err: Exception) -> str:
+    """Return a concise, human readable description of ``err``."""
+
+    if isinstance(err, APIStatusError):
+        status = getattr(err, "status_code", None)
+        if status is not None:
+            return f"{status}: {err}"
+    return str(err)
+
+
+def _extract_choice_content(response: Any) -> str:
+    """Return the first message content from a Groq chat completion."""
+
+    try:
+        choice = response.choices[0]
+        content = getattr(choice.message, "content", "")
+        return str(content or "").strip()
+    except Exception:
+        return ""
 
 
 def _sanitize_prompt(prompt: str, max_len: int = 3000) -> str:
@@ -247,98 +259,69 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
             return fallback
         return "LLM error: Groq API key missing and local fallback unavailable."
 
-    data = {
-        "model": config.get_groq_model(),
-        "messages": [
-            {"role": "system", "content": "You are a highly experienced crypto trader assistant. Always respond in JSON."},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-
-    try:
-        start = time.perf_counter()
-        response = requests.post(GROQ_API_URL, headers=HEADERS, json=data)
-        _log_rate_limit_health(getattr(response, "headers", None), getattr(response, "status_code", None))
-        latency = time.perf_counter() - start
-        model_used = data["model"]
-
-        if response.status_code != 200:
-            error_detail = extract_error_payload(response)
-            if response.status_code == 429:
-                fallback = _fallback_to_local(
-                    user_prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    reason="Groq rate limit",
-                )
-                if fallback:
-                    return fallback
-            if (
-                response.status_code in {400, 404}
-                and model_used != config.DEFAULT_GROQ_MODEL
-                and is_model_decommissioned_error(error_detail)
-            ):
-                fallback_model = config.DEFAULT_GROQ_MODEL
-                logger.warning(
-                    "Groq model %s unavailable (%s). Retrying with fallback model %s.",
-                    model_used,
-                    describe_error(error_detail),
-                    fallback_model,
-                )
-                data = {**data, "model": fallback_model}
-                start = time.perf_counter()
-                response = requests.post(GROQ_API_URL, headers=HEADERS, json=data)
-                _log_rate_limit_health(getattr(response, "headers", None), getattr(response, "status_code", None))
-                latency = time.perf_counter() - start
-                model_used = fallback_model
-                if response.status_code != 200:
-                    retry_detail = extract_error_payload(response)
-                    logger.error(
-                        "LLM request failed in %.2fs: %s, %s",
-                        latency,
-                        response.status_code,
-                        describe_error(retry_detail) or response.text,
-                    )
-                    fallback = _fallback_to_local(
-                        user_prompt,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        reason=f"Groq retry failed ({response.status_code})",
-                    )
-                    if fallback:
-                        return fallback
-                    return "LLM error: Unable to generate response."
-            else:
-                logger.error(
-                    "LLM request failed in %.2fs: %s, %s",
-                    latency,
-                    response.status_code,
-                    describe_error(error_detail) or response.text,
-                )
-                fallback = _fallback_to_local(
-                    user_prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    reason=f"Groq error {response.status_code}",
-                )
-                if fallback:
-                    return fallback
-                return "LLM error: Unable to generate response."
-
-        content = (
-            response.json()
-            .get("choices", [])[0]
-            .get("message", {})
-            .get("content", "")
-            .strip()
+    client = get_groq_client()
+    if client is None:
+        fallback = _fallback_to_local(
+            user_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reason="Groq client unavailable",
         )
-        logger.info("LLM call succeeded in %.2fs", latency)
-        return content
-    except Exception as e:
-        latency = time.perf_counter() - start if 'start' in locals() else 0.0
-        logger.error("LLM Exception after %.2fs: %s", latency, e, exc_info=True)
+        if fallback:
+            return fallback
+        return "LLM error: Groq client unavailable."
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a highly experienced crypto trader assistant. Always respond in JSON.",
+        },
+        {"role": "user", "content": user_prompt},
+    ]
+
+    start = time.perf_counter()
+    try:
+        response = safe_chat_completion(
+            client,
+            model=config.get_groq_model(),
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        latency = time.perf_counter() - start
+        logger.info(
+            "LLM call succeeded in %.2fs (model=%s)",
+            latency,
+            getattr(response, "model", config.get_groq_model()),
+        )
+        return _extract_choice_content(response)
+    except RateLimitError as err:
+        latency = time.perf_counter() - start
+        logger.warning("Groq rate limit after %.2fs: %s", latency, _format_exception(err))
+        fallback = _fallback_to_local(
+            user_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reason="Groq rate limit",
+        )
+        if fallback:
+            return fallback
+        return "LLM error: Unable to generate response."
+    except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
+        latency = time.perf_counter() - start
+        logger.error("Groq request failed in %.2fs: %s", latency, _format_exception(err))
+        fallback = _fallback_to_local(
+            user_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reason="Groq error",
+        )
+        if fallback:
+            return fallback
+        return "LLM error: Unable to generate response."
+    except Exception as err:
+        latency = time.perf_counter() - start
+        logger.error("LLM Exception after %.2fs: %s", latency, err, exc_info=True)
         fallback = _fallback_to_local(
             user_prompt,
             temperature=temperature,
@@ -372,115 +355,70 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
             return fallback
         return "LLM error: Groq API key missing and local fallback unavailable."
 
-    data = {
-        "model": config.get_groq_model(),
-        "messages": [
-            {"role": "system", "content": "You are a highly experienced crypto trader assistant. Always respond in JSON."},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
+    client = get_groq_client()
+    if client is None:
+        fallback = await _async_fallback_to_local(
+            user_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reason="Groq client unavailable",
+        )
+        if fallback:
+            return fallback
+        return "LLM error: Groq client unavailable."
 
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a highly experienced crypto trader assistant. Always respond in JSON.",
+        },
+        {"role": "user", "content": user_prompt},
+    ]
+
+    start = time.perf_counter()
     try:
-        start = time.perf_counter()
-        async with aiohttp.ClientSession() as session:
-            async with session.post(GROQ_API_URL, headers=HEADERS, json=data) as resp:
-                latency = time.perf_counter() - start
-                _log_rate_limit_health(resp.headers, resp.status)
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    try:
-                        error_detail = json.loads(error_text)
-                    except Exception:
-                        error_detail = error_text
-
-                    if resp.status == 429:
-                        fallback = await _async_fallback_to_local(
-                            user_prompt,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            reason="Groq rate limit",
-                        )
-                        if fallback:
-                            return fallback
-
-                    if (
-                        resp.status in {400, 404}
-                        and data["model"] != config.DEFAULT_GROQ_MODEL
-                        and is_model_decommissioned_error(error_detail)
-                    ):
-                        fallback_model = config.DEFAULT_GROQ_MODEL
-                        logger.warning(
-                            "Groq model %s unavailable (%s). Retrying with fallback model %s.",
-                            data["model"],
-                            describe_error(error_detail),
-                            fallback_model,
-                        )
-                        retry_payload = {**data, "model": fallback_model}
-                        start = time.perf_counter()
-                        async with session.post(
-                            GROQ_API_URL, headers=HEADERS, json=retry_payload
-                        ) as retry_resp:
-                            latency = time.perf_counter() - start
-                            _log_rate_limit_health(retry_resp.headers, retry_resp.status)
-                            if retry_resp.status == 200:
-                                result = await retry_resp.json()
-                                logger.info("Async LLM call succeeded in %.2fs", latency)
-                                return (
-                                    result.get("choices", [])[0]
-                                    .get("message", {})
-                                    .get("content", "")
-                                    .strip()
-                                )
-                            retry_text = await retry_resp.text()
-                            try:
-                                retry_detail = json.loads(retry_text)
-                            except Exception:
-                                retry_detail = retry_text
-                            logger.error(
-                                "LLM request failed in %.2fs: %s, %s",
-                                latency,
-                                retry_resp.status,
-                                describe_error(retry_detail) or retry_text,
-                            )
-                            fallback = await _async_fallback_to_local(
-                                user_prompt,
-                                temperature=temperature,
-                                max_tokens=max_tokens,
-                                reason=f"Groq retry failed ({retry_resp.status})",
-                            )
-                            if fallback:
-                                return fallback
-                            return "LLM error: Unable to generate response."
-
-                    logger.error(
-                        "LLM request failed in %.2fs: %s, %s",
-                        latency,
-                        resp.status,
-                        describe_error(error_detail) or error_text,
-                    )
-                    fallback = await _async_fallback_to_local(
-                        user_prompt,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        reason=f"Groq error {resp.status}",
-                    )
-                    if fallback:
-                        return fallback
-                    return "LLM error: Unable to generate response."
-
-                result = await resp.json()
-                logger.info("Async LLM call succeeded in %.2fs", latency)
-                return (
-                    result.get("choices", [])[0]
-                    .get("message", {})
-                    .get("content", "")
-                    .strip()
-                )
-    except Exception as e:
-        latency = time.perf_counter() - start if 'start' in locals() else 0.0
-        logger.error("Async LLM Exception after %.2fs: %s", latency, e, exc_info=True)
+        response = await asyncio.to_thread(
+            safe_chat_completion,
+            client,
+            model=config.get_groq_model(),
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        latency = time.perf_counter() - start
+        logger.info(
+            "Async LLM call succeeded in %.2fs (model=%s)",
+            latency,
+            getattr(response, "model", config.get_groq_model()),
+        )
+        return _extract_choice_content(response)
+    except RateLimitError as err:
+        latency = time.perf_counter() - start
+        logger.warning("Async Groq rate limit after %.2fs: %s", latency, _format_exception(err))
+        fallback = await _async_fallback_to_local(
+            user_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reason="Groq rate limit",
+        )
+        if fallback:
+            return fallback
+        return "LLM error: Unable to generate response."
+    except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
+        latency = time.perf_counter() - start
+        logger.error("Async Groq request failed in %.2fs: %s", latency, _format_exception(err))
+        fallback = await _async_fallback_to_local(
+            user_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reason="Groq error",
+        )
+        if fallback:
+            return fallback
+        return "LLM error: Unable to generate response."
+    except Exception as err:
+        latency = time.perf_counter() - start
+        logger.error("Async LLM Exception after %.2fs: %s", latency, err, exc_info=True)
         fallback = await _async_fallback_to_local(
             user_prompt,
             temperature=temperature,
@@ -506,67 +444,111 @@ async def async_batch_llm_judgment(
     items = [(symbol, _sanitize_prompt(prompt)) for symbol, prompt in prompts.items()]
     if not GROQ_API_KEY:
         logger.warning("Groq API key missing. Using local LLM for %d prompts", len(items))
-        return await _async_batch_local(items, temperature=temperature, max_tokens=max_tokens, reason="missing Groq API key")
+        return await _async_batch_local(
+            items,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reason="missing Groq API key",
+        )
 
-    model = config.get_groq_model()
+    client = get_groq_client()
+    if client is None:
+        logger.warning("Groq client unavailable. Falling back to local batch handler")
+        return await _async_batch_local(
+            items,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reason="Groq client unavailable",
+        )
+
     results: Dict[str, str] = {}
-    async with aiohttp.ClientSession() as session:
-        for idx in range(0, len(items), batch_size):
-            chunk = items[idx : idx + batch_size]
-            batch_prompt = _build_batch_prompt(chunk)
-            payload = {
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an experienced crypto trading advisor. For each section labelled by a symbol, "
-                            "return a JSON object with keys decision (Yes/No), confidence (0-10 float), reason, and thesis."
-                            " Respond with a single JSON object mapping each symbol to its analysis."
-                        ),
-                    },
-                    {"role": "user", "content": batch_prompt},
-                ],
-                "temperature": temperature,
-                "max_tokens": max_tokens * max(1, len(chunk)),
-            }
-
-            try:
-                response = await _execute_async_request(session, payload)
-            except GroqRequestError as exc:
-                logger.warning(
-                    "Groq batch request failed with status %s; using local fallback",
-                    exc.status,
-                )
-                fallback = await _async_batch_local(
-                    chunk,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    reason=f"Groq error {exc.status}",
-                )
-                results.update(fallback)
-                continue
-            content = (
-                response.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                .strip()
+    model = config.get_groq_model()
+    for idx in range(0, len(items), batch_size):
+        chunk = items[idx : idx + batch_size]
+        batch_prompt = _build_batch_prompt(chunk)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are an experienced crypto trading advisor. For each section labelled by a symbol, "
+                    "return a JSON object with keys decision (Yes/No), confidence (0-10 float), reason, and thesis."
+                    " Respond with a single JSON object mapping each symbol to its analysis."
+                ),
+            },
+            {"role": "user", "content": batch_prompt},
+        ]
+        try:
+            start = time.perf_counter()
+            response = await asyncio.to_thread(
+                safe_chat_completion,
+                client,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens * max(1, len(chunk)),
             )
-            try:
-                parsed = json.loads(content)
-            except Exception:
-                parsed = {}
-            for symbol, _ in chunk:
-                entry = parsed.get(symbol)
-                if isinstance(entry, str):
-                    results[symbol] = entry
-                elif isinstance(entry, Mapping):
-                    try:
-                        results[symbol] = json.dumps(entry)
-                    except Exception:
-                        results[symbol] = content
-                else:
+            latency = time.perf_counter() - start
+            logger.info(
+                "Async batch LLM call succeeded in %.2fs (model=%s)",
+                latency,
+                getattr(response, "model", model),
+            )
+            content = _extract_choice_content(response)
+        except RateLimitError as err:
+            latency = time.perf_counter() - start
+            logger.warning(
+                "Groq batch rate limit after %.2fs: %s", latency, _format_exception(err)
+            )
+            fallback = await _async_batch_local(
+                chunk,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                reason="Groq rate limit",
+            )
+            results.update(fallback)
+            continue
+        except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
+            latency = time.perf_counter() - start
+            logger.error(
+                "Groq batch request failed in %.2fs: %s",
+                latency,
+                _format_exception(err),
+            )
+            fallback = await _async_batch_local(
+                chunk,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                reason="Groq error",
+            )
+            results.update(fallback)
+            continue
+        except Exception as err:
+            latency = time.perf_counter() - start
+            logger.error("Groq batch exception after %.2fs: %s", latency, err, exc_info=True)
+            fallback = await _async_batch_local(
+                chunk,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                reason="Groq exception",
+            )
+            results.update(fallback)
+            continue
+
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            parsed = {}
+        for symbol, _ in chunk:
+            entry = parsed.get(symbol)
+            if isinstance(entry, str):
+                results[symbol] = entry
+            elif isinstance(entry, Mapping):
+                try:
+                    results[symbol] = json.dumps(entry)
+                except Exception:
                     results[symbol] = content
+            else:
+                results[symbol] = content
     return results
 
 
@@ -575,46 +557,3 @@ def _build_batch_prompt(chunk: List[Tuple[str, str]]) -> str:
     for symbol, prompt in chunk:
         sections.append(f"### {symbol}\n{prompt}")
     return "\n\n".join(sections)
-
-
-async def _execute_async_request(session: aiohttp.ClientSession, payload: dict) -> dict:
-    model_used = payload["model"]
-    start = time.perf_counter()
-    async with session.post(GROQ_API_URL, headers=HEADERS, json=payload) as resp:
-        latency = time.perf_counter() - start
-        if resp.status == 200:
-            data = await resp.json()
-            logger.info("Async batch LLM call succeeded in %.2fs (model=%s)", latency, model_used)
-            return data
-        error_detail = await _parse_async_error(resp)
-        if resp.status == 429:
-            raise GroqRequestError(resp.status, error_detail)
-        if (
-            resp.status in {400, 404}
-            and payload["model"] != config.DEFAULT_GROQ_MODEL
-            and is_model_decommissioned_error(error_detail)
-        ):
-            fallback_model = config.DEFAULT_GROQ_MODEL
-            logger.warning(
-                "Groq model %s unavailable (%s). Retrying batch with fallback model %s.",
-                payload["model"],
-                describe_error(error_detail),
-                fallback_model,
-            )
-            retry_payload = {**payload, "model": fallback_model}
-            return await _execute_async_request(session, retry_payload)
-        logger.error(
-            "Batch LLM request failed in %.2fs: %s, %s",
-            latency,
-            resp.status,
-            describe_error(error_detail) or error_detail,
-        )
-        raise GroqRequestError(resp.status, error_detail)
-
-
-async def _parse_async_error(resp: aiohttp.ClientResponse) -> object:
-    text = await resp.text()
-    try:
-        return json.loads(text)
-    except Exception:
-        return text
