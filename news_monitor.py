@@ -17,6 +17,7 @@ import asyncio
 import json
 import threading
 import time
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -62,7 +63,7 @@ class LLMNewsMonitor:
     def __init__(
         self,
         *,
-        interval: float = 120.0,
+        interval: float = 3600.0,
         alert_threshold: float = 0.6,
         halt_threshold: float = 0.85,
         stale_after: float | None = None,
@@ -151,12 +152,19 @@ class LLMNewsMonitor:
                 await self._evaluate_cycle()
             except Exception as exc:  # pragma: no cover - defensive logging
                 LOGGER.error("News monitor iteration failed: %s", exc, exc_info=True)
+            sleep_duration = self._compute_sleep_duration()
             try:
-                await asyncio.wait_for(asyncio.sleep(self.interval), timeout=self.interval)
+                await asyncio.wait_for(asyncio.sleep(sleep_duration), timeout=sleep_duration)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:  # pragma: no cover - not expected in tests
                 break
+
+    def _compute_sleep_duration(self) -> float:
+        """Return the next sleep duration with a small random jitter."""
+
+        jitter = random.uniform(-0.05 * self.interval, 0.05 * self.interval)
+        return max(0.0, self.interval + jitter)
 
     async def _evaluate_cycle(self) -> Mapping[str, Any] | None:
         try:
