@@ -30,6 +30,10 @@ from trade_utils import summarise_technical_score
 
 LLM_ERROR_CONFIDENCE_FLOOR = 6.5
 LLM_ERROR_SCORE_BUFFER = 0.5
+# Require exceptionally strong quantitative conviction to auto-approve when the
+# LLM advisor is unavailable.  This helps prevent borderline trades from being
+# executed without qualitative oversight.
+LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE = 8.0
 
 logger = setup_logger(__name__)
 
@@ -583,9 +587,10 @@ def finalize_trade_decision(
     parse_failed_initially = parsed_decision is None
 
     if parse_failed_initially and ("error" in resp_lc or not response_text.strip()):
-        confidence_ok = final_confidence >= LLM_ERROR_CONFIDENCE_FLOOR
-        score_ok = prepared.score >= prepared.score_threshold + LLM_ERROR_SCORE_BUFFER
-        strong_quant = confidence_ok and score_ok
+        score_requirement = prepared.score_threshold + LLM_ERROR_SCORE_BUFFER
+        score_ok = prepared.score >= score_requirement
+        high_confidence = final_confidence >= LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE
+        strong_quant = high_confidence and score_ok
 
         base_payload = {
             "confidence": final_confidence,
@@ -596,9 +601,24 @@ def finalize_trade_decision(
             "llm_error": True,
             "technical_indicator_score": technical_score,
             "pattern_memory": pattern_memory_context,
+            "fallback_auto_approval_threshold": LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE,
+            "fallback_score_requirement": score_requirement,
         }
 
         if strong_quant:
+            logger.warning(
+                (
+                    "LLM unavailable for %s %s trade; auto-approving due to "
+                    "high quantitative conviction (confidence=%.2f/%.2f, score=%.2f "
+                    ">= %.2f)"
+                ),
+                prepared.symbol,
+                prepared.direction,
+                final_confidence,
+                LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE,
+                prepared.score,
+                score_requirement,
+            )
             narrative = generate_trade_narrative(
                 symbol=prepared.symbol,
                 direction=prepared.direction,
@@ -620,10 +640,26 @@ def finalize_trade_decision(
                 "narrative": narrative,
             }
 
+        logger.warning(
+            (
+                "LLM unavailable for %s %s trade; blocking due to insufficient "
+                "quantitative conviction (confidence=%.2f/%.2f, score=%.2f < %.2f)"
+            ),
+            prepared.symbol,
+            prepared.direction,
+            final_confidence,
+            LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE,
+            prepared.score,
+            score_requirement,
+        )
+
         return {
             **base_payload,
             "decision": False,
-            "reason": "LLM unavailable and quantitative conviction insufficient",
+            "reason": (
+                "LLM unavailable and quantitative conviction insufficient "
+                f"(confidence {final_confidence:.2f} < {LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE:.2f})"
+            ),
             "narrative": "",
         }
 
