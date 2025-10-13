@@ -108,6 +108,12 @@ Trader (agent.py) --> Trade Storage (JSON/DB) <-- Dashboard (dashboard.py)
                                 --> Backtester (backtest.py)
 ```
 
+## Research roadmap
+
+Exploratory notes on adapting reinforcement learning from human feedback (RLHF) to align the LLM with profitable trading outcom
+es are captured in [docs/rlhf_trading.md](docs/rlhf_trading.md). The document outlines data requirements, reward modeling, and
+deployment considerations for using realised trade performance as optimisation signals.
+
 ## Risk veto guardrails
 
 Deterministic pre-trade checks live in `risk_veto.evaluate_risk_veto`. They
