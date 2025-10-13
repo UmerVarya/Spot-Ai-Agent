@@ -97,3 +97,48 @@ def test_monitor_skips_alert_when_safe():
     state = asyncio.run(monitor.evaluate_now())
     assert state["alert_triggered"] is False
     assert alerts == []
+
+
+def test_monitor_resets_fingerprint_after_safe_state():
+    events = [
+        {"event": "Exchange Hack", "datetime": _iso_now(), "impact": "high"},
+    ]
+
+    responses = [
+        {"safe": False, "sensitivity": 0.92, "reason": "Major exchange hack"},
+        {"safe": True, "sensitivity": 0.05, "reason": "Recovery in progress"},
+        {"safe": False, "sensitivity": 0.95, "reason": "Major exchange hack"},
+    ]
+
+    async def fetcher():
+        return events
+
+    async def analyzer(received):
+        assert responses, "Analyzer called more times than expected"
+        return responses.pop(0)
+
+    alerts: list = []
+
+    monitor = LLMNewsMonitor(
+        interval=30,
+        alert_threshold=0.5,
+        halt_threshold=0.8,
+        fetcher=fetcher,
+        analyzer=analyzer,
+        alert_callback=lambda alert: alerts.append(alert),
+    )
+
+    # Initial unsafe assessment should trigger the first alert and cache its fingerprint.
+    state = asyncio.run(monitor.evaluate_now())
+    assert state["alert_triggered"] is True
+    assert len(alerts) == 1
+
+    # A subsequent safe assessment should clear the cached fingerprint.
+    state = asyncio.run(monitor.evaluate_now())
+    assert state["alert_triggered"] is False
+    assert len(alerts) == 1
+
+    # When conditions deteriorate again with the same reason, a new alert should fire.
+    state = asyncio.run(monitor.evaluate_now())
+    assert state["alert_triggered"] is True
+    assert len(alerts) == 2
