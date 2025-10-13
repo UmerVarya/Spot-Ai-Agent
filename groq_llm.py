@@ -128,6 +128,49 @@ def _parse_numeric(value: str | None) -> float | None:
         return None
 
 
+def _extract_response_like(obj: Any) -> Any:
+    """Best-effort extraction of an HTTP-like response object."""
+
+    if obj is None:
+        return None
+    for attr in ("response", "_response"):
+        candidate = getattr(obj, attr, None)
+        if candidate is not None:
+            return candidate
+    return obj
+
+
+def _extract_rate_limit_headers(obj: Any) -> Mapping[str, str] | None:
+    """Return the response headers from ``obj`` if present."""
+
+    response = _extract_response_like(obj)
+    if response is None:
+        return None
+    headers = getattr(response, "headers", None)
+    if headers is None and hasattr(response, "raw"):
+        headers = getattr(response.raw, "headers", None)
+    if isinstance(headers, Mapping):
+        return dict(headers)
+    return None
+
+
+def _extract_status_code(obj: Any) -> int | None:
+    """Attempt to read an HTTP status code from ``obj``."""
+
+    response = _extract_response_like(obj)
+    if response is None:
+        return None
+    for attr in ("status_code", "status", "statusCode"):
+        value = getattr(response, attr, None)
+        if isinstance(value, int):
+            return value
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _log_rate_limit_health(headers: Mapping[str, str] | None, status_code: int | None) -> None:
     """Log actionable information about Groq rate limit usage.
 
@@ -433,6 +476,10 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
             max_tokens=max_tokens,
         )
         latency = time.perf_counter() - start
+        _log_rate_limit_health(
+            _extract_rate_limit_headers(response),
+            _extract_status_code(response),
+        )
         logger.info(
             "LLM call succeeded in %.2fs (model=%s)",
             latency,
@@ -442,6 +489,10 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
     except RateLimitError as err:
         latency = time.perf_counter() - start
         logger.warning("Groq rate limit after %.2fs: %s", latency, _format_exception(err))
+        _log_rate_limit_health(
+            _extract_rate_limit_headers(err),
+            _extract_status_code(err),
+        )
         http_response = _http_completion_with_fallback(
             messages,
             temperature=temperature,
@@ -461,6 +512,10 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
     except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
         latency = time.perf_counter() - start
         logger.error("Groq request failed in %.2fs: %s", latency, _format_exception(err))
+        _log_rate_limit_health(
+            _extract_rate_limit_headers(err),
+            _extract_status_code(err),
+        )
         http_response = _http_completion_with_fallback(
             messages,
             temperature=temperature,
@@ -480,6 +535,10 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
     except Exception as err:
         latency = time.perf_counter() - start
         logger.error("LLM Exception after %.2fs: %s", latency, err, exc_info=True)
+        _log_rate_limit_health(
+            _extract_rate_limit_headers(err),
+            _extract_status_code(err),
+        )
         http_response = _http_completion_with_fallback(
             messages,
             temperature=temperature,
@@ -549,6 +608,10 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
             max_tokens=max_tokens,
         )
         latency = time.perf_counter() - start
+        _log_rate_limit_health(
+            _extract_rate_limit_headers(response),
+            _extract_status_code(response),
+        )
         logger.info(
             "Async LLM call succeeded in %.2fs (model=%s)",
             latency,
@@ -558,6 +621,10 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
     except RateLimitError as err:
         latency = time.perf_counter() - start
         logger.warning("Async Groq rate limit after %.2fs: %s", latency, _format_exception(err))
+        _log_rate_limit_health(
+            _extract_rate_limit_headers(err),
+            _extract_status_code(err),
+        )
         fallback = await _async_fallback_to_local(
             user_prompt,
             temperature=temperature,
@@ -570,6 +637,10 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
     except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
         latency = time.perf_counter() - start
         logger.error("Async Groq request failed in %.2fs: %s", latency, _format_exception(err))
+        _log_rate_limit_health(
+            _extract_rate_limit_headers(err),
+            _extract_status_code(err),
+        )
         fallback = await _async_fallback_to_local(
             user_prompt,
             temperature=temperature,
@@ -582,6 +653,10 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
     except Exception as err:
         latency = time.perf_counter() - start
         logger.error("Async LLM Exception after %.2fs: %s", latency, err, exc_info=True)
+        _log_rate_limit_health(
+            _extract_rate_limit_headers(err),
+            _extract_status_code(err),
+        )
         fallback = await _async_fallback_to_local(
             user_prompt,
             temperature=temperature,
@@ -644,6 +719,10 @@ async def async_batch_llm_judgment(
                 max_tokens=max_tokens * max(1, len(chunk)),
             )
             latency = time.perf_counter() - start
+            _log_rate_limit_health(
+                _extract_rate_limit_headers(response),
+                _extract_status_code(response),
+            )
             logger.info(
                 "Async batch LLM call succeeded in %.2fs (model=%s)",
                 latency,
@@ -654,6 +733,10 @@ async def async_batch_llm_judgment(
             latency = time.perf_counter() - start
             logger.warning(
                 "Groq batch rate limit after %.2fs: %s", latency, _format_exception(err)
+            )
+            _log_rate_limit_health(
+                _extract_rate_limit_headers(err),
+                _extract_status_code(err),
             )
             fallback = await _async_batch_local(
                 chunk,
@@ -670,6 +753,10 @@ async def async_batch_llm_judgment(
                 latency,
                 _format_exception(err),
             )
+            _log_rate_limit_health(
+                _extract_rate_limit_headers(err),
+                _extract_status_code(err),
+            )
             fallback = await _async_batch_local(
                 chunk,
                 temperature=temperature,
@@ -681,6 +768,10 @@ async def async_batch_llm_judgment(
         except Exception as err:
             latency = time.perf_counter() - start
             logger.error("Groq batch exception after %.2fs: %s", latency, err, exc_info=True)
+            _log_rate_limit_health(
+                _extract_rate_limit_headers(err),
+                _extract_status_code(err),
+            )
             fallback = await _async_batch_local(
                 chunk,
                 temperature=temperature,

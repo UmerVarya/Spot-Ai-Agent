@@ -45,3 +45,24 @@ def test_log_rate_limit_health_warns_when_almost_empty():
 
     assert any("Groq rate limit for requests-1m" in record.getMessage() for record in records)
     assert any("reducing request concurrency" in record.getMessage() for record in records)
+
+
+def test_extractors_handle_response_wrappers():
+    importlib.reload(groq_llm)
+
+    class DummyResponse:
+        def __init__(self):
+            self.headers = {"X-RateLimit-Remaining-Requests-1m": "1"}
+            self.status_code = 429
+
+    class Wrapper:
+        def __init__(self):
+            self.response = DummyResponse()
+
+    wrapper = Wrapper()
+
+    headers = groq_llm._extract_rate_limit_headers(wrapper)
+    status = groq_llm._extract_status_code(wrapper)
+
+    assert headers == {"X-RateLimit-Remaining-Requests-1m": "1"}
+    assert status == 429
