@@ -349,3 +349,9 @@ async def fetch_news(symbol: str) -> List[Dict[str, str]]:
     except Exception as e:
         logger.warning("Failed to fetch news for %s: %s", symbol, e, exc_info=True)
         return []
+
+
+def fetch_news_sync(symbol: str) -> List[Dict[str, str]]:
+    """Synchronous wrapper around :func:`fetch_news`."""
+
+    return _run_coroutine(lambda: fetch_news(symbol))
