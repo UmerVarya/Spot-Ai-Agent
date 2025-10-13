@@ -22,6 +22,7 @@ import time
 import os
 import sys
 import asyncio
+import random
 from datetime import datetime
 from typing import Optional
 
@@ -116,7 +117,7 @@ SIGNAL_REFRESH_INTERVAL = float(os.getenv("SIGNAL_REFRESH_INTERVAL", "2.0"))
 SIGNAL_STALE_AFTER = float(os.getenv("SIGNAL_STALE_AFTER", str(SIGNAL_REFRESH_INTERVAL * 3)))
 # Interval between news fetches (in seconds)
 NEWS_INTERVAL = 3600
-NEWS_MONITOR_INTERVAL = float(os.getenv("NEWS_MONITOR_INTERVAL", "120"))
+NEWS_MONITOR_INTERVAL = float(os.getenv("NEWS_MONITOR_INTERVAL", "3600"))
 NEWS_ALERT_THRESHOLD = float(os.getenv("NEWS_ALERT_THRESHOLD", "0.6"))
 NEWS_HALT_THRESHOLD = float(os.getenv("NEWS_HALT_THRESHOLD", "0.9"))
 NEWS_MONITOR_STATE_PATH = os.getenv("NEWS_MONITOR_STATE_PATH", "news_monitor_state.json")
@@ -254,7 +255,8 @@ def auto_run_news() -> None:
     while True:
         logger.info("Running scheduled news fetcher...")
         run_news_fetcher()
-        time.sleep(NEWS_INTERVAL)
+        jitter = random.uniform(-0.05 * NEWS_INTERVAL, 0.05 * NEWS_INTERVAL)
+        time.sleep(max(0.0, NEWS_INTERVAL + jitter))
 
 
 def run_streamlit() -> None:
