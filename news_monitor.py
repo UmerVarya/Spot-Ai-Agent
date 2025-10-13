@@ -91,6 +91,7 @@ class LLMNewsMonitor:
         self._last_alert_fingerprint: str | None = None
         self._last_events_fingerprint: str | None = None
         self._last_assessment: Mapping[str, Any] | None = None
+        self._last_analysis_failed = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -184,6 +185,7 @@ class LLMNewsMonitor:
             and events_fingerprint is not None
             and events_fingerprint == self._last_events_fingerprint
             and self._last_assessment is not None
+            and not self._last_analysis_failed
         ):
             assessment = dict(self._last_assessment)
 
@@ -191,12 +193,15 @@ class LLMNewsMonitor:
         if assessment is None:
             if not events:
                 assessment = {"safe": True, "sensitivity": 0.0, "reason": "No events fetched"}
+                self._last_analysis_failed = False
             else:
                 try:
                     assessment = await self._analyzer(events)
+                    self._last_analysis_failed = False
                 except Exception as exc:
                     LOGGER.warning("News monitor LLM analysis failed: %s", exc, exc_info=True)
                     assessment = {"safe": True, "sensitivity": 0.0, "reason": "LLM unavailable"}
+                    self._last_analysis_failed = True
             self._last_assessment = dict(assessment)
             self._last_events_fingerprint = events_fingerprint
 

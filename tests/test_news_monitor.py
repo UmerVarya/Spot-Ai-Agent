@@ -100,8 +100,10 @@ def test_monitor_skips_alert_when_safe():
 
 
 def test_monitor_resets_fingerprint_after_safe_state():
-    events = [
-        {"event": "Exchange Hack", "datetime": _iso_now(), "impact": "high"},
+    event_sequences = [
+        [{"event": "Exchange Hack", "datetime": _iso_now(), "impact": "high"}],
+        [{"event": "Exchange Hack", "datetime": _iso_now(), "impact": "medium"}],
+        [{"event": "Exchange Hack", "datetime": _iso_now(), "impact": "high"}],
     ]
 
     responses = [
@@ -110,8 +112,14 @@ def test_monitor_resets_fingerprint_after_safe_state():
         {"safe": False, "sensitivity": 0.95, "reason": "Major exchange hack"},
     ]
 
+    call_index = {"value": 0}
+
     async def fetcher():
-        return events
+        idx = call_index["value"]
+        call_index["value"] += 1
+        if idx < len(event_sequences):
+            return event_sequences[idx]
+        return event_sequences[-1]
 
     async def analyzer(received):
         assert responses, "Analyzer called more times than expected"
@@ -142,3 +150,34 @@ def test_monitor_resets_fingerprint_after_safe_state():
     state = asyncio.run(monitor.evaluate_now())
     assert state["alert_triggered"] is True
     assert len(alerts) == 2
+
+
+def test_monitor_does_not_cache_fallback_after_failure():
+    event = {"event": "Regulatory Inquiry", "datetime": _iso_now(), "impact": "medium"}
+
+    async def fetcher():
+        return [event]
+
+    call_count = {"value": 0}
+
+    async def analyzer(received):
+        call_count["value"] += 1
+        if call_count["value"] == 1:
+            raise RuntimeError("temporary outage")
+        return {"safe": False, "sensitivity": 0.8, "reason": "Adverse regulatory action"}
+
+    monitor = LLMNewsMonitor(
+        interval=30,
+        alert_threshold=0.5,
+        halt_threshold=0.8,
+        fetcher=fetcher,
+        analyzer=analyzer,
+    )
+
+    state = asyncio.run(monitor.evaluate_now())
+    assert state["reason"] == "LLM unavailable"
+    assert call_count["value"] == 1
+
+    state = asyncio.run(monitor.evaluate_now())
+    assert state["reason"] == "Adverse regulatory action"
+    assert call_count["value"] == 2
