@@ -88,6 +88,8 @@ class LLMNewsMonitor:
         self._lock = threading.Lock()
         self._latest_state: MutableMapping[str, Any] = {}
         self._last_alert_fingerprint: str | None = None
+        self._last_events_fingerprint: str | None = None
+        self._last_assessment: Mapping[str, Any] | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -166,15 +168,29 @@ class LLMNewsMonitor:
             LOGGER.warning("News monitor fetch failed: %s", exc, exc_info=True)
             events = []
 
+        events_fingerprint = self._events_fingerprint(events)
+
+        assessment: Mapping[str, Any] | None = None
+        if (
+            events
+            and events_fingerprint is not None
+            and events_fingerprint == self._last_events_fingerprint
+            and self._last_assessment is not None
+        ):
+            assessment = dict(self._last_assessment)
+
         assessment: Mapping[str, Any]
-        if not events:
-            assessment = {"safe": True, "sensitivity": 0.0, "reason": "No events fetched"}
-        else:
-            try:
-                assessment = await self._analyzer(events)
-            except Exception as exc:
-                LOGGER.warning("News monitor LLM analysis failed: %s", exc, exc_info=True)
-                assessment = {"safe": True, "sensitivity": 0.0, "reason": "LLM unavailable"}
+        if assessment is None:
+            if not events:
+                assessment = {"safe": True, "sensitivity": 0.0, "reason": "No events fetched"}
+            else:
+                try:
+                    assessment = await self._analyzer(events)
+                except Exception as exc:
+                    LOGGER.warning("News monitor LLM analysis failed: %s", exc, exc_info=True)
+                    assessment = {"safe": True, "sensitivity": 0.0, "reason": "LLM unavailable"}
+            self._last_assessment = dict(assessment)
+            self._last_events_fingerprint = events_fingerprint
 
         state = self._compose_state(assessment, events)
         self._persist_state(state)
@@ -273,6 +289,21 @@ class LLMNewsMonitor:
             },
             sort_keys=True,
         )
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+    def _events_fingerprint(self, events: Iterable[Mapping[str, Any]]) -> str | None:
+        if not events:
+            return hashlib.sha1(b"[]").hexdigest()
+        try:
+            normalized = []
+            for event in events:
+                normalized.append(dict(event))
+            payload = json.dumps(normalized, sort_keys=True)
+        except (TypeError, ValueError):
+            try:
+                payload = repr(list(events))
+            except Exception:
+                return None
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
     def _is_stale(self, last_checked: Any) -> bool:
