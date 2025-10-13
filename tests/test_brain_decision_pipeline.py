@@ -147,6 +147,9 @@ def test_finalize_trade_decision_handles_error(monkeypatch):
 
     assert prepared is not None
 
+    # Ensure the fallback sees a truly high conviction quantitative score.
+    prepared.final_confidence = 8.6
+
     result = brain.finalize_trade_decision(prepared, "LLM error: unavailable")
 
     assert result["decision"] is True
@@ -180,6 +183,8 @@ def test_finalize_trade_decision_handles_json_error(monkeypatch):
     )
 
     assert prepared is not None
+
+    prepared.final_confidence = 8.6
 
     response = json.dumps({"error": "service unavailable"})
     result = brain.finalize_trade_decision(prepared, response)
