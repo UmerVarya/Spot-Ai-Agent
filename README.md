@@ -108,6 +108,14 @@ Trader (agent.py) --> Trade Storage (JSON/DB) <-- Dashboard (dashboard.py)
                                 --> Backtester (backtest.py)
 ```
 
+## Risk veto guardrails
+
+Deterministic pre-trade checks live in `risk_veto.evaluate_risk_veto`. They
+always emit a baseline `enter=True` result and then flip the flag to `False`
+when hard conflicts are detected. This happens even if the local LLM layer is
+disabled via `ENABLE_LOCAL_LLM=0`, ensuring imminent news or BTC trend
+conflicts cannot slip through silently when the model fallback is offline.
+
 ## Testing
 
 Unit tests use `pytest`:

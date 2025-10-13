@@ -197,5 +197,7 @@ def evaluate_risk_veto(payload: Mapping[str, Any]) -> dict[str, Any]:
         result.reasons.append("volatility unknown")
 
     if result.conflicts:
+        if "deterministic conflicts present - veto" not in result.reasons:
+            result.reasons.append("deterministic conflicts present - veto")
         result.enter = False
     return result.to_json()
