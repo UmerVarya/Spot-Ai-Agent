@@ -236,6 +236,9 @@ class LLMNewsMonitor:
         events: Iterable[Mapping[str, Any]],
     ) -> None:
         if not state.get("alert_triggered"):
+            # When conditions are normal we clear the fingerprint cache so that
+            # future alerts with the same reason/severity are not suppressed.
+            self._last_alert_fingerprint = None
             return
         fingerprint = self._fingerprint(state)
         if fingerprint == self._last_alert_fingerprint:
