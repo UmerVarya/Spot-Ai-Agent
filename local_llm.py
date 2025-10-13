@@ -116,6 +116,18 @@ def generate_local_narrative(trade_data: Mapping[str, Any]) -> str | None:
         return None
 
 
+def generate_daily_recap(prompt: str) -> str | None:
+    """Return a local-LLM recap for the provided daily summary prompt."""
+
+    if not is_enabled():
+        return None
+    try:
+        return generate(prompt, temperature=0.4, num_ctx=_DEFAULT_CTX)
+    except Exception as exc:
+        logger.debug("Local daily recap generation failed: %s", exc)
+        return None
+
+
 def build_risk_check_prompt(payload: Mapping[str, Any]) -> str:
     """Format the guardrail prompt instructing the model to return JSON."""
 

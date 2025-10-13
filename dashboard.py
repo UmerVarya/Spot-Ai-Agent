@@ -33,6 +33,7 @@ from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
 from backtest import compute_buy_and_hold_pnl, generate_trades_from_ohlcv
 from ml_model import train_model
 import requests
+from daily_summary import generate_daily_summary
 
 BINANCE_FEE_RATE = 0.00075
 
@@ -1454,8 +1455,20 @@ def render_live_tab() -> None:
     else:
         st.info("No active trades found.")
     # Load trade history and compute summary statistics
-    st.subheader("📊 Historical Performance – Completed Trades")
     hist = load_trade_history_df()
+    st.subheader("🗒️ Daily LLM Recap")
+    default_recap_day = datetime.now(timezone.utc).date()
+    recap_day = st.date_input(
+        "Select trading day for recap",
+        value=default_recap_day,
+        key="daily_recap_day",
+    )
+    recap_text = generate_daily_summary(recap_day, history=hist)
+    if recap_text:
+        st.markdown(recap_text)
+    else:
+        st.info("No summary available for the selected day.")
+    st.subheader("📊 Historical Performance – Completed Trades")
     fallback_sources = sum(1 for p in LEGACY if p)
     sizing_note = (
         "Position sizes are shown as USDT notionals."
