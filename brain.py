@@ -6,10 +6,10 @@ for deciding whether to open a trade.  It supports parsing JSON responses
 from a large language model (LLM) advisor and gracefully falls back to
 reasonable defaults when the advisor is unavailable or returns an error.
 
-When the LLM returns an error (for example due to missing API keys),
-the function automatically approves the trade based on quantitative
-metrics alone.  This ensures that paper trading mode continues to
-function even without LLM access.
+When the LLM is unreachable we now require quantitative signals to clear
+stricter thresholds instead of blindly auto-approving trades.  This keeps the
+system resilient during outages while still prioritising capital preservation
+when qualitative oversight is missing.
 """
 
 from __future__ import annotations
@@ -24,6 +24,10 @@ import logging
 import math
 
 from trade_utils import summarise_technical_score
+
+
+LLM_ERROR_CONFIDENCE_FLOOR = 6.5
+LLM_ERROR_SCORE_BUFFER = 0.5
 
 logger = setup_logger(__name__)
 
@@ -133,6 +137,7 @@ class PreparedTradeDecision:
     pattern_memory_context: Dict[str, Any]
     technical_score: float
     final_confidence: float
+    score_threshold: float
     advisor_prompt: str
 
 
@@ -547,6 +552,7 @@ def prepare_trade_decision(
         pattern_memory_context=pattern_memory_context,
         technical_score=technical_score,
         final_confidence=final_confidence,
+        score_threshold=score_threshold,
         advisor_prompt=advisor_prompt,
     )
 
@@ -564,49 +570,70 @@ def finalize_trade_decision(
     pattern_memory_context = prepared.pattern_memory_context
     news_summary = prepared.news_summary
 
+    response_text = str(llm_response) if llm_response is not None else ""
+
     try:
-        resp_lc = llm_response.lower() if isinstance(llm_response, str) else ""
+        resp_lc = response_text.lower()
     except Exception:
         resp_lc = ""
 
-    if "error" in resp_lc:
-        narrative = generate_trade_narrative(
-            symbol=prepared.symbol,
-            direction=prepared.direction,
-            score=prepared.score,
-            confidence=final_confidence,
-            indicators=prepared.indicators,
-            sentiment_bias=prepared.sentiment_bias,
-            sentiment_confidence=prepared.sentiment_confidence,
-            orderflow=prepared.orderflow,
-            pattern=prepared.pattern_name,
-            macro_reason=prepared.macro_news.get("reason", ""),
-            news_summary=news_summary,
-        ) or f"No major pattern, but macro/sentiment context favors {prepared.direction} setup."
-        return {
-            "decision": True,
+    parsed_decision, advisor_rating, advisor_reason, advisor_thesis = _parse_llm_response(response_text)
+    parse_failed_initially = parsed_decision is None
+
+    if parse_failed_initially and ("error" in resp_lc or not response_text.strip()):
+        confidence_ok = final_confidence >= LLM_ERROR_CONFIDENCE_FLOOR
+        score_ok = prepared.score >= prepared.score_threshold + LLM_ERROR_SCORE_BUFFER
+        strong_quant = confidence_ok and score_ok
+
+        base_payload = {
             "confidence": final_confidence,
-            "reason": "LLM unavailable or returned error; auto-approval",
-            "narrative": narrative,
             "news_summary": news_summary,
             "llm_decision": "LLM unavailable",
-            "llm_approval": True,
+            "llm_approval": None,
             "llm_confidence": None,
             "llm_error": True,
             "technical_indicator_score": technical_score,
             "pattern_memory": pattern_memory_context,
         }
 
-    parsed_decision, advisor_rating, advisor_reason, advisor_thesis = _parse_llm_response(str(llm_response))
+        if strong_quant:
+            narrative = generate_trade_narrative(
+                symbol=prepared.symbol,
+                direction=prepared.direction,
+                score=prepared.score,
+                confidence=final_confidence,
+                indicators=prepared.indicators,
+                sentiment_bias=prepared.sentiment_bias,
+                sentiment_confidence=prepared.sentiment_confidence,
+                orderflow=prepared.orderflow,
+                pattern=prepared.pattern_name,
+                macro_reason=prepared.macro_news.get("reason", ""),
+                news_summary=news_summary,
+            ) or f"No major pattern, but macro/sentiment context favors {prepared.direction} setup."
+
+            return {
+                **base_payload,
+                "decision": True,
+                "reason": "LLM unavailable; quantitative metrics cleared fallback thresholds",
+                "narrative": narrative,
+            }
+
+        return {
+            **base_payload,
+            "decision": False,
+            "reason": "LLM unavailable and quantitative conviction insufficient",
+            "narrative": "",
+        }
+
     if parsed_decision is None:
-        match = re.search(r"(\d+(?:\.\d+)?)", str(llm_response))
+        match = re.search(r"(\d+(?:\.\d+)?)", response_text)
         if match:
             try:
                 advisor_rating = float(match.group(1))
             except Exception:
                 advisor_rating = None
-        parsed_decision = str(llm_response).strip().lower().startswith("yes")
-        advisor_reason = str(llm_response).strip()
+        parsed_decision = response_text.strip().lower().startswith("yes")
+        advisor_reason = response_text.strip()
         advisor_thesis = ""
 
     if advisor_rating is not None:

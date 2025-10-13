@@ -34,7 +34,7 @@ def test_should_trade_reject_non_long():
     assert "not long" in result["reason"].lower()
 
 
-def test_should_trade_auto_approves_on_llm_error():
+def test_should_trade_requires_strong_quant_on_llm_error():
     result = should_trade(
         symbol="BTCUSDT",
         score=6.0,
@@ -47,7 +47,7 @@ def test_should_trade_auto_approves_on_llm_error():
         macro_news={"safe": True, "reason": ""},
     )
     assert result["decision"] is True
-    assert "auto-approval" in result["reason"].lower()
+    assert "fallback thresholds" in result["reason"].lower()
     assert result.get("llm_error") is True
 
 

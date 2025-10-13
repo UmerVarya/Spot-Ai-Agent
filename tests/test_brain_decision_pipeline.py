@@ -151,4 +151,38 @@ def test_finalize_trade_decision_handles_error(monkeypatch):
 
     assert result["decision"] is True
     assert result["llm_error"] is True
-    assert "auto-approval" in result["reason"].lower()
+    assert "fallback thresholds" in result["reason"].lower()
+
+
+def test_finalize_trade_decision_error_blocks_weak_signals(monkeypatch):
+    import brain
+
+    _patch_brain_defaults(monkeypatch)
+
+    prepared = brain.PreparedTradeDecision(
+        symbol="BTCUSDT",
+        direction="long",
+        session="US",
+        setup_type=None,
+        score=5.6,
+        indicators={"rsi": 68.0},
+        sentiment_bias="neutral",
+        sentiment_confidence=4.5,
+        fear_greed=20,
+        macro_news={"safe": True, "reason": ""},
+        news_summary="",
+        orderflow="neutral",
+        auction_state=None,
+        pattern_name="",
+        pattern_memory_context={"posterior_mean": 0.5, "posterior_variance": 0.09, "trades": 0},
+        technical_score=5.2,
+        final_confidence=5.9,
+        score_threshold=5.5,
+        advisor_prompt="",
+    )
+
+    result = brain.finalize_trade_decision(prepared, "LLM error: unavailable")
+
+    assert result["decision"] is False
+    assert result["llm_error"] is True
+    assert "quantitative conviction insufficient" in result["reason"].lower()
