@@ -54,6 +54,28 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_URL = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1/chat/completions")
 _HTTP_TIMEOUT_SECONDS = 10
 
+_DEFAULT_RATE_LIMIT_BACKOFF_SECONDS = 2.0
+_DEFAULT_BATCH_THROTTLE_SECONDS = 0.0
+
+
+def _to_float(value: str | None, default: float) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+_RATE_LIMIT_BACKOFF_SECONDS = max(
+    0.0,
+    _to_float(os.getenv("GROQ_RATE_LIMIT_BACKOFF_SECONDS"), _DEFAULT_RATE_LIMIT_BACKOFF_SECONDS),
+)
+_BATCH_THROTTLE_SECONDS = max(
+    0.0,
+    _to_float(os.getenv("GROQ_BATCH_THROTTLE_SECONDS"), _DEFAULT_BATCH_THROTTLE_SECONDS),
+)
+
 logger = setup_logger(__name__)
 
 _SINGLE_JUDGMENT_SYSTEM_MESSAGE = (
@@ -152,6 +174,37 @@ def _extract_rate_limit_headers(obj: Any) -> Mapping[str, str] | None:
     if isinstance(headers, Mapping):
         return dict(headers)
     return None
+
+
+def _calculate_retry_delay(headers: Mapping[str, str] | None, *, default: float | None = None) -> float:
+    """Return an appropriate delay before retrying after a rate limit."""
+
+    if default is None:
+        default = _RATE_LIMIT_BACKOFF_SECONDS
+
+    delay = max(default or 0.0, 0.0)
+    if not headers:
+        return delay
+
+    normalised = {_normalise_header_name(k): str(v) for k, v in headers.items()}
+
+    retry_after = normalised.get("retry-after") or normalised.get("retry_after")
+    candidate = _parse_numeric(retry_after)
+    if candidate is not None:
+        delay = max(delay, candidate)
+
+    grouped = _group_rate_limit_headers({k: str(v) for k, v in headers.items()})
+    reset_candidates: list[float] = []
+    for metrics in grouped.values():
+        for key in ("reset", "reset-requests", "reset-tokens"):
+            value = metrics.get(key)
+            seconds = _parse_numeric(value)
+            if seconds is not None and seconds >= 0:
+                reset_candidates.append(seconds)
+    if reset_candidates:
+        delay = max(delay, min(reset_candidates))
+
+    return min(delay, 60.0)
 
 
 def _extract_status_code(obj: Any) -> int | None:
@@ -489,10 +542,20 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
     except RateLimitError as err:
         latency = time.perf_counter() - start
         logger.warning("Groq rate limit after %.2fs: %s", latency, _format_exception(err))
+        headers = _extract_rate_limit_headers(err)
+        status_code = _extract_status_code(err)
         _log_rate_limit_health(
-            _extract_rate_limit_headers(err),
-            _extract_status_code(err),
+            headers,
+            status_code,
         )
+        delay = _calculate_retry_delay(headers)
+        if delay > 0:
+            logger.info(
+                "Sleeping for %.2fs before retrying Groq fallback after rate limit (status=%s)",
+                delay,
+                status_code or "unknown",
+            )
+            time.sleep(delay)
         http_response = _http_completion_with_fallback(
             messages,
             temperature=temperature,
@@ -621,10 +684,20 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
     except RateLimitError as err:
         latency = time.perf_counter() - start
         logger.warning("Async Groq rate limit after %.2fs: %s", latency, _format_exception(err))
+        headers = _extract_rate_limit_headers(err)
+        status_code = _extract_status_code(err)
         _log_rate_limit_health(
-            _extract_rate_limit_headers(err),
-            _extract_status_code(err),
+            headers,
+            status_code,
         )
+        delay = _calculate_retry_delay(headers)
+        if delay > 0:
+            logger.info(
+                "Awaiting %.2fs before using async fallback after Groq rate limit (status=%s)",
+                delay,
+                status_code or "unknown",
+            )
+            await asyncio.sleep(delay)
         fallback = await _async_fallback_to_local(
             user_prompt,
             temperature=temperature,
@@ -701,8 +774,15 @@ async def async_batch_llm_judgment(
 
     results: Dict[str, str] = {}
     model = config.get_groq_model()
-    for idx in range(0, len(items), batch_size):
-        chunk = items[idx : idx + batch_size]
+    for batch_index, start_idx in enumerate(range(0, len(items), batch_size)):
+        if batch_index and _BATCH_THROTTLE_SECONDS > 0:
+            logger.debug(
+                "Throttling %.2fs between Groq batch requests to avoid saturation",
+                _BATCH_THROTTLE_SECONDS,
+            )
+            await asyncio.sleep(_BATCH_THROTTLE_SECONDS)
+
+        chunk = items[start_idx : start_idx + batch_size]
         batch_prompt = _build_batch_prompt(chunk)
         messages = [
             {"role": "system", "content": _BATCH_SYSTEM_MESSAGE},
@@ -734,10 +814,20 @@ async def async_batch_llm_judgment(
             logger.warning(
                 "Groq batch rate limit after %.2fs: %s", latency, _format_exception(err)
             )
+            headers = _extract_rate_limit_headers(err)
+            status_code = _extract_status_code(err)
             _log_rate_limit_health(
-                _extract_rate_limit_headers(err),
-                _extract_status_code(err),
+                headers,
+                status_code,
             )
+            delay = _calculate_retry_delay(headers)
+            if delay > 0:
+                logger.info(
+                    "Awaiting %.2fs before falling back after Groq batch rate limit (status=%s)",
+                    delay,
+                    status_code or "unknown",
+                )
+                await asyncio.sleep(delay)
             fallback = await _async_batch_local(
                 chunk,
                 temperature=temperature,
