@@ -759,6 +759,10 @@ def _parse_llm_response(resp: str) -> Tuple[bool | None, float | None, str, str]
     if data is None:
         return None, None, resp, ""
 
+    keys_lower = {str(key).lower() for key in data.keys()}
+    if "error" in keys_lower and "decision" not in keys_lower:
+        return None, None, resp, ""
+
     decision = data.get("decision", "No")
     rating = data.get("confidence", None)
     reason = data.get("reason", "")

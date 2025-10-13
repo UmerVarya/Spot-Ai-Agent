@@ -154,6 +154,41 @@ def test_finalize_trade_decision_handles_error(monkeypatch):
     assert "fallback thresholds" in result["reason"].lower()
 
 
+def test_finalize_trade_decision_handles_json_error(monkeypatch):
+    import brain
+
+    _patch_brain_defaults(monkeypatch)
+
+    sentiment = {"bias": "neutral", "score": 5.0}
+    macro_news = {"safe": True, "reason": "Quiet"}
+
+    _, prepared = brain.prepare_trade_decision(
+        symbol="BTCUSDT",
+        score=6.0,
+        direction="long",
+        indicators={"rsi": 52.0, "macd": 0.2, "adx": 25.0},
+        session="EU",
+        pattern_name="marubozu_bullish",
+        orderflow="buyers",
+        sentiment=sentiment,
+        macro_news=macro_news,
+        volatility=0.4,
+        fear_greed=50,
+        auction_state="trending",
+        setup_type="trend",
+        news_summary="Quiet",
+    )
+
+    assert prepared is not None
+
+    response = json.dumps({"error": "service unavailable"})
+    result = brain.finalize_trade_decision(prepared, response)
+
+    assert result["decision"] is True
+    assert result["llm_error"] is True
+    assert "fallback thresholds" in result["reason"].lower()
+
+
 def test_finalize_trade_decision_error_blocks_weak_signals(monkeypatch):
     import brain
 
