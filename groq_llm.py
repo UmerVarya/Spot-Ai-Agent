@@ -24,6 +24,8 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, Mapping, List, Tuple
 
+import requests
+
 from groq import (
     APIConnectionError,
     APIError,
@@ -34,7 +36,12 @@ from groq import (
 
 import config
 from groq_client import get_groq_client
-from groq_safe import safe_chat_completion
+from groq_safe import (
+    safe_chat_completion,
+    extract_error_payload,
+    is_model_decommissioned_error,
+    describe_error,
+)
 from log_utils import setup_logger
 
 try:  # Optional import for logging fallback details
@@ -44,6 +51,8 @@ except Exception:  # pragma: no cover - optional dependency path
         return "unknown"
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_URL = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1/chat/completions")
+_HTTP_TIMEOUT_SECONDS = 10
 
 logger = setup_logger(__name__)
 
@@ -177,6 +186,118 @@ def _extract_choice_content(response: Any) -> str:
         return str(content or "").strip()
     except Exception:
         return ""
+
+
+def _extract_http_message_content(payload: Mapping[str, Any]) -> str:
+    """Return the first message content from a raw HTTP payload."""
+
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, Mapping):
+            message = first.get("message")
+            if isinstance(message, Mapping):
+                content = message.get("content")
+                if isinstance(content, str):
+                    return content.strip()
+    return ""
+
+
+def _http_chat_completion(
+    model: str,
+    messages: list[dict[str, Any]],
+    *,
+    temperature: float,
+    max_tokens: int,
+) -> tuple[str | None, Any | None]:
+    """Send a chat completion request via raw HTTP."""
+
+    if not GROQ_API_KEY:
+        return None, None
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.post(
+            GROQ_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=_HTTP_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.error("Groq HTTP request failed: %s", exc)
+        return None, exc
+
+    if response.status_code >= 400:
+        error_payload = extract_error_payload(response)
+        logger.warning(
+            "Groq HTTP error for model %s: %s", model, describe_error(error_payload)
+        )
+        return None, error_payload
+
+    try:
+        data = response.json()
+    except Exception:
+        logger.warning("Groq HTTP response missing JSON body for model %s", model)
+        return None, None
+
+    content = _extract_http_message_content(data)
+    if content:
+        return content, None
+
+    logger.warning("Groq HTTP response missing content for model %s", model)
+    return None, data
+
+
+def _http_completion_with_fallback(
+    messages: list[dict[str, Any]],
+    *,
+    temperature: float,
+    max_tokens: int,
+) -> str | None:
+    """Attempt an HTTP completion with automatic model fallback."""
+
+    primary_model = config.get_groq_model()
+    if not primary_model:
+        primary_model = config.DEFAULT_GROQ_MODEL
+
+    content, error = _http_chat_completion(
+        primary_model,
+        messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    if content:
+        return content
+
+    if error is not None and is_model_decommissioned_error(error):
+        fallback_model = config.DEFAULT_GROQ_MODEL
+        if fallback_model and fallback_model != primary_model:
+            logger.warning(
+                "Groq model %s unavailable (%s). Retrying with fallback model %s (HTTP path).",
+                primary_model,
+                describe_error(error),
+                fallback_model,
+            )
+            content, _ = _http_chat_completion(
+                fallback_model,
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            if content:
+                return content
+
+    return None
 
 
 def _sanitize_prompt(prompt: str, max_len: int = 3000) -> str:
@@ -321,6 +442,13 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
     except RateLimitError as err:
         latency = time.perf_counter() - start
         logger.warning("Groq rate limit after %.2fs: %s", latency, _format_exception(err))
+        http_response = _http_completion_with_fallback(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        if http_response:
+            return http_response
         fallback = _fallback_to_local(
             user_prompt,
             temperature=temperature,
@@ -333,6 +461,13 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
     except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
         latency = time.perf_counter() - start
         logger.error("Groq request failed in %.2fs: %s", latency, _format_exception(err))
+        http_response = _http_completion_with_fallback(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        if http_response:
+            return http_response
         fallback = _fallback_to_local(
             user_prompt,
             temperature=temperature,
@@ -345,6 +480,13 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
     except Exception as err:
         latency = time.perf_counter() - start
         logger.error("LLM Exception after %.2fs: %s", latency, err, exc_info=True)
+        http_response = _http_completion_with_fallback(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        if http_response:
+            return http_response
         fallback = _fallback_to_local(
             user_prompt,
             temperature=temperature,
