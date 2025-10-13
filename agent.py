@@ -35,6 +35,10 @@ from fetch_news import (
     run_news_fetcher_async,
     analyze_news_with_llm_async,
 )
+from news_monitor import (
+    get_news_monitor,
+    start_background_news_monitor,
+)
 from trade_utils import simulate_slippage, estimate_commission  # noqa: F401
 from trade_utils import (
     get_top_symbols,
@@ -112,6 +116,10 @@ SIGNAL_REFRESH_INTERVAL = float(os.getenv("SIGNAL_REFRESH_INTERVAL", "2.0"))
 SIGNAL_STALE_AFTER = float(os.getenv("SIGNAL_STALE_AFTER", str(SIGNAL_REFRESH_INTERVAL * 3)))
 # Interval between news fetches (in seconds)
 NEWS_INTERVAL = 3600
+NEWS_MONITOR_INTERVAL = float(os.getenv("NEWS_MONITOR_INTERVAL", "120"))
+NEWS_ALERT_THRESHOLD = float(os.getenv("NEWS_ALERT_THRESHOLD", "0.6"))
+NEWS_HALT_THRESHOLD = float(os.getenv("NEWS_HALT_THRESHOLD", "0.9"))
+NEWS_MONITOR_STATE_PATH = os.getenv("NEWS_MONITOR_STATE_PATH", "news_monitor_state.json")
 RUN_DASHBOARD = os.getenv("RUN_DASHBOARD", "0") == "1"
 USE_RL_POSITION_SIZER = False
 rl_sizer = RLPositionSizer() if USE_RL_POSITION_SIZER else None
@@ -271,6 +279,26 @@ def run_agent_loop() -> None:
     """Main loop that scans the market, evaluates signals and opens trades."""
     logger.info("Spot AI Super Agent running in paper trading mode...")
     # start news and dashboard threads
+    def _handle_news_alert(alert) -> None:
+        try:
+            reason = str(getattr(alert, "reason", "")) or "LLM news monitor alert"
+            logger.error(
+                "LLM news monitor flagged critical news: %s (sensitivity=%.2f, halt=%s)",
+                reason,
+                float(getattr(alert, "sensitivity", 0.0)),
+                bool(getattr(alert, "halt_trading", False)),
+            )
+        except Exception:
+            logger.error("LLM news monitor emitted alert", exc_info=True)
+
+    monitor = start_background_news_monitor(
+        interval=NEWS_MONITOR_INTERVAL,
+        alert_threshold=NEWS_ALERT_THRESHOLD,
+        halt_threshold=NEWS_HALT_THRESHOLD,
+        status_path=NEWS_MONITOR_STATE_PATH,
+        alert_callback=_handle_news_alert,
+    )
+
     threading.Thread(target=auto_run_news, daemon=True).start()
     if RUN_DASHBOARD:
         threading.Thread(target=run_streamlit, daemon=True).start()
@@ -333,6 +361,19 @@ def run_agent_loop() -> None:
             skip_all, skip_alt, macro_reasons = macro_filter_decision(
                 btc_d, fg, sentiment_bias, sentiment_confidence
             )
+            monitor_state = None
+            monitor_instance = get_news_monitor()
+            if monitor_instance is not None:
+                monitor_state = monitor_instance.get_latest_assessment()
+                if monitor_state and monitor_state.get("halt_trading"):
+                    reason = str(monitor_state.get("reason", "LLM requested trading halt"))
+                    logger.error(
+                        "Skipping scan due to LLM news halt signal: %s", reason
+                    )
+                    time.sleep(SCAN_INTERVAL)
+                    continue
+                if monitor_state and monitor_state.get("alert_triggered"):
+                    macro_reasons.append("LLM news alert")
             signal_cache.update_context(sentiment_bias=sentiment_bias)
             if skip_all:
                 reason_text = " + ".join(macro_reasons) if macro_reasons else "unfavorable conditions"
@@ -382,19 +423,26 @@ def run_agent_loop() -> None:
             macro_news_assessment = {"safe": True, "reason": "No events analyzed"}
             macro_news_summary = ""
             next_news_minutes = None
-            try:
-                events = _run_async_task(lambda: run_news_fetcher_async())
-                if events:
-                    macro_news_assessment = _run_async_task(
-                        lambda: analyze_news_with_llm_async(events)
+            if monitor_state and not monitor_state.get("stale"):
+                macro_news_assessment = monitor_state
+                macro_news_summary = str(monitor_state.get("reason", ""))
+                next_news_minutes = monitor_state.get("next_event_minutes")
+            else:
+                try:
+                    events = _run_async_task(lambda: run_news_fetcher_async())
+                    if events:
+                        macro_news_assessment = _run_async_task(
+                            lambda: analyze_news_with_llm_async(events)
+                        )
+                        next_news_minutes = minutes_until_next_event(events)
+                    macro_news_summary = str(macro_news_assessment.get("reason", ""))
+                except Exception as news_exc:
+                    logger.debug(
+                        "Macro news analysis unavailable: %s", news_exc, exc_info=True
                     )
-                    next_news_minutes = minutes_until_next_event(events)
-                macro_news_summary = str(macro_news_assessment.get("reason", ""))
-            except Exception as news_exc:
-                logger.debug("Macro news analysis unavailable: %s", news_exc, exc_info=True)
-                macro_news_assessment = {"safe": True, "reason": "LLM error"}
-                macro_news_summary = ""
-                next_news_minutes = minutes_until_next_event(None)
+                    macro_news_assessment = {"safe": True, "reason": "LLM error"}
+                    macro_news_summary = ""
+                    next_news_minutes = minutes_until_next_event(None)
             # Load active trades and ensure only long trades remain (spot mode)
             active_trades_raw = load_active_trades()
             active_trades = []
