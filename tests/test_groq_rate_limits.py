@@ -1,6 +1,7 @@
 import importlib
 import logging
 
+import datetime as dt
 import groq_llm
 
 
@@ -45,6 +46,21 @@ def test_log_rate_limit_health_warns_when_almost_empty():
 
     assert any("Groq rate limit for requests-1m" in record.getMessage() for record in records)
     assert any("reducing request concurrency" in record.getMessage() for record in records)
+
+
+def test_calculate_retry_delay_parses_timestamp_resets():
+    importlib.reload(groq_llm)
+
+    original_now = groq_llm._now_utc
+    groq_llm._now_utc = lambda: dt.datetime(2024, 1, 1, 0, 0, 0, tzinfo=dt.timezone.utc)
+    headers = {"X-RateLimit-Reset-Requests-1m": "2024-01-01T00:00:30Z"}
+
+    try:
+        delay = groq_llm._calculate_retry_delay(headers, default=0.1)
+    finally:
+        groq_llm._now_utc = original_now
+
+    assert delay == 30.0
 
 
 def test_extractors_handle_response_wrappers():

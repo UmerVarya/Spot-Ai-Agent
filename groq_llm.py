@@ -22,6 +22,7 @@ import json
 import asyncio
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, List, Tuple
 
 import requests
@@ -150,6 +151,51 @@ def _parse_numeric(value: str | None) -> float | None:
         return None
 
 
+def _now_utc() -> datetime:
+    """Return the current UTC time.
+
+    A thin wrapper exists to make it easy to stub during tests.
+    """
+
+    return datetime.now(timezone.utc)
+
+
+def _parse_reset_timestamp(value: str | None, *, now: datetime | None = None) -> float | None:
+    """Convert an ISO-8601 timestamp header to seconds until reset."""
+
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        reset_at = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+    if reset_at.tzinfo is None:
+        reset_at = reset_at.replace(tzinfo=timezone.utc)
+
+    if now is None:
+        now = _now_utc()
+
+    delta = (reset_at - now).total_seconds()
+    return max(delta, 0.0)
+
+
+def _parse_delay_value(value: str | None, *, now: datetime | None = None) -> float | None:
+    """Interpret ``value`` as either a numeric delay or ISO timestamp."""
+
+    seconds = _parse_numeric(value)
+    if seconds is not None:
+        return seconds
+    return _parse_reset_timestamp(value, now=now)
+
+
 def _extract_response_like(obj: Any) -> Any:
     """Best-effort extraction of an HTTP-like response object."""
 
@@ -189,16 +235,23 @@ def _calculate_retry_delay(headers: Mapping[str, str] | None, *, default: float 
     normalised = {_normalise_header_name(k): str(v) for k, v in headers.items()}
 
     retry_after = normalised.get("retry-after") or normalised.get("retry_after")
-    candidate = _parse_numeric(retry_after)
+    candidate = _parse_delay_value(retry_after)
     if candidate is not None:
         delay = max(delay, candidate)
 
     grouped = _group_rate_limit_headers({k: str(v) for k, v in headers.items()})
     reset_candidates: list[float] = []
+    current_time: datetime | None = None
     for metrics in grouped.values():
         for key in ("reset", "reset-requests", "reset-tokens"):
             value = metrics.get(key)
+            if value is None:
+                continue
             seconds = _parse_numeric(value)
+            if seconds is None:
+                if current_time is None:
+                    current_time = _now_utc()
+                seconds = _parse_reset_timestamp(value, now=current_time)
             if seconds is not None and seconds >= 0:
                 reset_candidates.append(seconds)
     if reset_candidates:
