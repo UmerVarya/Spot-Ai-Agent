@@ -1,65 +1,30 @@
-import os
-from groq import Groq
-from dotenv import load_dotenv
-import config
-from groq_safe import safe_chat_completion
+"""Compatibility wrapper for the consolidated trade narrative builder."""
 
-load_dotenv()
+from __future__ import annotations
 
-# === Load Groq API Key ===
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-client = Groq(api_key=GROQ_API_KEY)
+from typing import Any, Mapping
+
+from log_utils import setup_logger
+from narrative_builder import generate_trade_narrative
+
+logger = setup_logger(__name__)
 
 
-def generate_narrative(trade):
+def generate_narrative(trade: Mapping[str, Any] | None) -> str:
+    """Generate an explanation for a trade using the central narrative builder.
+
+    ``narrator`` previously duplicated the Groq prompt logic that now lives in
+    :mod:`narrative_builder`.  To keep the narrative format consistent across
+    the agent, this wrapper simply delegates to :func:`generate_trade_narrative`
+    while preserving the legacy public interface.
     """
-    Generate an LLM-based explanation for why this trade was taken.
-    """
+
+    if not trade:
+        logger.warning("Narrative requested without trade data")
+        return "⚠️ Narrative generation failed: no trade data provided"
+
     try:
-        symbol = trade.get("symbol")
-        direction = trade.get("direction")
-        score = trade.get("confidence")
-        indicators = trade.get("indicators", {})
-        macro_summary = trade.get("macro_summary", "Unknown")
-        macro_bias = trade.get("macro_bias", "neutral")
-        macro_conf = trade.get("macro_confidence", 0)
-        headlines = trade.get("news_headlines", [])
-
-        prompt = f"""
-You are a professional quant trader assistant.
-Analyze the following trade setup and generate a short, high-quality explanation like a trading journal entry.
-
-Include:
-- Reason for entry (based on indicators)
-- Macro sentiment
-- News influence (if any)
-- Overall tone: objective, neutral, informative
-
-Return your response in this format:
-
-🧠 Trade Narrative ({symbol}, {direction.upper()})
-Entry Decision: <indicator alignment>
-Macro Sentiment: <bias> (Confidence: <score>)
-News Influence: <summary of any news if present>
-Final Thoughts: <objective commentary>
-
-Trade Details:
-- Score: {score}
-- Indicators: {indicators}
-- Macro Summary: {macro_summary}
-- News Headlines: {headlines[:3]}  # Use top 3 headlines only
-"""
-
-        response = safe_chat_completion(
-            client,
-            model=config.get_groq_model(),
-            messages=[
-                {"role": "system", "content": "You are a professional crypto trading strategist."},
-                {"role": "user", "content": prompt}
-            ],
-        )
-
-        return response.choices[0].message.content.strip()
-
-    except Exception as e:
-        return f"⚠️ Narrative generation failed: {e}"
+        return generate_trade_narrative(trade)
+    except Exception as exc:  # pragma: no cover - defensive path
+        logger.exception("Narrative generation wrapper failed")
+        return f"⚠️ Narrative generation failed: {exc}"
