@@ -1,21 +1,25 @@
 import os
 import json
 import re
-import requests
 from dotenv import load_dotenv
+
+from groq import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    APITimeoutError,
+    RateLimitError,
+)
+
 from log_utils import setup_logger
 import config
-from groq_safe import (
-    describe_error,
-    extract_error_payload,
-    is_model_decommissioned_error,
-)
+from groq_client import get_groq_client
+from groq_safe import safe_chat_completion
 
 load_dotenv()
 
 # Groq API configuration
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 
 # Cache for latest macro sentiment
 latest_macro_sentiment = {"bias": "neutral", "confidence": 5.0, "summary": "No analysis yet."}
@@ -42,73 +46,31 @@ def analyze_macro_news(news_text: str) -> dict:
     messages = [
         {"role": "user", "content": prompt + "\nNews Headlines:\n" + news_text}
     ]
-    payload = {
-        "model": config.get_groq_model(),
-        "messages": messages,
-        "temperature": 0.2,
-        "max_tokens": 200
-    }
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    model_name = config.get_groq_model()
+    client = get_groq_client()
+    if client is None:
+        return {"bias": "neutral", "confidence": 5.0, "summary": "LLM analysis not available"}
+
     try:
-        response = requests.post(GROQ_ENDPOINT, headers=headers, json=payload)
-    except Exception as e:
-        logger.error("Error connecting to Groq API: %s", e, exc_info=True)
+        response = safe_chat_completion(
+            client,
+            model=model_name,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=200,
+        )
+        result_text = response.choices[0].message.content if response.choices else ""
+    except RateLimitError as err:
+        logger.warning("Groq rate limited during macro analysis: %s", err)
+        return {"bias": "neutral", "confidence": 5.0, "summary": "No analysis (rate limited)"}
+    except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
+        logger.error("Groq API error during macro analysis: %s", err)
+        return {"bias": "neutral", "confidence": 5.0, "summary": "No analysis (API error)"}
+    except Exception as err:
+        logger.error("Error connecting to Groq API: %s", err, exc_info=True)
         return {"bias": "neutral", "confidence": 5.0, "summary": "No analysis (API error)"}
 
-    if not response.ok:
-        error_detail = extract_error_payload(response)
-        if (
-            response.status_code in {400, 404}
-            and payload["model"] != config.DEFAULT_GROQ_MODEL
-            and is_model_decommissioned_error(error_detail)
-        ):
-            fallback_model = config.DEFAULT_GROQ_MODEL
-            logger.warning(
-                "Groq model %s unavailable (%s). Retrying with fallback model %s.",
-                payload["model"],
-                describe_error(error_detail),
-                fallback_model,
-            )
-            payload = {**payload, "model": fallback_model}
-            try:
-                response = requests.post(GROQ_ENDPOINT, headers=headers, json=payload)
-            except Exception as e:
-                logger.error("Groq fallback request failed: %s", e, exc_info=True)
-                return {
-                    "bias": "neutral",
-                    "confidence": 5.0,
-                    "summary": "No analysis (API error)",
-                }
-            if not response.ok:
-                fallback_detail = extract_error_payload(response)
-                logger.error(
-                    "Groq API returned error after fallback: %s, %s",
-                    response.status_code,
-                    describe_error(fallback_detail) or response.text,
-                )
-                return {
-                    "bias": "neutral",
-                    "confidence": 5.0,
-                    "summary": "No analysis (API error)",
-                }
-        else:
-            logger.error(
-                "Groq API returned error: %s, %s",
-                response.status_code,
-                describe_error(error_detail) or response.text,
-            )
-            return {"bias": "neutral", "confidence": 5.0, "summary": "No analysis (API error)"}
-    # Extract the content from the API response
-    result_text = ""
-    try:
-        result_json = response.json()
-        result_text = result_json.get("choices", [])[0].get("message", {}).get("content", "")
-    except Exception as e:
-        logger.warning("Failed to parse Groq API response: %s", e, exc_info=True)
-        result_text = response.text or ""
+    result_text = str(result_text or "")
     # ✅ Robust JSON parsing from LLM output
     result_text = result_text.strip()
     parsed = {}

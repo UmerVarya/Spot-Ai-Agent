@@ -1,9 +1,9 @@
 import json
-from groq import Groq
 import os
 from dotenv import load_dotenv
 from log_utils import setup_logger
 import config
+from groq_client import get_groq_client
 from groq_safe import safe_chat_completion
 from news_guardrails import (
     parse_llm_json,
@@ -42,8 +42,12 @@ def format_events_for_prompt(events, metrics):
 
 
 def analyze_news_with_llm(prompt, metrics):
+    client = get_groq_client()
+    if client is None:
+        logger.warning("Groq client unavailable for news filter; assuming safe")
+        return {"safe": True, "sensitivity": 0, "reason": "LLM unavailable"}
+
     try:
-        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         response = safe_chat_completion(
             client,
             model=config.get_groq_model(),

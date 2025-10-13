@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 
 def _example_events():
@@ -20,22 +21,22 @@ def test_analyze_news_with_llm_async_valid_json(monkeypatch):
     monkeypatch.setattr(fetch_news, "GROQ_API_KEY", "test-key", raising=False)
     monkeypatch.setattr(fetch_news.config, "get_groq_model", lambda: "test-model", raising=False)
 
-    async def fake_post(session, payload, *, model_used):
-        assert payload["model"] == "test-model"
-        assert "Assess the market impact" in payload["messages"][1]["content"]
-        return {
-            "choices": [
-                {
-                    "message": {
-                        "content": json.dumps(
+    async def fake_chat(messages, *, model, temperature, max_tokens):
+        assert model == "test-model"
+        assert "Assess the market impact" in messages[1]["content"]
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
                             {"safe_decision": "no", "reason": "Volatility expected"}
                         )
-                    }
-                }
+                    )
+                )
             ]
-        }
+        )
 
-    monkeypatch.setattr(fetch_news, "_post_groq_request", fake_post, raising=False)
+    monkeypatch.setattr(fetch_news, "_chat_completion_async", fake_chat, raising=False)
 
     def fake_quantify(events):
         return {
@@ -73,23 +74,23 @@ def test_analyze_news_with_llm_async_retries_on_runtime_error(monkeypatch):
 
     calls = []
 
-    async def fake_post(session, payload, *, model_used):
-        calls.append(model_used)
+    async def fake_chat(messages, *, model, temperature, max_tokens):
+        calls.append(model)
         if len(calls) == 1:
             raise RuntimeError("Groq LLM request failed")
-        return {
-            "choices": [
-                {
-                    "message": {
-                        "content": json.dumps(
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
                             {"safe_decision": "yes", "reason": "Fallback succeeded"}
                         )
-                    }
-                }
+                    )
+                )
             ]
-        }
+        )
 
-    monkeypatch.setattr(fetch_news, "_post_groq_request", fake_post, raising=False)
+    monkeypatch.setattr(fetch_news, "_chat_completion_async", fake_chat, raising=False)
 
     monkeypatch.setattr(
         fetch_news,
@@ -127,10 +128,10 @@ def test_analyze_news_with_llm_async_uses_local_fallback(monkeypatch):
     monkeypatch.setattr(fetch_news, "GROQ_API_KEY", "test-key", raising=False)
     monkeypatch.setattr(fetch_news.config, "get_groq_model", lambda: "custom-model", raising=False)
 
-    async def fake_post(session, payload, *, model_used):
+    async def fake_chat(messages, *, model, temperature, max_tokens):
         raise RuntimeError("Groq LLM request failed")
 
-    monkeypatch.setattr(fetch_news, "_post_groq_request", fake_post, raising=False)
+    monkeypatch.setattr(fetch_news, "_chat_completion_async", fake_chat, raising=False)
 
     monkeypatch.setattr(
         fetch_news,
@@ -173,14 +174,16 @@ def test_analyze_news_with_llm_async_handles_non_json(monkeypatch):
     monkeypatch.setattr(fetch_news, "GROQ_API_KEY", "test-key", raising=False)
     monkeypatch.setattr(fetch_news.config, "get_groq_model", lambda: "test-model", raising=False)
 
-    async def fake_post(session, payload, *, model_used):
-        return {
-            "choices": [
-                {"message": {"content": "I cannot comply with that request."}}
+    async def fake_chat(messages, *, model, temperature, max_tokens):
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="I cannot comply with that request.")
+                )
             ]
-        }
+        )
 
-    monkeypatch.setattr(fetch_news, "_post_groq_request", fake_post, raising=False)
+    monkeypatch.setattr(fetch_news, "_chat_completion_async", fake_chat, raising=False)
     monkeypatch.setattr(
         fetch_news,
         "quantify_event_risk",

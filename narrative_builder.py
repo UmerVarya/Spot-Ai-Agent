@@ -15,11 +15,11 @@ dictionary, and then builds the LLM prompt.  No other changes to the
 business logic have been made.
 """
 
-from groq import Groq
 import os
 
 from dotenv import load_dotenv
 import config
+from groq_client import get_groq_client
 from groq_safe import safe_chat_completion
 from local_llm import generate_local_narrative
 from log_utils import setup_logger
@@ -28,7 +28,6 @@ load_dotenv()
 
 # Retrieve API key from environment and initialise the client once
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-client = Groq(api_key=GROQ_API_KEY)
 logger = setup_logger(__name__)
 
 
@@ -80,6 +79,13 @@ Trade Rationale:
 
 Write a short, confident explanation justifying the trade in plain English. End with a recommendation (like "Good trade setup", "High-risk trade", etc.).
 """
+
+    client = get_groq_client()
+    if client is None:
+        fallback = generate_local_narrative(trade_data)
+        if fallback:
+            return fallback
+        return "⚠️ Groq client unavailable for narrative generation."
 
     try:
         response = safe_chat_completion(
