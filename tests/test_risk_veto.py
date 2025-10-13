@@ -29,3 +29,8 @@ def test_veto_rejects_volatility_spike():
     result = evaluate_risk_veto(_base_payload(volatility=0.95))
     assert result["enter"] is False
     assert "volatility_spike" in result["conflicts"]
+
+
+def test_veto_conflict_adds_reason():
+    result = evaluate_risk_veto(_base_payload(btc_trend="down"))
+    assert "deterministic conflicts present - veto" in result["reasons"]
