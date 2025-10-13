@@ -84,6 +84,42 @@ def test_prepare_and_finalize_trade_decision(monkeypatch):
     assert result["narrative"]
 
 
+def test_finalize_trade_decision_parses_markdown_json(monkeypatch):
+    import brain
+
+    _patch_brain_defaults(monkeypatch)
+
+    sentiment = {"bias": "bullish", "score": 6.5}
+    macro_news = {"safe": True, "reason": "Calm conditions"}
+
+    _, prepared = brain.prepare_trade_decision(
+        symbol="ETHUSDT",
+        score=7.2,
+        direction="long",
+        indicators={"rsi": 55.0, "macd": 0.4, "adx": 28.0},
+        session="US",
+        pattern_name="hammer",
+        orderflow="buyers",
+        sentiment=sentiment,
+        macro_news=macro_news,
+        volatility=0.5,
+        fear_greed=60,
+        auction_state="trending",
+        setup_type="trend",
+        news_summary="Macro looks calm",
+    )
+
+    assert prepared is not None
+
+    response = """```json\n{\n  \"decision\": \"Yes\",\n  \"confidence\": 7.5,\n  \"reason\": \"Supports breakout\",\n  \"thesis\": \"Trend continuation expected.\"\n}\n```"""
+
+    result = brain.finalize_trade_decision(prepared, response)
+
+    assert result["decision"] is True
+    assert result["llm_approval"] is True
+    assert result["llm_confidence"] == 7.5
+
+
 def test_finalize_trade_decision_handles_error(monkeypatch):
     import brain
 
