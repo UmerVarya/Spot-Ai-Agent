@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import re
 import json
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from log_utils import setup_logger
 import logging
 import math
+import time
 
 from json_utils import parse_llm_json_response
 
@@ -103,6 +105,8 @@ try:
         analyze_news_with_llm,
         run_news_fetcher_async,
         analyze_news_with_llm_async,
+        fetch_news as fetch_symbol_news_async,
+        fetch_news_sync as fetch_symbol_news_sync,
     )  # type: ignore
 except Exception:
     def run_news_fetcher() -> list:  # type: ignore
@@ -117,6 +121,14 @@ except Exception:
 
     async def analyze_news_with_llm_async(events: list) -> Dict[str, Any]:  # type: ignore
         return analyze_news_with_llm(events)
+
+    async def fetch_symbol_news_async(symbol: str) -> list:  # type: ignore
+        _ = symbol
+        return []
+
+    def fetch_symbol_news_sync(symbol: str) -> list:  # type: ignore
+        _ = symbol
+        return []
 
 # Cache for BTC context awareness
 symbol_context_cache: Dict[str, Dict[str, Any]] = {}
@@ -137,6 +149,7 @@ class PreparedTradeDecision:
     fear_greed: Optional[int]
     macro_news: Dict[str, Any]
     news_summary: str
+    symbol_news_summary: str
     orderflow: str
     auction_state: Optional[str]
     pattern_name: str
@@ -145,6 +158,214 @@ class PreparedTradeDecision:
     final_confidence: float
     score_threshold: float
     advisor_prompt: str
+
+
+_SYMBOL_NEWS_CACHE_TTL_SECONDS = 15 * 60
+_SIGNIFICANT_NEWS_KEYWORDS: Dict[str, float] = {
+    "etf": 2.5,
+    "approval": 2.0,
+    "regulat": 1.8,
+    "sec": 1.7,
+    "lawsuit": 1.6,
+    "ban": 2.0,
+    "halving": 2.2,
+    "upgrade": 1.4,
+    "fork": 1.2,
+    "whale": 1.2,
+    "institution": 1.1,
+    "fund": 1.0,
+    "inflow": 1.3,
+    "outflow": 1.3,
+    "liquidation": 1.3,
+    "hack": 2.2,
+    "exploit": 2.2,
+    "adoption": 1.1,
+    "listing": 1.6,
+    "delist": 2.0,
+    "partnership": 1.2,
+    "acquisition": 1.4,
+    "merger": 1.4,
+    "treasury": 1.1,
+    "fidelity": 1.1,
+    "blackrock": 1.3,
+    "grayscale": 1.3,
+    "buyback": 1.4,
+    "seiz": 1.5,
+    "crackdown": 1.5,
+    "penalty": 1.2,
+    "fine": 1.1,
+}
+_SYMBOL_NEWS_NOISE_PATTERNS = {
+    "price analysis",
+    "price prediction",
+    "technical analysis",
+    "how to",
+    "opinion:",
+    "newsletter",
+    "recap",
+    "week in review",
+    "daily hodl",
+}
+_SYMBOL_NEWS_CREDIBLE_SOURCES = {
+    "Bloomberg",
+    "Reuters",
+    "The Wall Street Journal",
+    "The Wall St. Journal",
+    "WSJ",
+    "CoinDesk",
+    "Cointelegraph",
+    "The Block",
+    "CNBC",
+    "Forbes",
+    "Fortune",
+    "Bloomberg Crypto",
+    "Barron's",
+    "Yahoo Finance",
+}
+_symbol_news_cache: Dict[str, Tuple[float, str]] = {}
+
+
+def _normalise_article_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _extract_article_datetime(article: Mapping[str, Any]) -> Optional[datetime]:
+    published_raw = article.get("publishedAt") or article.get("published_at")
+    if not isinstance(published_raw, str):
+        return None
+    try:
+        cleaned = published_raw.strip()
+        if not cleaned:
+            return None
+        if cleaned.endswith("Z"):
+            cleaned = cleaned[:-1] + "+00:00"
+        return datetime.fromisoformat(cleaned)
+    except Exception:
+        return None
+
+
+def _score_symbol_news_article(article: Mapping[str, Any]) -> float:
+    title = _normalise_article_text(article.get("title"))
+    description = _normalise_article_text(article.get("description"))
+    if not title:
+        return 0.0
+
+    combined = f"{title} {description}".lower()
+    if any(noise in combined for noise in _SYMBOL_NEWS_NOISE_PATTERNS):
+        return 0.0
+
+    score = 0.0
+    for keyword, weight in _SIGNIFICANT_NEWS_KEYWORDS.items():
+        if keyword in combined:
+            score += weight
+
+    if score <= 0.0:
+        return 0.0
+
+    published_dt = _extract_article_datetime(article)
+    if published_dt is not None:
+        if published_dt.tzinfo is None:
+            published_dt = published_dt.replace(tzinfo=timezone.utc)
+        age_hours = (datetime.now(timezone.utc) - published_dt).total_seconds() / 3600.0
+        if age_hours > 72:
+            return 0.0
+        if age_hours > 36:
+            score *= 0.5
+        elif age_hours > 18:
+            score *= 0.75
+
+    source_obj = article.get("source")
+    source_name = ""
+    if isinstance(source_obj, Mapping):
+        source_name = _normalise_article_text(source_obj.get("name"))
+    elif hasattr(source_obj, "get"):
+        try:
+            source_name = _normalise_article_text(source_obj.get("name"))  # type: ignore[arg-type]
+        except Exception:
+            source_name = ""
+    if source_name in _SYMBOL_NEWS_CREDIBLE_SOURCES:
+        score += 0.4
+
+    if score < 1.5:
+        return 0.0
+
+    return score
+
+
+def _select_symbol_news_headlines(
+    articles: Sequence[Mapping[str, Any]], limit: int = 2
+) -> Sequence[Mapping[str, Any]]:
+    if limit <= 0:
+        return []
+
+    scored: list[Tuple[float, Mapping[str, Any]]] = []
+    for article in articles:
+        try:
+            score = _score_symbol_news_article(article)
+        except Exception:
+            continue
+        if score <= 0.0:
+            continue
+        scored.append((score, article))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [article for _, article in scored[:limit]]
+
+
+def _format_symbol_news_line(article: Mapping[str, Any]) -> str:
+    title = _normalise_article_text(article.get("title")) or "Unnamed headline"
+    description = _normalise_article_text(article.get("description"))
+    if description:
+        sentence_end = description.find(".")
+        if sentence_end != -1:
+            description = description[: sentence_end + 1]
+        if len(description) > 160:
+            description = description[:157].rstrip() + "..."
+
+    source_name = ""
+    source = article.get("source")
+    if isinstance(source, Mapping):
+        source_name = _normalise_article_text(source.get("name"))
+
+    published_dt = _extract_article_datetime(article)
+    timestamp = ""
+    if published_dt is not None:
+        if published_dt.tzinfo is None:
+            published_dt = published_dt.replace(tzinfo=timezone.utc)
+        timestamp = published_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    detail_parts = [part for part in (source_name, timestamp) if part]
+    detail_suffix = f" ({', '.join(detail_parts)})" if detail_parts else ""
+
+    if description:
+        return f"- {title}{detail_suffix}: {description}"
+    return f"- {title}{detail_suffix}"
+
+
+def summarize_symbol_news(symbol: str, max_items: int = 2) -> str:
+    symbol_key = symbol.upper()
+    now_ts = time.time()
+    cached = _symbol_news_cache.get(symbol_key)
+    if cached and now_ts - cached[0] < _SYMBOL_NEWS_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    try:
+        articles = fetch_symbol_news_sync(symbol)
+    except Exception:
+        logger.debug("Symbol news fetch failed", exc_info=True)
+        _symbol_news_cache[symbol_key] = (now_ts, "")
+        return ""
+
+    selected = _select_symbol_news_headlines(articles, limit=max_items)
+    if not selected:
+        summary = "No material symbol-specific headlines detected in the last 72 hours."
+    else:
+        summary = "\n".join(_format_symbol_news_line(article) for article in selected)
+
+    _symbol_news_cache[symbol_key] = (now_ts, summary)
+    return summary
 
 
 async def summarize_recent_news_async() -> str:
@@ -251,6 +472,9 @@ def prepare_trade_decision(
         )
 
     news_summary_value = news_summary if news_summary is not None else summarize_recent_news()
+    symbol_news_summary = summarize_symbol_news(symbol)
+    if not symbol_news_summary:
+        symbol_news_summary = "No material symbol-specific headlines detected in the last 72 hours."
 
     try:
         pattern_lower = pattern_name.lower() if isinstance(pattern_name, str) else ""
@@ -522,6 +746,8 @@ def prepare_trade_decision(
         f"Macro News Safe: {macro_news.get('safe', True)}\n"
         f"Macro News Notes: {macro_news.get('reason', 'N/A')}\n"
         f"Recent News Summary: {news_summary_value}\n\n"
+        "### Symbol-Specific News\n"
+        f"{symbol_news_summary}\n\n"
         "### Order Flow\n"
         f"Order Flow State: {orderflow}\n"
         f"Auction State: {auction_state if auction_state is not None else 'N/A'}\n\n"
@@ -552,6 +778,7 @@ def prepare_trade_decision(
         fear_greed=fear_greed,
         macro_news=dict(macro_news),
         news_summary=news_summary_value,
+        symbol_news_summary=symbol_news_summary,
         orderflow=orderflow,
         auction_state=auction_state,
         pattern_name=pattern_name,
@@ -575,6 +802,7 @@ def finalize_trade_decision(
     technical_score = prepared.technical_score
     pattern_memory_context = prepared.pattern_memory_context
     news_summary = prepared.news_summary
+    symbol_news_summary = prepared.symbol_news_summary
 
     response_text = str(llm_response) if llm_response is not None else ""
 
@@ -595,6 +823,7 @@ def finalize_trade_decision(
         base_payload = {
             "confidence": final_confidence,
             "news_summary": news_summary,
+            "symbol_news_summary": symbol_news_summary,
             "llm_decision": "LLM unavailable",
             "llm_approval": None,
             "llm_confidence": None,
@@ -685,6 +914,7 @@ def finalize_trade_decision(
             "reason": f"LLM advisor vetoed trade: {advisor_reason}",
             "narrative": advisor_thesis,
             "news_summary": news_summary,
+            "symbol_news_summary": symbol_news_summary,
             "llm_decision": advisor_reason,
             "llm_approval": parsed_decision,
             "llm_confidence": advisor_rating,
@@ -713,6 +943,7 @@ def finalize_trade_decision(
         "reason": "All filters passed",
         "narrative": narrative,
         "news_summary": news_summary,
+        "symbol_news_summary": symbol_news_summary,
         "llm_decision": advisor_reason or "Approved",
         "llm_approval": True,
         "llm_confidence": advisor_rating,

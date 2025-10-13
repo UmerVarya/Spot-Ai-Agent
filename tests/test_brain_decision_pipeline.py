@@ -37,6 +37,12 @@ def _patch_brain_defaults(monkeypatch):
         lambda **_: "Narrative from generator",
         raising=False,
     )
+    monkeypatch.setattr(
+        brain,
+        "summarize_symbol_news",
+        lambda *_, **__: "No material symbol-specific headlines detected in the last 72 hours.",
+        raising=False,
+    )
 
 
 def test_prepare_and_finalize_trade_decision(monkeypatch):
@@ -211,6 +217,7 @@ def test_finalize_trade_decision_error_blocks_weak_signals(monkeypatch):
         fear_greed=20,
         macro_news={"safe": True, "reason": ""},
         news_summary="",
+        symbol_news_summary="",
         orderflow="neutral",
         auction_state=None,
         pattern_name="",
