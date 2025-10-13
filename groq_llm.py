@@ -47,6 +47,31 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 logger = setup_logger(__name__)
 
+_SINGLE_JUDGMENT_SYSTEM_MESSAGE = (
+    "You are a highly experienced crypto trader assistant. Always respond with a single JSON object containing"
+    " the keys decision, confidence, reason, and thesis.\n"
+    "Think through the problem step by step in a private scratchpad. Before responding, silently run this "
+    "private verification checklist (DO NOT OUTPUT IT):\n"
+    "- Confirm you understand the market context and question.\n"
+    "- Choose a decision of \"Yes\" or \"No\" consistent with the evidence.\n"
+    "- Set confidence as a numeric value between 0 and 10.\n"
+    "- Provide a concise reason referencing the most important factors.\n"
+    "- Craft a thesis of 2-3 sentences that aligns with the decision and reason.\n"
+    "- Double-check the final reply is valid JSON with keys decision, confidence, reason, and thesis."
+)
+
+_BATCH_SYSTEM_MESSAGE = (
+    "You are an experienced crypto trading advisor. Respond with a single JSON object mapping each symbol"
+    " to its analysis.\n"
+    "Think through each symbol step by step in a private scratchpad. Before responding, silently run this "
+    "private verification checklist for every symbol (DO NOT OUTPUT IT):\n"
+    "- Ensure each decision is \"Yes\" or \"No\" and supported by the prompt.\n"
+    "- Set confidence as a numeric value between 0 and 10.\n"
+    "- Provide a concise reason highlighting the key drivers for the trade.\n"
+    "- Write a thesis of 2-3 sentences consistent with the decision and reason.\n"
+    "- Confirm the final reply is valid JSON mapping each symbol to an object with keys decision, confidence, reason, and thesis."
+)
+
 
 if GROQ_API_KEY:
     logger.info("LLM backend active: Groq (model=%s)", config.get_groq_model())
@@ -246,6 +271,7 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
         + "\n\nPlease respond in JSON format with the following keys:"
         + " decision (Yes or No), confidence (0 to 10 as a number), reason (a short explanation),"
         + " and thesis (2-3 sentence summary)."
+        + " Ensure the JSON is valid and contains no additional commentary."
     )
 
     if not GROQ_API_KEY:
@@ -272,10 +298,7 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
         return "LLM error: Groq client unavailable."
 
     messages = [
-        {
-            "role": "system",
-            "content": "You are a highly experienced crypto trader assistant. Always respond in JSON.",
-        },
+        {"role": "system", "content": _SINGLE_JUDGMENT_SYSTEM_MESSAGE},
         {"role": "user", "content": user_prompt},
     ]
 
@@ -342,6 +365,7 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
         + "\n\nPlease respond in JSON format with the following keys:"
         + " decision (Yes or No), confidence (0 to 10 as a number), reason (a short explanation),"
         + " and thesis (2-3 sentence summary)."
+        + " Ensure the JSON is valid and contains no additional commentary."
     )
 
     if not GROQ_API_KEY:
@@ -368,10 +392,7 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
         return "LLM error: Groq client unavailable."
 
     messages = [
-        {
-            "role": "system",
-            "content": "You are a highly experienced crypto trader assistant. Always respond in JSON.",
-        },
+        {"role": "system", "content": _SINGLE_JUDGMENT_SYSTEM_MESSAGE},
         {"role": "user", "content": user_prompt},
     ]
 
@@ -467,14 +488,7 @@ async def async_batch_llm_judgment(
         chunk = items[idx : idx + batch_size]
         batch_prompt = _build_batch_prompt(chunk)
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are an experienced crypto trading advisor. For each section labelled by a symbol, "
-                    "return a JSON object with keys decision (Yes/No), confidence (0-10 float), reason, and thesis."
-                    " Respond with a single JSON object mapping each symbol to its analysis."
-                ),
-            },
+            {"role": "system", "content": _BATCH_SYSTEM_MESSAGE},
             {"role": "user", "content": batch_prompt},
         ]
         try:

@@ -32,6 +32,18 @@ except Exception:  # pragma: no cover - allow import without Ollama installed
 
 logger = setup_logger(__name__)
 
+_STRUCTURED_SYSTEM_MESSAGE = (
+    "You are a quantitative crypto trading assistant. Respond only with JSON containing decision (Yes/No), "
+    "confidence (0-10 float), reason, and thesis (2-3 sentences).\n"
+    "Think through the problem step by step in a private scratchpad. Before replying, silently run this private "
+    "verification checklist (DO NOT OUTPUT IT):\n"
+    "- Confirm the decision aligns with the provided context.\n"
+    "- Ensure confidence is a numeric value between 0 and 10.\n"
+    "- Provide a concise reason highlighting the main drivers.\n"
+    "- Write a thesis of 2-3 sentences consistent with the decision.\n"
+    "- Double-check the final reply is valid JSON with the required keys and no extra text."
+)
+
 _LOCAL_ENABLED = os.getenv("ENABLE_LOCAL_LLM", "1").lower() not in {"0", "false", "no"}
 _DEFAULT_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
 
@@ -63,10 +75,7 @@ def structured_trade_judgment(prompt: str, *, temperature: float = 0.2, num_ctx:
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are a quantitative crypto trading assistant. Respond only with JSON containing"
-                " decision (Yes/No), confidence (0-10 float), reason, and thesis (2-3 sentences)."
-            ),
+            "content": _STRUCTURED_SYSTEM_MESSAGE,
         },
         {"role": "user", "content": prompt},
     ]
