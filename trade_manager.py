@@ -40,6 +40,7 @@ from trade_storage import (
     load_active_trades,
     save_active_trades,
     is_trade_active,
+    MAX_CONCURRENT_TRADES,
 )
 from rl_policy import RLPositionSizer
 from microstructure import plan_execution, detect_sell_pressure
@@ -472,6 +473,14 @@ def create_new_trade(
     symbol = trade.get("symbol")
     if symbol and is_trade_active(symbol):
         logger.info("Trade for %s already active; skipping new entry.", symbol)
+        return False
+    current_trades = load_active_trades()
+    if len(current_trades) >= MAX_CONCURRENT_TRADES:
+        logger.info(
+            "Maximum concurrent trades (%d) already active; skipping %s.",
+            MAX_CONCURRENT_TRADES,
+            symbol or "unknown",
+        )
         return False
     return store_trade(trade)
 

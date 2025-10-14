@@ -1222,17 +1222,15 @@ def log_signal(
         df_entry.to_csv(log_path, index=False, encoding="utf-8")
 
 def get_position_size(confidence: float) -> int:
-    """Return an integer position size based on the model confidence."""
+    """Return the target notional size (in USDT) based on confidence."""
+
     if confidence >= 8.5:
-        return 100
+        return 500
     elif confidence >= 6.5:
-        return 80
-    elif confidence >= 5.5:
-        return 50
+        return 450
     elif confidence >= 4.5:
-        return 20
-    else:
-        return 0
+        return 400
+    return 0
 
 def simulate_slippage(price: float, direction: str = "long", slippage_pct: float = 0.0005) -> float:
     """Apply a simple slippage adjustment to a price."""

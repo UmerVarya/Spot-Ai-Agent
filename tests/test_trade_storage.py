@@ -370,6 +370,17 @@ def test_duplicate_trade_guard(tmp_path, monkeypatch):
     assert len(trades) == 1
 
 
+def test_create_new_trade_respects_cap(tmp_path, monkeypatch):
+    path = tmp_path / "active.json"
+    monkeypatch.setattr(trade_storage, "ACTIVE_TRADES_FILE", str(path))
+    first = {"symbol": "BTCUSDT", "entry": 100, "direction": "long"}
+    second = {"symbol": "ETHUSDT", "entry": 200, "direction": "long"}
+    assert trade_manager.create_new_trade(first) is True
+    assert trade_manager.create_new_trade(second) is False
+    trades = trade_storage.load_active_trades()
+    assert len(trades) == 1
+
+
 def test_store_trade_skips_duplicates(tmp_path, monkeypatch):
     path = tmp_path / "active.json"
     monkeypatch.setattr(trade_storage, "ACTIVE_TRADES_FILE", str(path))
@@ -380,3 +391,14 @@ def test_store_trade_skips_duplicates(tmp_path, monkeypatch):
     trades = trade_storage.load_active_trades()
     assert len(trades) == 1
     assert trades[0]["entry"] == 100
+
+
+def test_store_trade_respects_global_cap(tmp_path, monkeypatch):
+    path = tmp_path / "active.json"
+    monkeypatch.setattr(trade_storage, "ACTIVE_TRADES_FILE", str(path))
+    first = {"symbol": "BTCUSDT", "entry": 100}
+    second = {"symbol": "ETHUSDT", "entry": 200}
+    assert trade_storage.store_trade(first) is True
+    assert trade_storage.store_trade(second) is False
+    trades = trade_storage.load_active_trades()
+    assert len(trades) == 1
