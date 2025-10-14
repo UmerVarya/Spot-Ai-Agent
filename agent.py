@@ -89,6 +89,9 @@ from realtime_signal_cache import RealTimeSignalCache
 from auction_state import get_auction_state
 from alternative_data import get_alternative_data
 from risk_veto import minutes_until_next_event
+from state_manager import CentralState
+from worker_pools import ScheduledTask, WorkerPools
+from market_stream import BinanceEventStream
 
 
 BREAKOUT_PATTERNS = {
@@ -300,8 +303,6 @@ def run_agent_loop() -> None:
         status_path=NEWS_MONITOR_STATE_PATH,
         alert_callback=_handle_news_alert,
     )
-
-    threading.Thread(target=auto_run_news, daemon=True).start()
     if RUN_DASHBOARD:
         threading.Thread(target=run_streamlit, daemon=True).start()
     # Ensure symbol_scores.json exists
@@ -316,28 +317,139 @@ def run_agent_loop() -> None:
         stale_after=SIGNAL_STALE_AFTER,
     )
     signal_cache.start()
+    state = CentralState()
+    worker_pools = WorkerPools()
+    guard_stop = threading.Event()
+    scan_trigger = threading.Event()
+    scan_lock = threading.Lock()
+    guard_interval = float(os.getenv("GUARD_INTERVAL", "0.75"))
+    guard_interval = max(0.5, min(1.0, guard_interval))
+    macro_task = ScheduledTask("macro", min_interval=60.0, max_interval=300.0)
+    news_task = ScheduledTask("news", min_interval=300.0, max_interval=900.0)
+    macro_task.next_run = 0.0
+    news_task.next_run = 0.0
+
+    def refresh_macro_state() -> None:
+        try:
+            btc_dom_raw = get_btc_dominance()
+            fear_greed_raw = get_fear_greed_index()
+            sentiment = get_macro_sentiment()
+            btc_dom = float(btc_dom_raw) if btc_dom_raw is not None else 0.0
+            fear_greed = int(fear_greed_raw) if fear_greed_raw is not None else 0
+            payload = {
+                "btc_dominance": btc_dom,
+                "fear_greed": fear_greed,
+                "sentiment": sentiment,
+            }
+            state.update_section("macro", payload)
+            scan_trigger.set()
+        except Exception as exc:
+            logger.error("Macro refresh task failed: %s", exc, exc_info=True)
+
+    def refresh_news_state() -> None:
+        try:
+            events = _run_async_task(lambda: run_news_fetcher_async())
+            assessment = None
+            next_event = minutes_until_next_event(events)
+            if events:
+                try:
+                    assessment = _run_async_task(lambda: analyze_news_with_llm_async(events))
+                except Exception as analysis_exc:
+                    logger.debug("LLM news analysis failed: %s", analysis_exc, exc_info=True)
+            payload = {
+                "events": events,
+                "assessment": assessment,
+                "next_event_minutes": next_event,
+            }
+            state.merge_section("news", payload)
+            scan_trigger.set()
+        except Exception as exc:
+            logger.debug("News refresh task failed: %s", exc, exc_info=True)
+
+    def on_market_event(event: dict) -> None:
+        try:
+            event_type = str(event.get("type", ""))
+            symbol = str(event.get("symbol", "")).upper()
+            ts = float(event.get("timestamp", time.time()))
+            price = event.get("price")
+            if event_type in {"trade", "kline", "rest_price"} and symbol:
+                try:
+                    price_value = float(price) if price is not None else None
+                except Exception:
+                    price_value = None
+                if price_value is not None:
+                    state.update_price(symbol, price_value, timestamp=ts)
+            if event_type == "kline" and symbol:
+                payload = event.get("payload") or {}
+                if isinstance(payload, dict):
+                    state.update_kline(symbol, payload, timestamp=ts)
+            if event_type == "order_update":
+                payload = event.get("payload")
+                if isinstance(payload, dict):
+                    state.append_order_update(payload)
+            if event_type in {"trade", "kline", "order_update", "rest_price"}:
+                scan_trigger.set()
+        except Exception:
+            logger.exception("Failed to process market event: %s", event)
+
+    market_stream = BinanceEventStream(symbols=["BTCUSDT"], on_event=on_market_event)
+    market_stream.start()
+
+    def guard_loop() -> None:
+        while not guard_stop.is_set():
+            now = time.time()
+            if macro_task.due(now):
+                worker_pools.submit_io(refresh_macro_state)
+                macro_task.schedule_next(now)
+            if news_task.due(now):
+                worker_pools.submit_io(refresh_news_state)
+                news_task.schedule_next(now)
+            monitor_instance = get_news_monitor()
+            if monitor_instance is not None:
+                try:
+                    monitor_state = monitor_instance.get_latest_assessment()
+                    if monitor_state:
+                        state.merge_section("news", {"monitor": monitor_state})
+                        if monitor_state.get("alert_triggered"):
+                            scan_trigger.set()
+                except Exception as monitor_exc:
+                    logger.debug("News monitor state unavailable: %s", monitor_exc, exc_info=True)
+            market_stream.ensure_alive()
+            if not market_stream.is_connected():
+                tracked = list(state.tracked_symbols())
+                if not tracked:
+                    tracked = ["BTCUSDT"]
+                market_stream.poll_rest(tracked)
+            guard_stop.wait(guard_interval)
+
+    threading.Thread(target=guard_loop, daemon=True).start()
+    worker_pools.submit_io(refresh_macro_state)
+    worker_pools.submit_io(refresh_news_state)
     while True:
+        triggered = scan_trigger.wait(timeout=guard_interval)
+        if not triggered:
+            continue
+        if not scan_lock.acquire(blocking=False):
+            continue
+        scan_trigger.clear()
         try:
             logger.info("=== Scan @ %s ===", time.strftime('%Y-%m-%d %H:%M:%S'))
             # Check drawdown guard
             if is_trading_blocked():
                 logger.warning("Drawdown limit reached. Skipping trading for today.")
-                time.sleep(SCAN_INTERVAL)
                 continue
             perf = compute_performance_metrics()
             if perf.get("max_drawdown", 0) < -0.25:
                 logger.warning("Max drawdown exceeded 25%. Halting trading.")
-                time.sleep(SCAN_INTERVAL)
                 continue
-            # Macro signals
-            try:
-                btc_d = get_btc_dominance()
-                fg = get_fear_greed_index()
-                sentiment = get_macro_sentiment()
-            except Exception as e:
-                logger.error("Macro data fetch error: %s", e, exc_info=True)
-                time.sleep(SCAN_INTERVAL)
+            macro_snapshot = state.get_section("macro")
+            macro_data = macro_snapshot.get("data") or {}
+            if not macro_data:
+                logger.debug("Macro context not ready yet. Awaiting refresh.")
                 continue
+            btc_d = macro_data.get("btc_dominance", 0.0)
+            fg = macro_data.get("fear_greed", 0)
+            sentiment = macro_data.get("sentiment") or {}
             # Extract sentiment bias and confidence safely
             try:
                 sentiment_confidence = float(sentiment.get("confidence", 5.0))
@@ -363,24 +475,19 @@ def run_agent_loop() -> None:
             skip_all, skip_alt, macro_reasons = macro_filter_decision(
                 btc_d, fg, sentiment_bias, sentiment_confidence
             )
-            monitor_state = None
-            monitor_instance = get_news_monitor()
-            if monitor_instance is not None:
-                monitor_state = monitor_instance.get_latest_assessment()
-                if monitor_state and monitor_state.get("halt_trading"):
-                    reason = str(monitor_state.get("reason", "LLM requested trading halt"))
-                    logger.error(
-                        "Skipping scan due to LLM news halt signal: %s", reason
-                    )
-                    time.sleep(SCAN_INTERVAL)
-                    continue
-                if monitor_state and monitor_state.get("alert_triggered"):
-                    macro_reasons.append("LLM news alert")
+            news_snapshot = state.get_section("news")
+            news_data = news_snapshot.get("data") or {}
+            monitor_state = news_data.get("monitor") if isinstance(news_data, dict) else None
+            if monitor_state and monitor_state.get("halt_trading"):
+                reason = str(monitor_state.get("reason", "LLM requested trading halt"))
+                logger.error("Skipping scan due to LLM news halt signal: %s", reason)
+                continue
+            if monitor_state and monitor_state.get("alert_triggered"):
+                macro_reasons.append("LLM news alert")
             signal_cache.update_context(sentiment_bias=sentiment_bias)
             if skip_all:
                 reason_text = " + ".join(macro_reasons) if macro_reasons else "unfavorable conditions"
                 logger.warning("Market unfavorable (%s). Skipping scan.", reason_text)
-                time.sleep(SCAN_INTERVAL)
                 continue
             btc_vol = float("nan")
             btc_trend_bias = "flat"
@@ -425,26 +532,19 @@ def run_agent_loop() -> None:
             macro_news_assessment = {"safe": True, "reason": "No events analyzed"}
             macro_news_summary = ""
             next_news_minutes = None
-            if monitor_state and not monitor_state.get("stale"):
-                macro_news_assessment = monitor_state
-                macro_news_summary = str(monitor_state.get("reason", ""))
-                next_news_minutes = monitor_state.get("next_event_minutes")
-            else:
-                try:
-                    events = _run_async_task(lambda: run_news_fetcher_async())
-                    if events:
-                        macro_news_assessment = _run_async_task(
-                            lambda: analyze_news_with_llm_async(events)
-                        )
-                        next_news_minutes = minutes_until_next_event(events)
-                    macro_news_summary = str(macro_news_assessment.get("reason", ""))
-                except Exception as news_exc:
-                    logger.debug(
-                        "Macro news analysis unavailable: %s", news_exc, exc_info=True
-                    )
-                    macro_news_assessment = {"safe": True, "reason": "LLM error"}
-                    macro_news_summary = ""
-                    next_news_minutes = minutes_until_next_event(None)
+            if isinstance(news_data, dict):
+                if monitor_state and not monitor_state.get("stale"):
+                    macro_news_assessment = monitor_state
+                    macro_news_summary = str(monitor_state.get("reason", ""))
+                    next_news_minutes = monitor_state.get("next_event_minutes")
+                else:
+                    stored_assessment = news_data.get("assessment")
+                    if stored_assessment:
+                        macro_news_assessment = stored_assessment
+                        macro_news_summary = str(stored_assessment.get("reason", ""))
+                    stored_next = news_data.get("next_event_minutes")
+                    if stored_next is not None:
+                        next_news_minutes = stored_next
             # Load active trades and ensure only long trades remain (spot mode)
             active_trades_raw = load_active_trades()
             active_trades = []
@@ -475,6 +575,8 @@ def run_agent_loop() -> None:
                 top_symbols = [sym for sym in top_symbols if sym.upper() == "BTCUSDT"]
                 if macro_reason_text:
                     logger.warning("Macro gating (%s). Scanning only BTCUSDT.", macro_reason_text)
+            if top_symbols:
+                market_stream.set_symbols(top_symbols)
             session = get_market_session()
             potential_trades: list[dict] = []
             symbol_scores: dict[str, dict[str, float | None]] = {}
@@ -1389,6 +1491,16 @@ def run_agent_loop() -> None:
                     ):
                         active_trades.append(new_trade)
                         save_active_trades(active_trades)
+                        try:
+                            state.merge_narrative(
+                                symbol,
+                                {
+                                    "last_open_narrative": narrative,
+                                    "opened_at": time.time(),
+                                },
+                            )
+                        except Exception:
+                            logger.debug("Failed to persist narrative state for %s", symbol, exc_info=True)
                         send_email(
                             f"New Trade Opened: {symbol}",
                             f"{new_trade}\n\n Narrative:\n{narrative}\n\nNews Summary:\n{decision_obj.get('news_summary', '')}",
@@ -1419,10 +1531,11 @@ def run_agent_loop() -> None:
                 logger.info("Saved symbol scores (persistent memory updated).")
             except Exception as e:
                 logger.error("Error saving symbol scores: %s", e, exc_info=True)
-            time.sleep(SCAN_INTERVAL)
         except Exception as e:
             logger.error("Main Loop Error: %s", e, exc_info=True)
-            time.sleep(10)
+            guard_stop.wait(10)
+        finally:
+            scan_lock.release()
 
 
 if __name__ == "__main__":

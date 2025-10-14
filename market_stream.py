@@ -12,11 +12,13 @@ from __future__ import annotations
 import logging
 import math
 import os
+import queue
+import random
 import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
 try:  # pragma: no cover - optional import during docs build
     from binance import ThreadedWebsocketManager  # type: ignore
@@ -497,3 +499,323 @@ def get_market_stream() -> BinanceMarketStream:
         if _global_stream is None:
             _global_stream = BinanceMarketStream()
         return _global_stream
+
+
+class ExponentialBackoff:
+    """Simple exponential backoff helper."""
+
+    def __init__(
+        self,
+        *,
+        base: float = 1.0,
+        factor: float = 2.0,
+        max_interval: float = 60.0,
+        jitter: float = 0.25,
+    ) -> None:
+        self.base = float(base)
+        self.factor = float(factor)
+        self.max_interval = float(max_interval)
+        self.jitter = float(jitter)
+        self._attempts = 0
+        self._lock = threading.Lock()
+
+    def next_interval(self) -> float:
+        with self._lock:
+            interval = min(self.max_interval, self.base * (self.factor ** self._attempts))
+            if self.jitter:
+                jitter = interval * random.uniform(-self.jitter, self.jitter)
+                interval = max(self.base, interval + jitter)
+            self._attempts += 1
+            return interval
+
+    def reset(self) -> None:
+        with self._lock:
+            self._attempts = 0
+
+
+class BinanceEventStream:
+    """Event-driven wrapper around Binance WebSocket feeds.
+
+    The class exposes a thread-safe queue of market events.  Each event is a
+    dictionary with at least ``type`` and ``symbol`` keys.  Connection health is
+    continuously monitored via heartbeat timestamps.  If the stream becomes
+    stale the sockets are restarted with exponential backoff.  When sockets
+    cannot be established the class falls back to REST polling to keep prices
+    reasonably fresh until WebSocket connectivity resumes.
+    """
+
+    HEARTBEAT_SECONDS = 10.0
+    STALE_AFTER_SECONDS = 30.0
+
+    def __init__(
+        self,
+        symbols: Optional[Iterable[str]] = None,
+        *,
+        on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> None:
+        self._symbols = {map_symbol_for_binance(symbol) for symbol in (symbols or [])}
+        self._on_event = on_event
+        self._queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+        self._manager_lock = threading.Lock()
+        self._twm: Optional[ThreadedWebsocketManager] = None
+        self._client: Optional[Client] = None
+        self._stream_ids: Dict[str, Dict[str, int]] = {}
+        self._user_socket_id: Optional[int] = None
+        self._stop_event = threading.Event()
+        self._monitor_thread: Optional[threading.Thread] = None
+        self._last_message = 0.0
+        self._connected = threading.Event()
+        self._backoff = ExponentialBackoff(base=1.0, factor=2.0, max_interval=90.0)
+        self._disabled = False
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    @property
+    def event_queue(self) -> "queue.Queue[Dict[str, Any]]":
+        return self._queue
+
+    def set_symbols(self, symbols: Iterable[str]) -> None:
+        mapped = {map_symbol_for_binance(symbol) for symbol in symbols}
+        with self._manager_lock:
+            if mapped == self._symbols:
+                return
+            removed = self._symbols - mapped
+            added = mapped - self._symbols
+            self._symbols = mapped
+        for symbol in removed:
+            self._stop_symbol(symbol)
+        for symbol in added:
+            self._start_symbol(symbol)
+
+    def start(self) -> None:
+        if self._disabled:
+            return
+        self._ensure_manager()
+        if self._disabled:
+            return
+        self._stop_event.clear()
+        with self._manager_lock:
+            for symbol in list(self._symbols):
+                self._start_symbol(symbol)
+            self._start_user_socket()
+        if self._monitor_thread is None or not self._monitor_thread.is_alive():
+            self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            self._monitor_thread.start()
+        self._backoff.reset()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        with self._manager_lock:
+            for symbol in list(self._stream_ids):
+                self._stop_symbol(symbol)
+            if self._twm is not None:
+                try:
+                    if self._user_socket_id is not None:
+                        self._twm.stop_socket(self._user_socket_id)
+                except Exception:
+                    pass
+            self._user_socket_id = None
+        if self._twm is not None:
+            try:
+                self._twm.stop()
+            except Exception:
+                pass
+            self._twm = None
+        self._connected.clear()
+
+    def ensure_alive(self) -> None:
+        if self._stop_event.is_set() or self._disabled:
+            return
+        now = time.time()
+        if now - self._last_message > self.STALE_AFTER_SECONDS:
+            logger.warning("Binance event stream heartbeat stale; reconnecting sockets")
+            self._restart_streams()
+
+    def is_connected(self) -> bool:
+        return self._connected.is_set()
+
+    def poll_rest(self, symbols: Optional[Iterable[str]] = None) -> None:
+        if self._client is None:
+            return
+        for symbol in symbols or list(self._symbols):
+            try:
+                ticker = self._client.get_symbol_ticker(symbol=symbol)
+                price = float(ticker.get("price", 0.0))
+            except Exception as exc:  # pragma: no cover - network dependent
+                logger.debug("REST price poll failed for %s: %s", symbol, exc)
+                continue
+            event = {
+                "type": "rest_price",
+                "symbol": symbol,
+                "price": price,
+                "timestamp": time.time(),
+            }
+            self._publish_event(event)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _ensure_manager(self) -> None:
+        if ThreadedWebsocketManager is None or Client is None:
+            logger.debug("Binance WebSocket dependencies unavailable; disabling event stream.")
+            self._disabled = True
+            return
+        with self._manager_lock:
+            if self._twm is None:
+                try:
+                    api_key = os.getenv("BINANCE_API_KEY")
+                    api_secret = os.getenv("BINANCE_API_SECRET")
+                    self._twm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
+                    self._twm.start()
+                except Exception as exc:  # pragma: no cover - network dependent
+                    logger.warning("Failed to start Binance event stream manager: %s", exc)
+                    self._twm = None
+                    self._disabled = True
+                    return
+            if self._client is None:
+                try:
+                    api_key = os.getenv("BINANCE_API_KEY")
+                    api_secret = os.getenv("BINANCE_API_SECRET")
+                    self._client = Client(api_key, api_secret) if api_key and api_secret else Client()
+                except Exception as exc:  # pragma: no cover - network dependent
+                    logger.warning("Failed to create Binance REST client: %s", exc)
+                    self._client = None
+
+    def _start_symbol(self, symbol: str) -> None:
+        if self._disabled or self._twm is None:
+            return
+
+        def handle_trade(msg: dict) -> None:
+            if not isinstance(msg, dict):
+                return
+            price = float(msg.get("p") or msg.get("c") or 0.0)
+            quantity = float(msg.get("q") or msg.get("Q") or 0.0)
+            event_time = float(msg.get("E") or msg.get("T") or time.time() * 1000) / 1000.0
+            event = {
+                "type": "trade",
+                "symbol": symbol,
+                "price": price,
+                "quantity": quantity,
+                "payload": msg,
+                "timestamp": event_time,
+            }
+            self._publish_event(event)
+
+        def handle_kline(msg: dict) -> None:
+            if not isinstance(msg, dict):
+                return
+            payload = msg.get("k") or msg
+            event_time = float(payload.get("T") or payload.get("t") or time.time() * 1000) / 1000.0
+            close_price = float(payload.get("c") or payload.get("C") or 0.0)
+            event = {
+                "type": "kline",
+                "symbol": symbol,
+                "price": close_price,
+                "payload": payload,
+                "timestamp": event_time,
+            }
+            self._publish_event(event)
+
+        try:
+            trade_socket = self._twm.start_aggtrade_socket(callback=handle_trade, symbol=symbol.lower())
+            kline_socket = self._twm.start_kline_socket(callback=handle_kline, symbol=symbol.lower())
+        except Exception as exc:  # pragma: no cover - network dependent
+            logger.warning("Failed to subscribe to Binance streams for %s: %s", symbol, exc)
+            self._disabled = True
+            return
+        self._stream_ids[symbol] = {"trade": trade_socket, "kline": kline_socket}
+
+    def _stop_symbol(self, symbol: str) -> None:
+        streams = self._stream_ids.pop(symbol, None)
+        if self._twm is None or not streams:
+            return
+        for stream_id in streams.values():
+            if not stream_id:
+                continue
+            try:
+                self._twm.stop_socket(stream_id)
+            except Exception:  # pragma: no cover - best effort
+                continue
+
+    def _start_user_socket(self) -> None:
+        if self._client is None or self._twm is None:
+            return
+
+        def handle_user_data(msg: dict) -> None:
+            if not isinstance(msg, dict):
+                return
+            event_type = msg.get("e")
+            if event_type not in {"executionReport", "outboundAccountPosition"}:
+                return
+            event = {
+                "type": "order_update",
+                "symbol": msg.get("s"),
+                "payload": msg,
+                "timestamp": float(msg.get("E", time.time() * 1000)) / 1000.0,
+            }
+            self._publish_event(event)
+
+        try:
+            listen_key = None
+            try:
+                listen_key = self._client.stream_get_listen_key()  # type: ignore[attr-defined]
+            except Exception:
+                listen_key = None
+            if not listen_key:
+                listen_key = self._client.new_listen_key()  # type: ignore[attr-defined]
+            self._user_socket_id = self._twm.start_user_socket(callback=handle_user_data, listen_key=listen_key)
+        except Exception as exc:  # pragma: no cover - network dependent
+            logger.debug("User data stream unavailable: %s", exc)
+            self._user_socket_id = None
+
+    def _monitor_loop(self) -> None:
+        while not self._stop_event.is_set():
+            time.sleep(self.HEARTBEAT_SECONDS)
+            self.ensure_alive()
+
+    def _restart_streams(self) -> None:
+        if self._disabled:
+            return
+        interval = self._backoff.next_interval()
+        logger.info("Restarting Binance streams in %.2fs", interval)
+        time.sleep(interval)
+        with self._manager_lock:
+            for symbol in list(self._stream_ids):
+                self._stop_symbol(symbol)
+            if self._twm is not None and self._user_socket_id is not None:
+                try:
+                    self._twm.stop_socket(self._user_socket_id)
+                except Exception:
+                    pass
+                self._user_socket_id = None
+        self._ensure_manager()
+        if self._disabled:
+            return
+        with self._manager_lock:
+            for symbol in list(self._symbols):
+                self._start_symbol(symbol)
+            self._start_user_socket()
+
+    def _publish_event(self, event: Dict[str, Any]) -> None:
+        self._last_message = max(self._last_message, float(event.get("timestamp", time.time())))
+        self._connected.set()
+        try:
+            self._queue.put_nowait(event)
+        except queue.Full:
+            logger.debug("Dropping event due to full queue: %s", event.get("type"))
+        if callable(self._on_event):
+            try:
+                self._on_event(event)
+            except Exception:
+                logger.exception("Event handler raised an exception")
+
+
+__all__ = [
+    "RollingTradeStats",
+    "OrderBookState",
+    "BinanceMarketStream",
+    "get_market_stream",
+    "BinanceEventStream",
+    "ExponentialBackoff",
+]
