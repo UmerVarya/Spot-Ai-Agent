@@ -8,6 +8,7 @@ def reload_config():
 
 def clear_env(monkeypatch):
     monkeypatch.delenv("TRADE_LLM_MODEL", raising=False)
+    monkeypatch.delenv("GROQ_MODEL", raising=False)
     monkeypatch.delenv("MACRO_LLM_MODEL", raising=False)
     monkeypatch.delenv("NEWS_LLM_MODEL", raising=False)
     monkeypatch.delenv("GROQ_OVERFLOW_MODEL", raising=False)
@@ -46,6 +47,7 @@ def test_custom_models(monkeypatch):
     reload_config()
 
     monkeypatch.setenv("TRADE_LLM_MODEL", "custom-trade")
+    monkeypatch.setenv("GROQ_MODEL", "custom-trade-legacy")
     monkeypatch.setenv("MACRO_LLM_MODEL", "custom-macro")
     monkeypatch.setenv("NEWS_LLM_MODEL", "custom-news")
     monkeypatch.setenv("GROQ_OVERFLOW_MODEL", "custom-overflow")
@@ -55,6 +57,24 @@ def test_custom_models(monkeypatch):
     assert config.get_macro_model() == "custom-macro"
     assert config.get_news_model() == "custom-news"
     assert config.get_overflow_model() == "custom-overflow"
+
+    clear_env(monkeypatch)
+    reload_config()
+
+
+def test_legacy_groq_env_var(monkeypatch):
+    clear_env(monkeypatch)
+    reload_config()
+
+    monkeypatch.setenv("GROQ_MODEL", "legacy-trade")
+    reload_config()
+
+    assert config.get_groq_model() == "legacy-trade"
+
+    monkeypatch.setenv("TRADE_LLM_MODEL", "new-trade")
+    reload_config()
+
+    assert config.get_groq_model() == "new-trade"
 
     clear_env(monkeypatch)
     reload_config()
