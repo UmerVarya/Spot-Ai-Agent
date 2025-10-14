@@ -228,6 +228,7 @@ class LLMNewsMonitor:
 
         crypto_patterns = (
             r"\bcrypto\b",
+            r"\bcryptocurrencies\b",
             r"\bbtc\b",
             r"\bbitcoin\b",
             r"\beth\b",
@@ -235,7 +236,9 @@ class LLMNewsMonitor:
             r"\betf\b",
             r"\bmining\b",
             r"\bsec\b",
-            r"\bliquidity\b",
+            r"\bcrypto liquidity\b",
+            r"\btoken liquidity\b",
+            r"\bliquidity pool\b",
         )
         fx_patterns = (
             r"\bfx\b",
