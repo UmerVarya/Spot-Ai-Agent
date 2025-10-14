@@ -34,6 +34,9 @@ from risk_veto import minutes_until_next_event
 LOGGER = setup_logger(__name__)
 EVENT_SCORER = DEFAULT_EVENT_SCORER
 
+MAJOR_MACRO_HALT_CATEGORIES = frozenset({"macro:cpi", "macro:fomc", "geopolitics:conflict"})
+MODERATE_RELEVANCE_CEILING = 3.0
+
 
 NewsFetcher = Callable[[], Awaitable[Iterable[Mapping[str, Any]]]]
 NewsAnalyzer = Callable[[Iterable[Mapping[str, Any]]], Awaitable[Mapping[str, Any]]]
@@ -307,15 +310,54 @@ class LLMNewsMonitor:
         has_fx_stress = _matches(fx_patterns, search_texts)
         caution_mode = False
 
-        if has_fx_stress and not has_crypto_confirmation:
+        def _enter_warning_mode() -> None:
+            nonlocal severity, caution_mode
             severity = min(
                 severity,
                 max(self.alert_threshold, self.halt_threshold - 1e-3),
             )
             caution_mode = True
 
+        if has_fx_stress and not has_crypto_confirmation:
+            _enter_warning_mode()
+
+        event_categories: set[str] = set()
+        for item in scored_events:
+            if not isinstance(item, Mapping):
+                continue
+            relevance = item.get("relevance")
+            if not isinstance(relevance, Mapping):
+                continue
+            category = relevance.get("category")
+            if category:
+                event_categories.add(str(category))
+        if not event_categories:
+            for item in events:
+                if not isinstance(item, Mapping):
+                    continue
+                relevance = item.get("relevance")
+                if not isinstance(relevance, Mapping):
+                    continue
+                category = relevance.get("category")
+                if category:
+                    event_categories.add(str(category))
+
+        major_macro_detected = bool(event_categories & MAJOR_MACRO_HALT_CATEGORIES)
         halt_eligible = halt_relevant_events > 0
-        halt_trading = severity >= self.halt_threshold and not caution_mode and halt_eligible
+        moderate_relevance = halt_eligible and halt_relevance_score < MODERATE_RELEVANCE_CEILING
+
+        if moderate_relevance:
+            _enter_warning_mode()
+
+        if severity >= self.halt_threshold and halt_eligible and not major_macro_detected:
+            _enter_warning_mode()
+
+        halt_trading = (
+            severity >= self.halt_threshold
+            and not caution_mode
+            and halt_eligible
+            and major_macro_detected
+        )
         alert_triggered = severity >= self.alert_threshold
         next_event_minutes = minutes_until_next_event(events) if events else None
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -328,6 +370,8 @@ class LLMNewsMonitor:
                 break
             trimmed_events.append(dict(event))
 
+        warning_only = alert_triggered and (caution_mode or not halt_trading)
+
         state: dict[str, Any] = {
             "safe": safe,
             "sensitivity": round(sensitivity, 3),
@@ -337,6 +381,7 @@ class LLMNewsMonitor:
             "halt_minutes": 120 if halt_trading else 0,
             "alert_triggered": alert_triggered,
             "caution_mode": caution_mode,
+            "warning_only": warning_only,
             "next_event_minutes": next_event_minutes,
             "last_checked": now_iso,
             "events": trimmed_events,
