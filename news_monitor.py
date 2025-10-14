@@ -26,11 +26,13 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping
 import hashlib
 import inspect
 
+from event_relevance import DEFAULT_EVENT_SCORER
 from fetch_news import analyze_news_with_llm_async, run_news_fetcher_async
 from log_utils import setup_logger
 from risk_veto import minutes_until_next_event
 
 LOGGER = setup_logger(__name__)
+EVENT_SCORER = DEFAULT_EVENT_SCORER
 
 
 NewsFetcher = Callable[[], Awaitable[Iterable[Mapping[str, Any]]]]
@@ -180,6 +182,11 @@ class LLMNewsMonitor:
             events = []
 
         events_fingerprint = self._events_fingerprint(events)
+        relevance_summary = EVENT_SCORER.score_events(events)
+        scored_events = relevance_summary.get("events", [])
+        halt_relevant_events = int(relevance_summary.get("halt_relevant_events", 0))
+        aggregate_relevance = float(relevance_summary.get("aggregate_score", 0.0))
+        halt_relevance_score = float(relevance_summary.get("halt_score", 0.0))
 
         assessment: Mapping[str, Any] | None = None
         if (
@@ -207,7 +214,15 @@ class LLMNewsMonitor:
             self._last_assessment = dict(assessment)
             self._last_events_fingerprint = events_fingerprint
 
-        state = self._compose_state(assessment, events)
+        state = self._compose_state(
+            assessment,
+            events,
+            relevance_summary,
+            scored_events,
+            aggregate_relevance,
+            halt_relevance_score,
+            halt_relevant_events,
+        )
         self._persist_state(state)
         await self._maybe_emit_alert(state, events)
         return state
@@ -216,6 +231,11 @@ class LLMNewsMonitor:
         self,
         assessment: Mapping[str, Any],
         events: Iterable[Mapping[str, Any]],
+        relevance_summary: Mapping[str, Any],
+        scored_events: Iterable[Mapping[str, Any]],
+        aggregate_relevance: float,
+        halt_relevance_score: float,
+        halt_relevant_events: int,
     ) -> Mapping[str, Any]:
         safe = bool(assessment.get("safe", True))
         try:
@@ -294,14 +314,16 @@ class LLMNewsMonitor:
             )
             caution_mode = True
 
-        halt_trading = severity >= self.halt_threshold and not caution_mode
+        halt_eligible = halt_relevant_events > 0
+        halt_trading = severity >= self.halt_threshold and not caution_mode and halt_eligible
         alert_triggered = severity >= self.alert_threshold
         next_event_minutes = minutes_until_next_event(events) if events else None
         now_iso = datetime.now(timezone.utc).isoformat()
 
         # Limit stored events to the most recent handful to keep the payload light.
         trimmed_events = []
-        for idx, event in enumerate(events):
+        display_events = list(scored_events) if scored_events else list(events)
+        for idx, event in enumerate(display_events):
             if idx >= 10:
                 break
             trimmed_events.append(dict(event))
@@ -318,6 +340,11 @@ class LLMNewsMonitor:
             "next_event_minutes": next_event_minutes,
             "last_checked": now_iso,
             "events": trimmed_events,
+            "relevant_events": int(relevance_summary.get("relevant_events", 0)),
+            "halt_relevant_events": halt_relevant_events,
+            "relevance_score": round(aggregate_relevance, 3),
+            "halt_relevance_score": round(halt_relevance_score, 3),
+            "halt_eligible": halt_eligible,
         }
         return state
 
