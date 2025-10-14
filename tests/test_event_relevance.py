@@ -63,7 +63,7 @@ def test_fit_updates_halt_categories_based_on_volatility():
     index = pd.date_range(_ts(0), periods=60, freq="H")
     prices = pd.Series(100.0, index=index)
 
-    # Inject two high volatility windows following CPI and ETF events.
+    # Inject two high volatility windows following CPI and exchange hack events.
     prices.loc[_ts(10):] = 105.0
     prices.loc[_ts(11):] = 120.0
     prices.loc[_ts(12):] = 135.0
@@ -75,12 +75,16 @@ def test_fit_updates_halt_categories_based_on_volatility():
 
     events = [
         {"event": "US CPI release", "impact": "high", "datetime": _ts(10).isoformat()},
-        {"event": "Bitcoin ETF decision", "impact": "high", "datetime": _ts(30).isoformat()},
+        {
+            "event": "Major exchange hack triggers withdrawal halt",
+            "impact": "high",
+            "datetime": _ts(30).isoformat(),
+        },
     ]
 
     scorer = EventRelevanceScorer(min_observations=1, quantile=0.6, baseline_window="6H")
     scorer.fit(prices, events)
 
-    assert scorer.halt_categories.issuperset({"macro:cpi", "crypto:etf"})
-    assert set(scorer.category_stats) == {"macro:cpi", "crypto:etf"}
+    assert scorer.halt_categories.issuperset({"macro:cpi", "crypto:exchange"})
+    assert set(scorer.category_stats) == {"macro:cpi", "crypto:exchange"}
     assert scorer.category_stats["macro:cpi"]["hits"] >= 1

@@ -34,6 +34,7 @@ __all__ = [
     "EventRelevanceScorer",
     "EventRelevance",
     "DEFAULT_EVENT_SCORER",
+    "BASELINE_HALT_CATEGORIES",
 ]
 
 
@@ -112,6 +113,12 @@ _CATEGORY_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
         re.compile(r"staking upgrade", re.IGNORECASE),
         re.compile(r"fee (cut|increase)", re.IGNORECASE),
     ),
+    "crypto:stablecoin": (
+        re.compile(r"stablecoin\s+(?:de-?peg(?:ged|ging)?|crisis|collapse)", re.IGNORECASE),
+        re.compile(r"\bde-?peg(?:ged|ging)?\b", re.IGNORECASE),
+        re.compile(r"loses\s+peg", re.IGNORECASE),
+        re.compile(r"peg\s+(?:break|loss|failure)", re.IGNORECASE),
+    ),
     "crypto:etf": (
         re.compile(r"bitcoin etf", re.IGNORECASE),
         re.compile(r"spot etf", re.IGNORECASE),
@@ -131,6 +138,7 @@ _METADATA_CATEGORY_MAP = {
     "crypto": "crypto:exchange",
     "defi": "crypto:infrastructure",
     "staking": "crypto:infrastructure",
+    "stablecoin": "crypto:stablecoin",
     "macro": "macro:fomc",
     "rates": "macro:fomc",
     "inflation": "macro:cpi",
@@ -150,21 +158,22 @@ _DEFAULT_CATEGORY_WEIGHTS = {
     "regulation:enforcement": 3.5,
     "crypto:exchange": 3.6,
     "crypto:infrastructure": 3.1,
+    "crypto:stablecoin": 3.6,
     "crypto:etf": 3.3,
     "geopolitics:conflict": 3.0,
 }
 
 
-_DEFAULT_HALT_CATEGORIES = frozenset(
+BASELINE_HALT_CATEGORIES = frozenset(
     {
         "macro:fomc",
         "macro:cpi",
         "macro:employment",
-        "macro:inflation_expectations",
         "regulation:enforcement",
-        "crypto:exchange",
-        "crypto:etf",
         "geopolitics:conflict",
+        "crypto:exchange",
+        "crypto:infrastructure",
+        "crypto:stablecoin",
     }
 )
 
@@ -201,7 +210,7 @@ class EventRelevanceScorer:
                 self.category_weights[key] = float(value)
 
         if halt_categories is None:
-            self.halt_categories = set(_DEFAULT_HALT_CATEGORIES)
+            self.halt_categories = set(BASELINE_HALT_CATEGORIES)
         else:
             self.halt_categories = {str(cat) for cat in halt_categories if cat}
 
