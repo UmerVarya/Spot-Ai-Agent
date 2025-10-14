@@ -26,7 +26,7 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping
 import hashlib
 import inspect
 
-from event_relevance import DEFAULT_EVENT_SCORER
+from event_relevance import BASELINE_HALT_CATEGORIES, DEFAULT_EVENT_SCORER
 from fetch_news import analyze_news_with_llm_async, run_news_fetcher_async
 from log_utils import setup_logger
 from risk_veto import minutes_until_next_event
@@ -34,7 +34,7 @@ from risk_veto import minutes_until_next_event
 LOGGER = setup_logger(__name__)
 EVENT_SCORER = DEFAULT_EVENT_SCORER
 
-MAJOR_MACRO_HALT_CATEGORIES = frozenset({"macro:cpi", "macro:fomc", "geopolitics:conflict"})
+HALT_TRIGGER_CATEGORIES = frozenset(BASELINE_HALT_CATEGORIES)
 MODERATE_RELEVANCE_CEILING = 3.0
 
 
@@ -342,21 +342,20 @@ class LLMNewsMonitor:
                 if category:
                     event_categories.add(str(category))
 
-        major_macro_detected = bool(event_categories & MAJOR_MACRO_HALT_CATEGORIES)
-        halt_eligible = halt_relevant_events > 0
+        halt_category_detected = bool(event_categories & HALT_TRIGGER_CATEGORIES)
+        halt_eligible = halt_relevant_events > 0 and halt_category_detected
         moderate_relevance = halt_eligible and halt_relevance_score < MODERATE_RELEVANCE_CEILING
 
         if moderate_relevance:
             _enter_warning_mode()
 
-        if severity >= self.halt_threshold and halt_eligible and not major_macro_detected:
+        if severity >= self.halt_threshold and not halt_eligible:
             _enter_warning_mode()
 
         halt_trading = (
             severity >= self.halt_threshold
             and not caution_mode
             and halt_eligible
-            and major_macro_detected
         )
         alert_triggered = severity >= self.alert_threshold
         next_event_minutes = minutes_until_next_event(events) if events else None
