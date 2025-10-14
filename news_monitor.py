@@ -264,16 +264,41 @@ class LLMNewsMonitor:
             r"\bcrypto liquidity\b",
             r"\btoken liquidity\b",
         )
+        currency_codes = (
+            "usd",
+            "eur",
+            "jpy",
+            "gbp",
+            "cny",
+            "cnh",
+            "cad",
+            "aud",
+            "nzd",
+            "chf",
+            "sek",
+            "nok",
+            "mxn",
+            "zar",
+            "try",
+            "inr",
+            "krw",
+            "sgd",
+            "hkd",
+            "rub",
+            "pln",
+            "brl",
+            "ils",
+            "dkk",
+            "isk",
+        )
+        fx_pair_pattern = r"\\b(?:" + "|".join(currency_codes) + r")(?:" + "|".join(currency_codes) + r")\\b"
         fx_patterns = (
             r"\bfx\b",
             r"\bforex\b",
             r"foreign exchange",
             r"\bcurrency\b",
-            r"\busd\b",
-            r"\beur\b",
-            r"\bjpy\b",
-            r"\bgbp\b",
-            r"\bcny\b",
+            *(fr"\b{code}\b" for code in currency_codes),
+            fx_pair_pattern,
         )
 
         def _matches(patterns: tuple[str, ...], texts: Iterable[str]) -> bool:
