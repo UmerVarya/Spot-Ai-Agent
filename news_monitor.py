@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import threading
 import time
@@ -36,6 +37,12 @@ EVENT_SCORER = DEFAULT_EVENT_SCORER
 
 HALT_TRIGGER_CATEGORIES = frozenset(BASELINE_HALT_CATEGORIES)
 MODERATE_RELEVANCE_CEILING = 3.0
+
+
+def _get_news_halt_mode() -> str:
+    """Return the configured news halt mode (``halt`` or ``warn``)."""
+
+    return os.getenv("NEWS_HALT_MODE", "halt").strip().lower()
 
 
 NewsFetcher = Callable[[], Awaitable[Iterable[Mapping[str, Any]]]]
@@ -371,13 +378,24 @@ class LLMNewsMonitor:
 
         warning_only = alert_triggered and (caution_mode or not halt_trading)
 
+        news_halt_mode = _get_news_halt_mode()
+        if halt_trading and news_halt_mode == "warn":
+            LOGGER.warning(
+                "News flagged HIGH, but NEWS_HALT_MODE=warn → continuing (no halt)."
+            )
+            halt_trading = False
+            warning_only = True
+            halt_minutes = 0
+        else:
+            halt_minutes = 120 if halt_trading else 0
+
         state: dict[str, Any] = {
             "safe": safe,
             "sensitivity": round(sensitivity, 3),
             "reason": reason,
             "severity": round(severity, 3),
             "halt_trading": halt_trading,
-            "halt_minutes": 120 if halt_trading else 0,
+            "halt_minutes": halt_minutes,
             "alert_triggered": alert_triggered,
             "caution_mode": caution_mode,
             "warning_only": warning_only,
@@ -389,6 +407,7 @@ class LLMNewsMonitor:
             "relevance_score": round(aggregate_relevance, 3),
             "halt_relevance_score": round(halt_relevance_score, 3),
             "halt_eligible": halt_eligible,
+            "halt_mode": news_halt_mode,
         }
         return state
 

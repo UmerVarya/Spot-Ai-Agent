@@ -150,6 +150,8 @@ logger.info(
     TRADE_LEARNING_LOG_FILE,
 )
 
+logger.info("News halt mode = %s", os.getenv("NEWS_HALT_MODE", "halt"))
+
 
 def _run_async_task(coro_factory):
     """Safely execute an async coroutine factory from the synchronous agent loop."""
