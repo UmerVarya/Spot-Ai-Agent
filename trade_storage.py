@@ -44,6 +44,9 @@ _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _HISTORY_LOCK = threading.RLock()
 _LOCK_STATE = threading.local()
 
+# Hard cap on concurrent open trades enforced across storage layers
+MAX_CONCURRENT_TRADES = 1
+
 # When ``SIZE_AS_NOTIONAL`` is true (default), the ``size`` field provided to
 # :func:`log_trade_result` is interpreted as the notional dollar amount of the
 # trade.  When false, ``size`` represents the asset quantity.  This mirrors the
@@ -411,6 +414,16 @@ def store_trade(trade: dict) -> bool:
             if is_trade_active(symbol):
                 logger.warning("Duplicate trade for %s detected; skipping store.", symbol)
                 return False
+            DB_CURSOR.execute("SELECT COUNT(*) FROM active_trades")
+            current_count = DB_CURSOR.fetchone()
+            current_total = int(current_count[0]) if current_count else 0
+            if current_total >= MAX_CONCURRENT_TRADES:
+                logger.warning(
+                    "Maximum concurrent trades (%d) reached; skipping %s.",
+                    MAX_CONCURRENT_TRADES,
+                    symbol,
+                )
+                return False
             DB_CURSOR.execute(
                 """
                 INSERT INTO active_trades (symbol, data)
@@ -426,6 +439,13 @@ def store_trade(trade: dict) -> bool:
     trades = load_active_trades()
     if any(t.get("symbol") == symbol for t in trades):
         logger.warning("Duplicate trade for %s detected; skipping store.", symbol)
+        return False
+    if len(trades) >= MAX_CONCURRENT_TRADES:
+        logger.warning(
+            "Maximum concurrent trades (%d) reached; skipping %s.",
+            MAX_CONCURRENT_TRADES,
+            symbol,
+        )
         return False
     trades.append(trade)
     save_active_trades(trades)

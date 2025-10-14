@@ -111,8 +111,8 @@ def handle_exception(exc_type, exc_value, exc_traceback):
 
 sys.excepthook = handle_exception
 
-# Maximum concurrent open trades
-MAX_ACTIVE_TRADES = 2
+# Maximum concurrent open trades (strictly limited to one active position)
+MAX_ACTIVE_TRADES = 1
 # Interval between scans (in seconds).  Default lowered to tighten reaction time.
 SCAN_INTERVAL = float(os.getenv("SCAN_INTERVAL", "3"))
 # Background refresh cadence for the real-time signal cache.
@@ -136,8 +136,8 @@ else:
 # Time-to-live for alternative data fetches
 ALT_DATA_REFRESH_INTERVAL = float(os.getenv("ALT_DATA_REFRESH_INTERVAL", "300"))
 
-# Explicit USD bounds for trade sizing (fixed at 500 USD per trade)
-MIN_TRADE_USD = 500.0
+# Explicit USD bounds for trade sizing (confidence-weighted between 400-500 USD)
+MIN_TRADE_USD = 400.0
 MAX_TRADE_USD = 500.0
 VOLATILITY_SPIKE_THRESHOLD = float(os.getenv("VOLATILITY_SPIKE_THRESHOLD", "0.9"))
 
@@ -165,16 +165,26 @@ def _run_async_task(coro_factory):
 
 
 def calculate_dynamic_trade_size(confidence: float, ml_prob: float, score: float) -> float:
-    """Return the fixed 500 USDT notional per trade.
+    """Return the notional size bounded between 400-500 USDT.
 
-    The previous implementation scaled trade size based on confidence
-    signals.  The updated strategy standardises exposure, so we simply
-    return the configured constant.  ``confidence``, ``ml_prob`` and
-    ``score`` are retained in the signature to avoid touching callers.
+    The trade size is primarily determined by the model confidence and
+    is constrained so that only a single trade sized between 400 and
+    500 USDT can be active at any time.  ``ml_prob`` and ``score`` are
+    accepted for signature compatibility and may be incorporated into
+    future refinements, but the current policy keeps the mapping
+    confidence-driven.
     """
 
-    _ = (confidence, ml_prob, score)  # explicitly unused in fixed-sizing mode
-    return MIN_TRADE_USD
+    _ = (ml_prob, score)  # retained for forwards compatibility
+
+    if confidence >= 8.5:
+        size = MAX_TRADE_USD
+    elif confidence >= 6.5:
+        size = (MIN_TRADE_USD + MAX_TRADE_USD) / 2.0
+    else:
+        size = MIN_TRADE_USD
+
+    return max(MIN_TRADE_USD, min(MAX_TRADE_USD, float(size)))
 
 
 def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: float):
@@ -229,28 +239,10 @@ def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: floa
 
 
 def dynamic_max_active_trades(fear_greed: int, bias: str, volatility: float | None) -> int:
-    """Determine allowable concurrent trades based on macro conditions.
+    """Return the hard limit of one active trade regardless of conditions."""
 
-    The baseline is ``MAX_ACTIVE_TRADES``.  During fearful or bearish
-    environments, the cap is reduced to 1.  When conditions are both
-    bullish and confident, one extra slot is granted.  Volatility acts as
-    a secondary modifier: very high volatility removes a slot while very
-    low volatility can add one, within bounds.
-    """
-
-    max_trades = MAX_ACTIVE_TRADES
-    if fear_greed < 25 or bias == "bearish":
-        max_trades = 1
-    elif fear_greed > 70 and bias == "bullish":
-        max_trades = MAX_ACTIVE_TRADES + 1
-
-    if volatility is not None and not np.isnan(volatility):
-        if volatility > 0.75:
-            max_trades = max(1, max_trades - 1)
-        elif volatility < 0.25:
-            max_trades = min(max_trades + 1, MAX_ACTIVE_TRADES + 1)
-
-    return max_trades
+    _ = (fear_greed, bias, volatility)  # inputs retained for compatibility
+    return MAX_ACTIVE_TRADES
 
 
 def auto_run_news() -> None:
