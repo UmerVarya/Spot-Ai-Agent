@@ -54,6 +54,7 @@ class NewsAlert:
     sensitivity: float
     reason: str
     halt_trading: bool
+    halt_minutes: int
     triggered_at: float
     events: tuple[Mapping[str, Any], ...]
 
@@ -226,6 +227,25 @@ class LLMNewsMonitor:
         if not safe:
             severity = max(severity, 1.0)
 
+        def _iter_text_fragments(value: Any) -> Iterable[str]:
+            if isinstance(value, str):
+                yield value
+                return
+            if isinstance(value, Mapping):
+                for nested in value.values():
+                    yield from _iter_text_fragments(nested)
+                return
+            if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
+                for item in value:
+                    yield from _iter_text_fragments(item)
+                return
+            if value is not None:
+                yield str(value)
+
+        search_texts: list[str] = [reason]
+        for event in events:
+            search_texts.extend(list(_iter_text_fragments(event)))
+
         crypto_patterns = (
             r"\bcrypto\b",
             r"\bcryptocurrencies\b",
@@ -233,12 +253,16 @@ class LLMNewsMonitor:
             r"\bbitcoin\b",
             r"\beth\b",
             r"\bethereum\b",
-            r"\betf\b",
-            r"\bmining\b",
-            r"\bsec\b",
+            r"\bstablecoin\b",
+            r"\bstablecoins\b",
+            r"\bdefi\b",
+            r"\bblockchain\b",
+            r"\bweb3\b",
+            r"\bdigital assets?\b",
+            r"\bnft\b",
+            r"\bdex\b",
             r"\bcrypto liquidity\b",
             r"\btoken liquidity\b",
-            r"\bliquidity pool\b",
         )
         fx_patterns = (
             r"\bfx\b",
@@ -252,11 +276,15 @@ class LLMNewsMonitor:
             r"\bcny\b",
         )
 
-        def _matches(patterns: tuple[str, ...]) -> bool:
-            return any(re.search(pattern, reason, flags=re.IGNORECASE) for pattern in patterns)
+        def _matches(patterns: tuple[str, ...], texts: Iterable[str]) -> bool:
+            for text in texts:
+                for pattern in patterns:
+                    if re.search(pattern, text, flags=re.IGNORECASE):
+                        return True
+            return False
 
-        has_crypto_confirmation = _matches(crypto_patterns)
-        has_fx_stress = _matches(fx_patterns)
+        has_crypto_confirmation = _matches(crypto_patterns, search_texts)
+        has_fx_stress = _matches(fx_patterns, search_texts)
         caution_mode = False
 
         if has_fx_stress and not has_crypto_confirmation:
@@ -284,6 +312,7 @@ class LLMNewsMonitor:
             "reason": reason,
             "severity": round(severity, 3),
             "halt_trading": halt_trading,
+            "halt_minutes": 120 if halt_trading else 0,
             "alert_triggered": alert_triggered,
             "caution_mode": caution_mode,
             "next_event_minutes": next_event_minutes,
@@ -326,6 +355,7 @@ class LLMNewsMonitor:
             sensitivity=float(state.get("sensitivity", 0.0)),
             reason=str(state.get("reason", "")),
             halt_trading=bool(state.get("halt_trading", False)),
+            halt_minutes=int(state.get("halt_minutes", 0)),
             triggered_at=time.time(),
             events=tuple(dict(event) for event in events)  # type: ignore[arg-type]
         )
