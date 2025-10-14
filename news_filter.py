@@ -35,8 +35,18 @@ def format_events_for_prompt(events, metrics):
         lines.append("- No events are occurring in the next 6 hours.")
     else:
         for event in metrics["events_in_window"]:
+            relevance = event.get("relevance", {})
+            category = relevance.get("category")
+            score = relevance.get("score")
+            extras = []
+            if category:
+                extras.append(f"category: {category}")
+            if score:
+                extras.append(f"relevance: {score}")
+            extra_text = f", {'; '.join(extras)}" if extras else ""
             lines.append(
-                f"- {event.get('event')} at {event.get('datetime')} (impact: {event.get('impact')})"
+                f"- {event.get('event')} at {event.get('datetime')} "
+                f"(impact: {event.get('impact')}{extra_text})"
             )
     return "\n".join(lines)
 

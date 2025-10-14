@@ -26,7 +26,9 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
+
+from event_relevance import DEFAULT_EVENT_SCORER, EventRelevanceScorer
 
 
 _DEFAULT_WINDOW_HOURS = 2
@@ -44,56 +46,75 @@ def quantify_event_risk(
     *,
     window_hours: int = _DEFAULT_WINDOW_HOURS,
     lookback_hours: int = _DEFAULT_LOOKBACK_HOURS,
+    scorer: EventRelevanceScorer | None = None,
 ) -> dict[str, Any]:
     """Return deterministic risk metrics for ``events``.
 
     The function considers events occurring within ``lookback_hours`` in the
     past and ``window_hours`` into the future.  Each event contributes a weight
-    based on its impact label, producing a coarse ``risk_score`` that can be
+    based on its relevance score, producing a coarse ``risk_score`` that can be
     mapped onto a sensitivity value.
     """
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     risk_score = 0.0
     high_impact_events = 0
     medium_impact_events = 0
     low_impact_events = 0
+    halt_relevant_events = 0
     considered_events: list[Mapping[str, Any]] = []
+    scorer = scorer or DEFAULT_EVENT_SCORER
 
     for event in events:
         dt_raw = event.get("datetime")
         if not isinstance(dt_raw, str):
             continue
         try:
-            event_dt = datetime.fromisoformat(dt_raw.replace("Z", ""))
+            event_dt = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))
         except ValueError:
             continue
+
+        if event_dt.tzinfo is None:
+            event_dt = event_dt.replace(tzinfo=timezone.utc)
+        else:
+            event_dt = event_dt.astimezone(timezone.utc)
 
         hours_until = (event_dt - now).total_seconds() / 3600.0
         if hours_until < -float(lookback_hours) or hours_until > float(window_hours):
             continue
 
-        considered_events.append(event)
+        relevance = scorer.score_event(event)
+        if relevance.score <= 0:
+            continue
 
         impact = _normalise_impact(event.get("impact"))
         if impact == "high":
-            weight = 3.0
             high_impact_events += 1
         elif impact == "medium":
-            weight = 2.0
             medium_impact_events += 1
         elif impact == "low":
-            weight = 1.0
             low_impact_events += 1
-        else:
-            # Unknown impact labels are treated as medium importance.
-            weight = 1.5
 
         if hours_until < 0:
             # Events that already occurred still matter, but discount them.
-            weight *= 0.5
+            adjusted_score = relevance.score * 0.5
+        else:
+            adjusted_score = relevance.score
 
-        risk_score += weight
+        risk_score += adjusted_score
+        if relevance.halt_relevant:
+            halt_relevant_events += 1
+
+        enriched_event = dict(event)
+        enriched_event.setdefault("relevance", {})
+        enriched_event["relevance"].update(
+            {
+                "score": round(relevance.score, 3),
+                "halt_relevant": relevance.halt_relevant,
+                "category": relevance.category,
+            }
+        )
+        considered_events.append(enriched_event)
 
     return {
         "risk_score": risk_score,
@@ -103,6 +124,7 @@ def quantify_event_risk(
         "considered_events": len(considered_events),
         "events_in_window": considered_events,
         "window_hours": window_hours,
+        "halt_relevant_events": halt_relevant_events,
     }
 
 
