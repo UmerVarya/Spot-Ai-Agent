@@ -63,7 +63,7 @@ Confidence: <0-10 score>
     try:
         response = safe_chat_completion(
             client,
-            model=config.get_groq_model(),
+            model=config.get_macro_model(),
             messages=[
                 {"role": "system", "content": "You are a crypto macro market analyst."},
                 {"role": "user", "content": prompt}

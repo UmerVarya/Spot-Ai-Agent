@@ -429,7 +429,7 @@ def _http_completion_with_fallback(
         return content
 
     if error is not None and is_model_decommissioned_error(error):
-        fallback_model = config.DEFAULT_GROQ_MODEL
+        fallback_model = config.get_overflow_model()
         if fallback_model and fallback_model != primary_model:
             logger.warning(
                 "Groq model %s unavailable (%s). Retrying with fallback model %s (HTTP path).",

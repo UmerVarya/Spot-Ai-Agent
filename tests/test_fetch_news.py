@@ -19,7 +19,7 @@ def test_analyze_news_with_llm_async_valid_json(monkeypatch):
     import fetch_news
 
     monkeypatch.setattr(fetch_news, "GROQ_API_KEY", "test-key", raising=False)
-    monkeypatch.setattr(fetch_news.config, "get_groq_model", lambda: "test-model", raising=False)
+    monkeypatch.setattr(fetch_news.config, "get_news_model", lambda: "test-model", raising=False)
 
     async def fake_chat(messages, *, model, temperature, max_tokens):
         assert model == "test-model"
@@ -69,7 +69,7 @@ def test_analyze_news_with_llm_async_retries_on_runtime_error(monkeypatch):
 
     monkeypatch.setattr(fetch_news, "GROQ_API_KEY", "test-key", raising=False)
     monkeypatch.setattr(
-        fetch_news.config, "get_groq_model", lambda: "custom-model", raising=False
+        fetch_news.config, "get_news_model", lambda: "custom-model", raising=False
     )
 
     calls = []
@@ -119,14 +119,14 @@ def test_analyze_news_with_llm_async_retries_on_runtime_error(monkeypatch):
         "sensitivity": 0.1,
         "reason": "Fallback succeeded",
     }
-    assert calls == ["custom-model", fetch_news.config.DEFAULT_GROQ_MODEL]
+    assert calls == ["custom-model", fetch_news.config.DEFAULT_OVERFLOW_MODEL]
 
 
 def test_analyze_news_with_llm_async_uses_local_fallback(monkeypatch):
     import fetch_news
 
     monkeypatch.setattr(fetch_news, "GROQ_API_KEY", "test-key", raising=False)
-    monkeypatch.setattr(fetch_news.config, "get_groq_model", lambda: "custom-model", raising=False)
+    monkeypatch.setattr(fetch_news.config, "get_news_model", lambda: "custom-model", raising=False)
 
     async def fake_chat(messages, *, model, temperature, max_tokens):
         raise RuntimeError("Groq LLM request failed")
@@ -172,7 +172,7 @@ def test_analyze_news_with_llm_async_handles_non_json(monkeypatch):
     import fetch_news
 
     monkeypatch.setattr(fetch_news, "GROQ_API_KEY", "test-key", raising=False)
-    monkeypatch.setattr(fetch_news.config, "get_groq_model", lambda: "test-model", raising=False)
+    monkeypatch.setattr(fetch_news.config, "get_news_model", lambda: "test-model", raising=False)
 
     async def fake_chat(messages, *, model, temperature, max_tokens):
         return SimpleNamespace(

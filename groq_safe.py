@@ -86,7 +86,7 @@ def safe_chat_completion(client, *, messages: list[dict[str, Any]], model: str |
             **kwargs,
         )
     except Exception as err:  # pragma: no cover - SDK specific exception types
-        fallback_model = config.DEFAULT_GROQ_MODEL
+        fallback_model = config.get_overflow_model()
         if fallback_model != requested_model and is_model_decommissioned_error(err):
             logger.warning(
                 "Groq model %s unavailable (%s). Retrying with fallback model %s.",

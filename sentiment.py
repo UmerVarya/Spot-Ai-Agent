@@ -47,7 +47,7 @@ def analyze_macro_news(news_text: str) -> dict:
     messages = [
         {"role": "user", "content": prompt + "\nNews Headlines:\n" + news_text}
     ]
-    model_name = config.get_groq_model()
+    model_name = config.get_macro_model()
     client = get_groq_client()
     if client is None:
         return {"bias": "neutral", "confidence": 5.0, "summary": "LLM analysis not available"}
