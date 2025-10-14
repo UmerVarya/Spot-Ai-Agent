@@ -425,14 +425,27 @@ def run_agent_loop() -> None:
     threading.Thread(target=guard_loop, daemon=True).start()
     worker_pools.submit_io(refresh_macro_state)
     worker_pools.submit_io(refresh_news_state)
+    last_scan_time = 0.0
     while True:
         triggered = scan_trigger.wait(timeout=guard_interval)
         if not triggered:
             continue
-        if not scan_lock.acquire(blocking=False):
+        now = time.time()
+        remaining = (last_scan_time + SCAN_INTERVAL) - now
+        if remaining > 0:
+            # Ensure we don't trigger scans more frequently than configured
+            time.sleep(remaining)
             continue
-        scan_trigger.clear()
+        if not scan_lock.acquire(blocking=False):
+            time.sleep(0.01)
+            continue
         try:
+            now = time.time()
+            if (now - last_scan_time) < SCAN_INTERVAL:
+                # Another thread completed a scan recently while we were waiting
+                continue
+            scan_trigger.clear()
+            last_scan_time = now
             logger.info("=== Scan @ %s ===", time.strftime('%Y-%m-%d %H:%M:%S'))
             # Check drawdown guard
             if is_trading_blocked():
