@@ -29,7 +29,7 @@ import json
 from datetime import datetime
 
 
-_DEFAULT_WINDOW_HOURS = 6
+_DEFAULT_WINDOW_HOURS = 2
 _DEFAULT_LOOKBACK_HOURS = 1
 
 

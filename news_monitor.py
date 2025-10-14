@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 import time
 import random
@@ -224,7 +225,45 @@ class LLMNewsMonitor:
         severity = sensitivity
         if not safe:
             severity = max(severity, 1.0)
-        halt_trading = severity >= self.halt_threshold
+
+        crypto_patterns = (
+            r"\bcrypto\b",
+            r"\bbtc\b",
+            r"\bbitcoin\b",
+            r"\beth\b",
+            r"\bethereum\b",
+            r"\betf\b",
+            r"\bmining\b",
+            r"\bsec\b",
+            r"\bliquidity\b",
+        )
+        fx_patterns = (
+            r"\bfx\b",
+            r"\bforex\b",
+            r"foreign exchange",
+            r"\bcurrency\b",
+            r"\busd\b",
+            r"\beur\b",
+            r"\bjpy\b",
+            r"\bgbp\b",
+            r"\bcny\b",
+        )
+
+        def _matches(patterns: tuple[str, ...]) -> bool:
+            return any(re.search(pattern, reason, flags=re.IGNORECASE) for pattern in patterns)
+
+        has_crypto_confirmation = _matches(crypto_patterns)
+        has_fx_stress = _matches(fx_patterns)
+        caution_mode = False
+
+        if has_fx_stress and not has_crypto_confirmation:
+            severity = min(
+                severity,
+                max(self.alert_threshold, self.halt_threshold - 1e-3),
+            )
+            caution_mode = True
+
+        halt_trading = severity >= self.halt_threshold and not caution_mode
         alert_triggered = severity >= self.alert_threshold
         next_event_minutes = minutes_until_next_event(events) if events else None
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -243,6 +282,7 @@ class LLMNewsMonitor:
             "severity": round(severity, 3),
             "halt_trading": halt_trading,
             "alert_triggered": alert_triggered,
+            "caution_mode": caution_mode,
             "next_event_minutes": next_event_minutes,
             "last_checked": now_iso,
             "events": trimmed_events,
