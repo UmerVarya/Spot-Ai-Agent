@@ -46,11 +46,22 @@ _DEPRECATED_GROQ_MODELS = {
 _DEPRECATED_LOOKUP = {key.lower(): value for key, value in _DEPRECATED_GROQ_MODELS.items()}
 
 
-def _resolve_model(env_var: str, default: str) -> str:
+def _resolve_model(env_var: str | tuple[str, ...], default: str) -> str:
     """Resolve the configured model name for ``env_var`` falling back to ``default``."""
 
-    raw_model = os.getenv(env_var)
-    normalized = raw_model.strip() if raw_model else ""
+    env_sources: tuple[str, ...]
+    if isinstance(env_var, str):
+        env_sources = (env_var,)
+    else:
+        env_sources = env_var
+
+    normalized = ""
+    for candidate in env_sources:
+        raw_model = os.getenv(candidate)
+        normalized = raw_model.strip() if raw_model else ""
+        if normalized:
+            break
+
     if not normalized:
         normalized = default
 
@@ -64,7 +75,7 @@ def _resolve_model(env_var: str, default: str) -> str:
 def get_groq_model() -> str:
     """Return the primary reasoning model for trade approvals."""
 
-    return _resolve_model("TRADE_LLM_MODEL", DEFAULT_GROQ_MODEL)
+    return _resolve_model(("TRADE_LLM_MODEL", "GROQ_MODEL"), DEFAULT_GROQ_MODEL)
 
 
 def get_macro_model() -> str:
