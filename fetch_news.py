@@ -198,7 +198,7 @@ async def analyze_news_with_llm_async(
     )
 
     payload_template: Dict[str, Any] = {
-        "model": config.get_groq_model(),
+        "model": config.get_news_model(),
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -236,9 +236,10 @@ async def analyze_news_with_llm_async(
     try:
         response: Optional[Any] = None
         last_error: Optional[Exception] = None
+        overflow_model = config.get_overflow_model()
         models_to_try = [payload_template["model"]]
-        if payload_template["model"] != config.DEFAULT_GROQ_MODEL:
-            models_to_try.append(config.DEFAULT_GROQ_MODEL)
+        if payload_template["model"] != overflow_model:
+            models_to_try.append(overflow_model)
 
         for index, model_name in enumerate(models_to_try):
             messages = [
@@ -269,13 +270,13 @@ async def analyze_news_with_llm_async(
                 if (
                     index == 0
                     and len(models_to_try) > 1
-                    and model_name != config.DEFAULT_GROQ_MODEL
+                    and model_name != overflow_model
                 ):
                     logger.warning(
                         "Groq model %s failed (%s). Retrying with fallback model %s.",
                         model_name,
                         err,
-                        config.DEFAULT_GROQ_MODEL,
+                        overflow_model,
                     )
                     continue
                 logger.error(
@@ -288,13 +289,13 @@ async def analyze_news_with_llm_async(
                 if (
                     index == 0
                     and len(models_to_try) > 1
-                    and model_name != config.DEFAULT_GROQ_MODEL
+                    and model_name != overflow_model
                 ):
                     logger.warning(
                         "Unexpected Groq error for model %s (%s). Retrying with fallback model %s.",
                         model_name,
                         err,
-                        config.DEFAULT_GROQ_MODEL,
+                        overflow_model,
                     )
                     continue
                 logger.error(

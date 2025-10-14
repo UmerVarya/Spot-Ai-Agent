@@ -279,7 +279,7 @@ def generate_daily_summary(
         try:
             response = safe_chat_completion(
                 client,
-                model=config.get_groq_model(),
+                model=config.get_news_model(),
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.4,
                 max_tokens=600,

@@ -3,7 +3,7 @@ import json
 
 
 def test_llm_retries_with_fallback_model(monkeypatch):
-    monkeypatch.setenv("GROQ_MODEL", "custom-model")
+    monkeypatch.setenv("TRADE_LLM_MODEL", "custom-model")
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
     import groq_llm
     importlib.reload(groq_llm)
@@ -34,11 +34,11 @@ def test_llm_retries_with_fallback_model(monkeypatch):
     result = groq_llm.get_llm_judgment("test prompt")
 
     assert result == "ok"
-    assert calls == ["custom-model", groq_llm.config.DEFAULT_GROQ_MODEL]
+    assert calls == ["custom-model", groq_llm.config.DEFAULT_OVERFLOW_MODEL]
 
 
 def test_llm_retries_when_model_not_found(monkeypatch):
-    monkeypatch.setenv("GROQ_MODEL", "retired-model")
+    monkeypatch.setenv("TRADE_LLM_MODEL", "retired-model")
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
     import groq_llm
     importlib.reload(groq_llm)
@@ -74,4 +74,4 @@ def test_llm_retries_when_model_not_found(monkeypatch):
     result = groq_llm.get_llm_judgment("test prompt")
 
     assert result == "ok"
-    assert calls == ["retired-model", groq_llm.config.DEFAULT_GROQ_MODEL]
+    assert calls == ["retired-model", groq_llm.config.DEFAULT_OVERFLOW_MODEL]
