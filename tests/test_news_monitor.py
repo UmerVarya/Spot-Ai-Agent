@@ -47,6 +47,99 @@ def test_monitor_emits_alert_and_persists_state(tmp_path):
     assert len(alerts) == 1
 
 
+def test_monitor_caps_fx_alert_without_crypto_confirmation():
+    events = [
+        {"event": "FX Stress", "datetime": _iso_now(), "impact": "high"},
+    ]
+
+    async def fetcher():
+        return events
+
+    async def analyzer(received):
+        return {
+            "safe": False,
+            "sensitivity": 0.95,
+            "reason": "Severe FX stress in USDJPY and currency markets",
+        }
+
+    monitor = LLMNewsMonitor(
+        interval=30,
+        alert_threshold=0.5,
+        halt_threshold=0.8,
+        fetcher=fetcher,
+        analyzer=analyzer,
+    )
+
+    state = asyncio.run(monitor.evaluate_now())
+    assert state["alert_triggered"] is True
+    assert state["halt_trading"] is False
+    assert state["caution_mode"] is True
+    assert state["severity"] < 0.8
+
+
+def test_monitor_does_not_treat_generic_liquidity_as_crypto():
+    events = [
+        {"event": "FX Liquidity Crunch", "datetime": _iso_now(), "impact": "high"},
+    ]
+
+    async def fetcher():
+        return events
+
+    async def analyzer(received):
+        return {
+            "safe": False,
+            "sensitivity": 0.93,
+            "reason": "FX stress hurting liquidity conditions in yen crosses",
+        }
+
+    monitor = LLMNewsMonitor(
+        interval=30,
+        alert_threshold=0.5,
+        halt_threshold=0.8,
+        fetcher=fetcher,
+        analyzer=analyzer,
+    )
+
+    state = asyncio.run(monitor.evaluate_now())
+    assert state["alert_triggered"] is True
+    assert state["halt_trading"] is False
+    assert state["caution_mode"] is True
+
+
+def test_monitor_escalates_when_fx_and_crypto_present():
+    events = [
+        {
+            "event": "FX and Crypto Stress",
+            "datetime": _iso_now(),
+            "impact": "high",
+            "headline": "FX markets wobble as BTC liquidity dries up",
+        },
+    ]
+
+    async def fetcher():
+        return events
+
+    async def analyzer(received):
+        return {
+            "safe": False,
+            "sensitivity": 0.91,
+            "reason": "FX stress spilling into crypto liquidity for BTC",
+        }
+
+    monitor = LLMNewsMonitor(
+        interval=30,
+        alert_threshold=0.5,
+        halt_threshold=0.8,
+        fetcher=fetcher,
+        analyzer=analyzer,
+    )
+
+    state = asyncio.run(monitor.evaluate_now())
+    assert state["alert_triggered"] is True
+    assert state["halt_trading"] is True
+    assert state["caution_mode"] is False
+
+
 def test_monitor_marks_state_stale():
     async def fetcher():
         return []
