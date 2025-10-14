@@ -47,6 +47,36 @@ def test_monitor_emits_alert_and_persists_state(tmp_path):
     assert len(alerts) == 1
 
 
+def test_monitor_caps_fx_alert_without_crypto_confirmation():
+    events = [
+        {"event": "FX Stress", "datetime": _iso_now(), "impact": "high"},
+    ]
+
+    async def fetcher():
+        return events
+
+    async def analyzer(received):
+        return {
+            "safe": False,
+            "sensitivity": 0.95,
+            "reason": "Severe FX stress in USDJPY and currency markets",
+        }
+
+    monitor = LLMNewsMonitor(
+        interval=30,
+        alert_threshold=0.5,
+        halt_threshold=0.8,
+        fetcher=fetcher,
+        analyzer=analyzer,
+    )
+
+    state = asyncio.run(monitor.evaluate_now())
+    assert state["alert_triggered"] is True
+    assert state["halt_trading"] is False
+    assert state["caution_mode"] is True
+    assert state["severity"] < 0.8
+
+
 def test_monitor_marks_state_stale():
     async def fetcher():
         return []
