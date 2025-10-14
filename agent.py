@@ -483,10 +483,13 @@ def run_agent_loop() -> None:
             news_snapshot = state.get_section("news")
             news_data = news_snapshot.get("data") or {}
             monitor_state = news_data.get("monitor") if isinstance(news_data, dict) else None
-            if monitor_state and monitor_state.get("halt_trading"):
+            if monitor_state:
                 reason = str(monitor_state.get("reason", "LLM requested trading halt"))
-                logger.error("Skipping scan due to LLM news halt signal: %s", reason)
-                continue
+                if monitor_state.get("halt_trading"):
+                    logger.error("Skipping scan due to LLM news halt signal: %s", reason)
+                    continue
+                if monitor_state.get("warning_only"):
+                    logger.warning("LLM news monitor warning: %s", reason)
             if monitor_state and monitor_state.get("alert_triggered"):
                 macro_reasons.append("LLM news alert")
             signal_cache.update_context(sentiment_bias=sentiment_bias)
