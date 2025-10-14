@@ -38,6 +38,7 @@ def test_monitor_emits_alert_and_persists_state(tmp_path):
 
     state = asyncio.run(monitor.evaluate_now())
     assert state["halt_trading"] is True
+    assert state["halt_minutes"] == 120
     assert state["alert_triggered"] is True
     assert alerts and alerts[0].reason == "Major exchange hack"
     assert state_path.exists()
@@ -49,7 +50,12 @@ def test_monitor_emits_alert_and_persists_state(tmp_path):
 
 def test_monitor_caps_fx_alert_without_crypto_confirmation():
     events = [
-        {"event": "FX Stress", "datetime": _iso_now(), "impact": "high"},
+        {
+            "event": "Macro Flash",
+            "datetime": _iso_now(),
+            "impact": "high",
+            "metadata": {"categories": ["fx", "liquidity"]},
+        },
     ]
 
     async def fetcher():
@@ -59,7 +65,7 @@ def test_monitor_caps_fx_alert_without_crypto_confirmation():
         return {
             "safe": False,
             "sensitivity": 0.95,
-            "reason": "Severe FX stress in USDJPY and currency markets",
+            "reason": "Severe cross-market liquidity stress",
         }
 
     monitor = LLMNewsMonitor(
@@ -75,6 +81,41 @@ def test_monitor_caps_fx_alert_without_crypto_confirmation():
     assert state["halt_trading"] is False
     assert state["caution_mode"] is True
     assert state["severity"] < 0.8
+
+
+def test_monitor_allows_halt_when_crypto_present_in_metadata():
+    events = [
+        {
+            "event": "FX + Crypto Stress",
+            "datetime": _iso_now(),
+            "impact": "high",
+            "metadata": {"categories": ["fx", "crypto"], "notes": "exchanges affected"},
+        }
+    ]
+
+    async def fetcher():
+        return events
+
+    async def analyzer(received):
+        return {
+            "safe": False,
+            "sensitivity": 0.92,
+            "reason": "Cross-market stress impacting multiple venues",
+        }
+
+    monitor = LLMNewsMonitor(
+        interval=30,
+        alert_threshold=0.5,
+        halt_threshold=0.8,
+        fetcher=fetcher,
+        analyzer=analyzer,
+    )
+
+    state = asyncio.run(monitor.evaluate_now())
+    assert state["alert_triggered"] is True
+    assert state["halt_trading"] is True
+    assert state["halt_minutes"] == 120
+    assert state["caution_mode"] is False
 
 
 def test_monitor_marks_state_stale():
