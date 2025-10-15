@@ -10,21 +10,22 @@ deriving indicators right when an order needs to be submitted.
 
 from __future__ import annotations
 
+import logging, os
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)        # make it chatty
+logger.propagate = True              # bubble up to root logger
+
+VERSION_TAG = "RTSC-PRIME-UMER-2"
+logger.warning("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
+
 import asyncio
-import logging
 import threading
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
-
-
-logger = logging.getLogger(__name__)
-
-VERSION_TAG = "RTSC-2025-10-15-UMER-1"
-logger.info("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
-
 
 PriceFetcher = Callable[[str], Awaitable[pd.DataFrame | None]]
 SignalEvaluator = Callable[..., Tuple[float, Optional[str], float, Optional[str]]]
@@ -137,28 +138,26 @@ class RealTimeSignalCache:
     def start(self) -> None:
         """Launch the background refresh worker if it is not already running."""
 
-        if self._bg_task and not self._bg_task.done():
+        if getattr(self, "_bg_task", None) and not self._bg_task.done():
+            logger.info("RTSC: worker already running")
             return
-        if self._thread and self._thread.is_alive():
+        if getattr(self, "_thread", None) and self._thread.is_alive():
+            logger.info("RTSC: worker already running (thread)")
             return
         self._stop_event.clear()
         self._wake_event.clear()
         try:
             loop = asyncio.get_running_loop()
+            logger.info("RTSC: starting worker on running loop")
+            self._bg_task = loop.create_task(self._worker())
         except RuntimeError:
             logger.info("RTSC: no running loop; starting worker in daemon thread")
-            
+
             def runner() -> None:
-                try:
-                    asyncio.run(self._worker())
-                except Exception:  # pragma: no cover - defensive logging
-                    logger.exception("RTSC worker crashed")
+                asyncio.run(self._worker())
 
             self._thread = threading.Thread(target=runner, daemon=True, name="rtsc-worker")
             self._thread.start()
-        else:
-            logger.info("RTSC: starting worker on running loop")
-            self._bg_task = loop.create_task(self._worker())
 
     def stop(self) -> None:
         """Signal the worker to stop and wait briefly for it to exit."""
@@ -299,17 +298,17 @@ class RealTimeSignalCache:
             self._stale_after,
             self._max_concurrency,
         )
-        semaphore = asyncio.Semaphore(self._max_concurrency)
-        first_run = True
+        sem = asyncio.Semaphore(self._max_concurrency)
+        first = True
         try:
             while not self._stop_event.is_set():
-                symbols = self.symbols()
-                due = self._symbols_due(symbols, first_run=first_run)
-                logger.info("RTSC: due this cycle = %d / %d", len(due), len(symbols))
-                first_run = False
+                syms = list(self.symbols())
+                due = self._symbols_due(syms, first_run=first)
+                logger.info("RTSC: due this cycle = %d / %d", len(due), len(syms))
+                first = False
 
                 async def run_one(sym: str) -> None:
-                    async with semaphore:
+                    async with sem:
                         try:
                             await self._refresh_symbol(sym)
                         except asyncio.CancelledError:
@@ -327,7 +326,11 @@ class RealTimeSignalCache:
                         *(asyncio.create_task(run_one(sym)) for sym in due)
                     )
 
-                await self._wait_for_next_cycle()
+                if self._wake_event.is_set():
+                    self._wake_event.clear()
+                    continue
+
+                await asyncio.sleep(self._refresh_interval)
         except asyncio.CancelledError:
             logger.info("RTSC worker cancellation received")
             raise
@@ -360,32 +363,18 @@ class RealTimeSignalCache:
                 due.append(key)
         return due
 
-    async def _wait_for_next_cycle(self) -> None:
-        """Sleep until the next refresh interval or a wake event occurs."""
-
-        start = time.perf_counter()
-        while not self._stop_event.is_set():
-            if self._wake_event.is_set():
-                self._wake_event.clear()
-                return
-            elapsed = time.perf_counter() - start
-            remaining = self._refresh_interval - elapsed
-            if remaining <= 0:
-                return
-            await asyncio.sleep(min(remaining, 0.2))
-
-    async def _refresh_symbol(self, symbol: str, *, propagate_errors: bool = False) -> bool:
+    async def _refresh_symbol(self, symbol: str) -> bool:
         """Refresh a single symbol and return whether it succeeded."""
 
         attempt_ts = time.time()
         key = self._key(symbol)
         with self._lock:
             entry = self._cache.get(key)
-        entry_age = entry.age() if entry is not None else float("nan")
+        prev_age = entry.age() if entry is not None else None
         logger.info(
-            "Refreshing symbol %s (age=%.1fs, stale_after=%.1fs)",
+            "Refreshing symbol %s (age=%s, stale_after=%.1fs)",
             key,
-            entry_age,
+            f"{prev_age:.1f}s" if prev_age is not None else "None",
             self._stale_after,
         )
         try:
@@ -393,15 +382,11 @@ class RealTimeSignalCache:
         except Exception as exc:
             self._record_refresh_error(key, f"fetch error: {exc}", attempt_ts=attempt_ts)
             logger.debug("Price fetch failed for %s: %s", key, exc)
-            if propagate_errors:
-                raise
             return False
 
         if price_data is None or getattr(price_data, "empty", False):
             self._record_refresh_error(key, "no price data returned", attempt_ts=attempt_ts)
             logger.debug("No price data available for %s", key)
-            if propagate_errors:
-                raise ValueError("no price data returned")
             return False
 
         try:
@@ -418,8 +403,6 @@ class RealTimeSignalCache:
         except Exception as exc:
             self._record_refresh_error(key, "evaluation error", attempt_ts=attempt_ts)
             logger.exception("Signal evaluation failed for %s", key)
-            if propagate_errors:
-                raise
             return False
 
         cached = CachedSignal(
@@ -437,11 +420,10 @@ class RealTimeSignalCache:
             self._cache[key] = cached
             self._symbol_last_error.pop(key, None)
             self._primed_symbols.add(key)
-        prev_age = entry_age if entry is not None else None
         logger.info(
-            "RTSC: refreshed %s (prev_age=%.1fs → now fresh)",
+            "RTSC: refreshed %s (prev_age=%s)",
             key,
-            prev_age if prev_age is not None else -1.0,
+            f"{prev_age:.1f}s" if prev_age is not None else "None",
         )
         return True
 
