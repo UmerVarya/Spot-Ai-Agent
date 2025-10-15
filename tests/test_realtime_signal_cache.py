@@ -103,10 +103,26 @@ def test_pending_diagnostics_clamps_large_ages(monkeypatch: pytest.MonkeyPatch) 
     diagnostics = cache.pending_diagnostics()
     assert diagnostics
     entry = diagnostics[0]
-    assert entry["waiting_for"] <= cache.stale_after
-    assert entry["stale_age"] <= cache.stale_after
-    assert entry["request_wait"] <= cache.stale_after
-    assert entry["error_age"] <= cache.stale_after
+
+    waiting_for = entry["waiting_for"]
+    assert isinstance(waiting_for, dict)
+    assert waiting_for["display"] <= cache.stale_after
+    assert waiting_for["raw"] >= cache.stale_after
+
+    stale_age = entry["stale_age"]
+    assert isinstance(stale_age, dict)
+    assert stale_age["display"] <= cache.stale_after
+    assert stale_age["raw"] >= cache.stale_after
+
+    request_wait = entry["request_wait"]
+    assert isinstance(request_wait, dict)
+    assert request_wait["display"] <= cache.stale_after
+    assert request_wait["raw"] >= cache.stale_after
+
+    error_age = entry["error_age"]
+    assert isinstance(error_age, dict)
+    assert error_age["display"] <= cache.stale_after
+    assert error_age["raw"] >= cache.stale_after
 
 
 def test_force_refresh_without_worker_primes_cache() -> None:
