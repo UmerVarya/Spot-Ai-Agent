@@ -117,7 +117,9 @@ MAX_ACTIVE_TRADES = 1
 SCAN_INTERVAL = float(os.getenv("SCAN_INTERVAL", "3"))
 # Background refresh cadence for the real-time signal cache.
 SIGNAL_REFRESH_INTERVAL = float(os.getenv("SIGNAL_REFRESH_INTERVAL", "2.0"))
-SIGNAL_STALE_AFTER = float(os.getenv("SIGNAL_STALE_AFTER", str(SIGNAL_REFRESH_INTERVAL * 3)))
+SIGNAL_STALE_MULT = float(os.getenv("SIGNAL_STALE_AFTER", "3"))
+SIGNAL_STALE_AFTER = SIGNAL_REFRESH_INTERVAL * SIGNAL_STALE_MULT
+MAX_CONCURRENT_FETCHES = int(os.getenv("MAX_CONCURRENT_FETCHES", "10"))
 # Interval between news fetches (in seconds)
 NEWS_INTERVAL = 3600
 NEWS_MONITOR_INTERVAL = float(os.getenv("NEWS_MONITOR_INTERVAL", "3600"))
@@ -304,11 +306,22 @@ def run_agent_loop() -> None:
         with open("symbol_scores.json", "w") as f:
             json.dump({}, f)
         logger.info("Initialized empty symbol_scores.json")
+    refresh_interval = float(os.getenv("SIGNAL_REFRESH_INTERVAL", str(SIGNAL_REFRESH_INTERVAL)))
+    stale_mult = float(os.getenv("SIGNAL_STALE_AFTER", str(SIGNAL_STALE_MULT)))
+    max_conc = int(os.getenv("MAX_CONCURRENT_FETCHES", str(MAX_CONCURRENT_FETCHES)))
+
     signal_cache = RealTimeSignalCache(
         price_fetcher=get_price_data_async,
         evaluator=evaluate_signal,
-        refresh_interval=SIGNAL_REFRESH_INTERVAL,
-        stale_after=SIGNAL_STALE_AFTER,
+        refresh_interval=refresh_interval,
+        stale_after=refresh_interval * stale_mult,
+        max_concurrency=max_conc,
+    )
+    logger.info(
+        "Signal cache params: interval=%.2fs, stale_after=%.2fs, max_concurrency=%d",
+        refresh_interval,
+        refresh_interval * stale_mult,
+        max_conc,
     )
     signal_cache.start()
     state = CentralState()

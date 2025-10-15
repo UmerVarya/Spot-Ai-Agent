@@ -31,12 +31,20 @@ def _build_cache(
     )
 
 
-def test_cache_uses_environment_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SIGNAL_REFRESH_INTERVAL", "5.5")
-    monkeypatch.setenv("SIGNAL_STALE_AFTER", "42")
-    cache = _build_cache(stale_after=None)
-    assert cache.refresh_interval == pytest.approx(5.5)
-    assert cache.stale_after == pytest.approx(42)
+def test_cache_uses_default_stale_multiplier() -> None:
+    cache = _build_cache(stale_after=None, refresh_interval=2.5)
+    assert cache.stale_after == pytest.approx(2.5 * 3)
+
+
+def test_cache_accepts_max_concurrency_alias() -> None:
+    cache = RealTimeSignalCache(
+        _dummy_fetcher,
+        _dummy_evaluator,
+        refresh_interval=1.0,
+        stale_after=3.0,
+        max_concurrent_fetches=4,
+    )
+    assert cache._max_concurrency == 4
 
 
 def test_select_symbols_for_refresh_marks_old_entries(monkeypatch: pytest.MonkeyPatch) -> None:
