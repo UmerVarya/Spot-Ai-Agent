@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -64,8 +65,36 @@ class RealTimeSignalCache:
     ) -> None:
         self._price_fetcher = price_fetcher
         self._evaluator = evaluator
+
+        env_refresh_interval = os.getenv("SIGNAL_REFRESH_INTERVAL")
+        if env_refresh_interval is not None:
+            try:
+                refresh_interval = float(env_refresh_interval)
+            except ValueError:
+                logger.warning(
+                    "Invalid SIGNAL_REFRESH_INTERVAL=%s; falling back to provided refresh_interval=%.2f",
+                    env_refresh_interval,
+                    float(refresh_interval),
+                )
+
         self._refresh_interval = max(0.5, float(refresh_interval))
-        self._stale_after = float(stale_after) if stale_after is not None else self._refresh_interval * 3
+
+        effective_stale_after: Optional[float] = stale_after
+        env_stale_after = os.getenv("SIGNAL_STALE_AFTER")
+        if effective_stale_after is None and env_stale_after is not None:
+            try:
+                effective_stale_after = float(env_stale_after)
+            except ValueError:
+                logger.warning(
+                    "Invalid SIGNAL_STALE_AFTER=%s; using refresh-aligned fallback %.2f",
+                    env_stale_after,
+                    self._refresh_interval * 3,
+                )
+
+        if effective_stale_after is None or effective_stale_after <= 0:
+            effective_stale_after = self._refresh_interval * 3
+
+        self._stale_after = float(effective_stale_after)
         if max_concurrent_fetches <= 0:
             raise ValueError("max_concurrent_fetches must be positive")
         self._max_concurrent_fetches = int(max_concurrent_fetches)
@@ -85,6 +114,22 @@ class RealTimeSignalCache:
         """Maximum allowed age (seconds) for cached signals."""
 
         return self._stale_after
+
+    @stale_after.setter
+    def stale_after(self, value: float) -> None:
+        """Update the maximum allowed age for cached signals."""
+
+        new_value = max(0.0, float(value))
+        if new_value == self._stale_after:
+            return
+        self._stale_after = new_value
+        self._wake_event.set()
+
+    @property
+    def refresh_interval(self) -> float:
+        """Return the background refresh cadence for the cache."""
+
+        return self._refresh_interval
 
     def start(self) -> None:
         """Launch the background refresh worker if it is not already running."""
@@ -166,6 +211,7 @@ class RealTimeSignalCache:
             last_error = dict(self._symbol_last_error)
 
         pending: List[Dict[str, object]] = []
+        max_display_age = max(self._stale_after, self._refresh_interval * 3)
         for symbol in symbols:
             entry = cache_snapshot.get(symbol)
             if entry is not None and entry.is_fresh(self._stale_after):
@@ -173,16 +219,24 @@ class RealTimeSignalCache:
             waiting_for = None
             if symbol in added_at:
                 waiting_for = max(0.0, now - added_at[symbol])
+                if max_display_age > 0:
+                    waiting_for = min(waiting_for, max_display_age)
             stale_age = entry.age() if entry is not None else None
+            if stale_age is not None and max_display_age > 0:
+                stale_age = min(stale_age, max_display_age)
             request_wait = None
             if symbol in last_attempt:
                 request_wait = max(0.0, now - last_attempt[symbol])
+                if max_display_age > 0:
+                    request_wait = min(request_wait, max_display_age)
             error_msg: Optional[str] = None
             error_age: Optional[float] = None
             if symbol in last_error:
                 err_ts, msg = last_error[symbol]
                 error_msg = msg
                 error_age = max(0.0, now - err_ts)
+                if max_display_age > 0:
+                    error_age = min(error_age, max_display_age)
             pending.append(
                 {
                     "symbol": symbol,
@@ -218,10 +272,12 @@ class RealTimeSignalCache:
             loop_started = time.perf_counter()
             symbols = self.symbols()
             if symbols:
-                try:
-                    asyncio.run(self._refresh_symbols(symbols))
-                except Exception:
-                    logger.exception("Signal cache refresh encountered an error")
+                symbols_to_refresh = self._select_symbols_for_refresh(symbols)
+                if symbols_to_refresh:
+                    try:
+                        asyncio.run(self._refresh_symbols(symbols_to_refresh))
+                    except Exception:
+                        logger.exception("Signal cache refresh encountered an error")
             # Wake up sooner if new symbols are pushed; otherwise wait for interval
             elapsed = time.perf_counter() - loop_started
             wait_time = max(0.0, self._refresh_interval - elapsed)
@@ -279,6 +335,23 @@ class RealTimeSignalCache:
                 self._symbol_last_attempt[symbol] = attempt_ts
                 self._cache[symbol] = cached
                 self._symbol_last_error.pop(symbol, None)
+
+    def _select_symbols_for_refresh(self, symbols: Sequence[str]) -> List[str]:
+        """Return the subset of ``symbols`` that require a refresh cycle."""
+
+        now = time.time()
+        with self._lock:
+            cache_snapshot = dict(self._cache)
+
+        due: List[str] = []
+        for symbol in symbols:
+            entry = cache_snapshot.get(symbol)
+            if entry is None:
+                due.append(symbol)
+                continue
+            if now - entry.updated_at >= self._refresh_interval:
+                due.append(symbol)
+        return due
 
     def _record_refresh_error(
         self, symbol: str, message: str, *, attempt_ts: Optional[float] = None
