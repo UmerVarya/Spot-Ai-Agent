@@ -1,3 +1,4 @@
+import asyncio
 import time
 from typing import Awaitable, Callable, Optional, Tuple
 
@@ -106,3 +107,42 @@ def test_pending_diagnostics_clamps_large_ages(monkeypatch: pytest.MonkeyPatch) 
     assert entry["stale_age"] <= cache.stale_after
     assert entry["request_wait"] <= cache.stale_after
     assert entry["error_age"] <= cache.stale_after
+
+
+def test_force_refresh_without_worker_primes_cache() -> None:
+    calls: list[str] = []
+
+    async def fetcher(symbol: str) -> Optional[pd.DataFrame]:
+        calls.append(symbol)
+        await asyncio.sleep(0)
+        return pd.DataFrame({"close": [1.0]}, index=[pd.Timestamp.utcnow()])
+
+    cache = _build_cache(fetcher=fetcher)
+    cache.update_universe(["BTCUSDT"])
+    assert cache.get("BTCUSDT") is None
+
+    success = cache.force_refresh("BTCUSDT", timeout=2.0)
+    assert success
+    cached = cache.get("BTCUSDT")
+    assert cached is not None
+    assert calls == ["BTCUSDT"]
+
+
+def test_force_refresh_while_worker_running() -> None:
+    calls: list[str] = []
+
+    async def fetcher(symbol: str) -> Optional[pd.DataFrame]:
+        calls.append(symbol)
+        await asyncio.sleep(0.01)
+        return pd.DataFrame({"close": [1.0]}, index=[pd.Timestamp.utcnow()])
+
+    cache = _build_cache(fetcher=fetcher)
+    cache.update_universe(["ETHUSDT"])
+    cache.start()
+    try:
+        success = cache.force_refresh("ETHUSDT", timeout=2.0)
+        assert success
+        assert cache.get("ETHUSDT") is not None
+        assert calls  # fetcher invoked either by worker or manual refresh
+    finally:
+        cache.stop()
