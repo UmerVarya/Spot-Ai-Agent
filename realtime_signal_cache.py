@@ -60,11 +60,15 @@ class RealTimeSignalCache:
         evaluator: SignalEvaluator,
         refresh_interval: float = 2.0,
         stale_after: Optional[float] = None,
+        max_concurrent_fetches: int = 8,
     ) -> None:
         self._price_fetcher = price_fetcher
         self._evaluator = evaluator
         self._refresh_interval = max(0.5, float(refresh_interval))
         self._stale_after = float(stale_after) if stale_after is not None else self._refresh_interval * 3
+        if max_concurrent_fetches <= 0:
+            raise ValueError("max_concurrent_fetches must be positive")
+        self._max_concurrent_fetches = int(max_concurrent_fetches)
         self._symbols: set[str] = set()
         self._cache: Dict[str, CachedSignal] = {}
         self._lock = threading.Lock()
@@ -205,9 +209,10 @@ class RealTimeSignalCache:
         """Background worker that refreshes the cache in near real time."""
 
         logger.info(
-            "Starting real-time signal cache worker (interval=%.2fs, stale_after=%.2fs)",
+            "Starting real-time signal cache worker (interval=%.2fs, stale_after=%.2fs, max_concurrency=%d)",
             self._refresh_interval,
             self._stale_after,
+            self._max_concurrent_fetches,
         )
         while not self._stop_event.is_set():
             loop_started = time.perf_counter()
@@ -227,7 +232,13 @@ class RealTimeSignalCache:
     async def _refresh_symbols(self, symbols: Sequence[str]) -> None:
         """Fetch latest price data and evaluate signals for a batch of symbols."""
 
-        tasks = [self._price_fetcher(sym) for sym in symbols]
+        semaphore = asyncio.Semaphore(self._max_concurrent_fetches)
+
+        async def _throttled_fetch(symbol: str) -> object:
+            async with semaphore:
+                return await self._price_fetcher(symbol)
+
+        tasks = [asyncio.create_task(_throttled_fetch(sym)) for sym in symbols]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for symbol, result in zip(symbols, results):
             attempt_ts = time.time()
