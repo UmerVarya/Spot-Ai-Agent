@@ -1,6 +1,5 @@
 import time
-from collections.abc import Awaitable, Callable
-from typing import Optional, Tuple
+from typing import Awaitable, Callable, Optional, Tuple
 
 import pandas as pd
 import pytest
