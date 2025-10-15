@@ -429,8 +429,9 @@ def _load_cached_events(path: str = "news_events.json") -> list:
         logger.warning("Cached news events file %s is corrupt; ignoring", path, exc_info=True)
         return []
     except Exception:
-        logger.debug("Unexpected error loading cached news events", exc_info=True)
-        return []
+        # Re-raise unexpected I/O errors so callers can fall back to fetching fresh data.
+        logger.debug("Unexpected error loading cached news events from %s", path, exc_info=True)
+        raise
 
 
 def prepare_trade_decision(
