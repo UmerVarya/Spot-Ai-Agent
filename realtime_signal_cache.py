@@ -99,6 +99,8 @@ class RealTimeSignalCache:
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._bg_task: Optional[asyncio.Task] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._context: Dict[str, object] = {}
         self._symbol_added_at: Dict[str, float] = {}
         self._symbol_last_attempt: Dict[str, float] = {}
@@ -127,27 +129,56 @@ class RealTimeSignalCache:
 
         return self._refresh_interval
 
+    def _key(self, symbol: str) -> str:
+        """Normalize ``symbol`` for internal storage."""
+
+        return str(symbol).upper()
+
     def start(self) -> None:
         """Launch the background refresh worker if it is not already running."""
 
+        if self._bg_task and not self._bg_task.done():
+            return
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run_loop, name="signal-cache", daemon=True)
-        self._thread.start()
+        self._wake_event.clear()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.info("RTSC: no running loop; starting worker in daemon thread")
+            
+            def runner() -> None:
+                try:
+                    asyncio.run(self._worker())
+                except Exception:  # pragma: no cover - defensive logging
+                    logger.exception("RTSC worker crashed")
+
+            self._thread = threading.Thread(target=runner, daemon=True, name="rtsc-worker")
+            self._thread.start()
+        else:
+            logger.info("RTSC: starting worker on running loop")
+            self._bg_task = loop.create_task(self._worker())
 
     def stop(self) -> None:
         """Signal the worker to stop and wait briefly for it to exit."""
 
         self._stop_event.set()
         self._wake_event.set()
+        task = self._bg_task
+        loop = self._loop
+        if task and loop and not task.done():
+            loop.call_soon_threadsafe(task.cancel)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+        self._bg_task = None
+        self._thread = None
+        self._loop = None
 
     def update_universe(self, symbols: Iterable[str]) -> None:
         """Update the symbol universe tracked by the cache."""
 
-        normalized = {str(sym).upper() for sym in symbols if sym}
+        normalized = {self._key(sym) for sym in symbols if sym}
         with self._lock:
             added = normalized - self._symbols
             removed = self._symbols - normalized
@@ -174,7 +205,7 @@ class RealTimeSignalCache:
     def get(self, symbol: str) -> Optional[CachedSignal]:
         """Return the cached signal for ``symbol`` if available and fresh."""
 
-        key = str(symbol).upper()
+        key = self._key(symbol)
         with self._lock:
             entry = self._cache.get(key)
         if entry is None:
@@ -257,95 +288,108 @@ class RealTimeSignalCache:
             pending = pending[: int(limit)]
         return pending
 
-    def _run_loop(self) -> None:
-        """Background worker that refreshes the cache in near real time."""
+    async def _worker(self) -> None:
+        """Background coroutine that refreshes the cache in near real time."""
 
+        loop = asyncio.get_running_loop()
+        self._loop = loop
         logger.info(
-            "Starting real-time signal cache worker (interval=%.2fs, stale_after=%.2fs, max_concurrency=%d)",
+            "RTSC: worker started (interval=%.2fs, stale_after=%.2fs, max_concurrency=%d)",
             self._refresh_interval,
             self._stale_after,
             self._max_concurrency,
         )
-        while not self._stop_event.is_set():
-            loop_started = time.perf_counter()
-            symbols = self.symbols()
-            if symbols:
-                with self._lock:
-                    primed_snapshot = set(self._primed_symbols)
-                symbols_to_prime = [sym for sym in symbols if sym not in primed_snapshot]
-                if symbols_to_prime:
-                    try:
-                        asyncio.run(self._prime_symbols(symbols_to_prime))
-                    except Exception:
-                        logger.exception("Signal cache prime encountered an error")
-                    finally:
-                        with self._lock:
-                            self._primed_symbols.update(symbols_to_prime)
-                symbols_to_refresh = self._select_symbols_for_refresh(symbols)
-                if symbols_to_refresh:
-                    try:
-                        asyncio.run(self._refresh_symbols(symbols_to_refresh))
-                    except Exception:
-                        logger.exception("Signal cache refresh encountered an error")
-            # Wake up sooner if new symbols are pushed; otherwise wait for interval
-            elapsed = time.perf_counter() - loop_started
-            wait_time = max(0.0, self._refresh_interval - elapsed)
-            self._wake_event.wait(timeout=wait_time)
-            self._wake_event.clear()
-        logger.info("Signal cache worker stopped")
-
-    async def _refresh_symbols(self, symbols: Sequence[str]) -> None:
-        """Fetch latest price data and evaluate signals for a batch of symbols."""
-
         semaphore = asyncio.Semaphore(self._max_concurrency)
+        first_run = True
+        try:
+            while not self._stop_event.is_set():
+                symbols = self.symbols()
+                due = self._symbols_due(symbols, first_run=first_run)
+                logger.info("RTSC: due this cycle = %d / %d", len(due), len(symbols))
+                first_run = False
 
-        async def _throttled(symbol: str) -> None:
-            async with semaphore:
-                try:
-                    await self._refresh_symbol(symbol)
-                except Exception:
-                    logger.exception("Signal cache refresh encountered an unexpected error for %s", symbol)
+                async def run_one(sym: str) -> None:
+                    async with semaphore:
+                        await self._refresh_symbol(sym)
 
-        tasks = [asyncio.create_task(_throttled(sym)) for sym in symbols]
-        await asyncio.gather(*tasks)
+                if due:
+                    await asyncio.gather(
+                        *(asyncio.create_task(run_one(sym)) for sym in due)
+                    )
 
-    async def _prime_symbols(self, symbols: Sequence[str]) -> None:
-        """Run an initial refresh pass for ``symbols`` sequentially."""
+                await self._wait_for_next_cycle()
+        except asyncio.CancelledError:
+            logger.info("RTSC worker cancellation received")
+            raise
+        finally:
+            self._loop = None
+            self._bg_task = None
+            logger.info("RTSC worker stopped")
+
+    def _symbols_due(self, symbols: Sequence[str], *, first_run: bool) -> List[str]:
+        """Return the subset of ``symbols`` requiring refresh this cycle."""
 
         if not symbols:
-            return
-        logger.info("Signal cache first-run: priming %d symbols", len(symbols))
+            return []
+        now = time.time()
+        with self._lock:
+            cache_snapshot = dict(self._cache)
+            primed_snapshot = set(self._primed_symbols)
+
+        due: List[str] = []
         for symbol in symbols:
-            try:
-                await self._refresh_symbol(symbol, propagate_errors=True)
-            except Exception as exc:
-                logger.warning("Prime failed for %s: %s", symbol, exc, exc_info=True)
+            key = self._key(symbol)
+            entry = cache_snapshot.get(key)
+            if entry is None:
+                due.append(key)
+                continue
+            if first_run and key not in primed_snapshot:
+                due.append(key)
+                continue
+            if now - entry.updated_at >= self._refresh_interval:
+                due.append(key)
+        return due
+
+    async def _wait_for_next_cycle(self) -> None:
+        """Sleep until the next refresh interval or a wake event occurs."""
+
+        start = time.perf_counter()
+        while not self._stop_event.is_set():
+            if self._wake_event.is_set():
+                self._wake_event.clear()
+                return
+            elapsed = time.perf_counter() - start
+            remaining = self._refresh_interval - elapsed
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(remaining, 0.2))
 
     async def _refresh_symbol(self, symbol: str, *, propagate_errors: bool = False) -> bool:
         """Refresh a single symbol and return whether it succeeded."""
 
         attempt_ts = time.time()
+        key = self._key(symbol)
         with self._lock:
-            entry = self._cache.get(symbol)
+            entry = self._cache.get(key)
         entry_age = entry.age() if entry is not None else float("nan")
         logger.info(
             "Refreshing symbol %s (age=%.1fs, stale_after=%.1fs)",
-            symbol,
+            key,
             entry_age,
             self._stale_after,
         )
         try:
-            price_data = await self._price_fetcher(symbol)
+            price_data = await self._price_fetcher(key)
         except Exception as exc:
-            self._record_refresh_error(symbol, f"fetch error: {exc}", attempt_ts=attempt_ts)
-            logger.debug("Price fetch failed for %s: %s", symbol, exc)
+            self._record_refresh_error(key, f"fetch error: {exc}", attempt_ts=attempt_ts)
+            logger.debug("Price fetch failed for %s: %s", key, exc)
             if propagate_errors:
                 raise
             return False
 
         if price_data is None or getattr(price_data, "empty", False):
-            self._record_refresh_error(symbol, "no price data returned", attempt_ts=attempt_ts)
-            logger.debug("No price data available for %s", symbol)
+            self._record_refresh_error(key, "no price data returned", attempt_ts=attempt_ts)
+            logger.debug("No price data available for %s", key)
             if propagate_errors:
                 raise ValueError("no price data returned")
             return False
@@ -357,19 +401,19 @@ class RealTimeSignalCache:
             eval_start = time.perf_counter()
             score, direction, position_size, pattern = self._evaluator(
                 price_data,
-                symbol,
+                key,
                 sentiment_bias=sentiment_bias,
             )
             latency = time.perf_counter() - eval_start
         except Exception as exc:
-            self._record_refresh_error(symbol, "evaluation error", attempt_ts=attempt_ts)
-            logger.exception("Signal evaluation failed for %s", symbol)
+            self._record_refresh_error(key, "evaluation error", attempt_ts=attempt_ts)
+            logger.exception("Signal evaluation failed for %s", key)
             if propagate_errors:
                 raise
             return False
 
         cached = CachedSignal(
-            symbol=symbol,
+            symbol=key,
             score=float(score),
             direction=direction,
             position_size=float(position_size),
@@ -379,9 +423,16 @@ class RealTimeSignalCache:
             compute_latency=float(latency),
         )
         with self._lock:
-            self._symbol_last_attempt[symbol] = attempt_ts
-            self._cache[symbol] = cached
-            self._symbol_last_error.pop(symbol, None)
+            self._symbol_last_attempt[key] = attempt_ts
+            self._cache[key] = cached
+            self._symbol_last_error.pop(key, None)
+            self._primed_symbols.add(key)
+        prev_age = entry_age if entry is not None else None
+        logger.info(
+            "RTSC: refreshed %s (prev_age=%.1fs → now fresh)",
+            key,
+            prev_age if prev_age is not None else -1.0,
+        )
         return True
 
     def _select_symbols_for_refresh(self, symbols: Sequence[str]) -> List[str]:
@@ -393,12 +444,13 @@ class RealTimeSignalCache:
 
         due: List[str] = []
         for symbol in symbols:
-            entry = cache_snapshot.get(symbol)
+            key = self._key(symbol)
+            entry = cache_snapshot.get(key)
             if entry is None:
-                due.append(symbol)
+                due.append(key)
                 continue
             if now - entry.updated_at >= self._refresh_interval:
-                due.append(symbol)
+                due.append(key)
         return due
 
     def _record_refresh_error(
@@ -411,6 +463,7 @@ class RealTimeSignalCache:
         if len(normalized_message) > 160:
             normalized_message = f"{normalized_message[:157]}..."
         with self._lock:
-            self._symbol_last_attempt[symbol] = ts
-            self._symbol_last_error[symbol] = (ts, normalized_message)
+            key = self._key(symbol)
+            self._symbol_last_attempt[key] = ts
+            self._symbol_last_error[key] = (ts, normalized_message)
 
