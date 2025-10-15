@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import threading
 import time
 from dataclasses import dataclass
@@ -64,43 +63,36 @@ class RealTimeSignalCache:
         evaluator: SignalEvaluator,
         refresh_interval: float = 2.0,
         stale_after: Optional[float] = None,
-        max_concurrent_fetches: int = 8,
+        max_concurrent_fetches: Optional[int] = None,
+        *,
+        max_concurrency: Optional[int] = None,
     ) -> None:
         self._price_fetcher = price_fetcher
         self._evaluator = evaluator
-
-        env_refresh_interval = os.getenv("SIGNAL_REFRESH_INTERVAL")
-        if env_refresh_interval is not None:
-            try:
-                refresh_interval = float(env_refresh_interval)
-            except ValueError:
-                logger.warning(
-                    "Invalid SIGNAL_REFRESH_INTERVAL=%s; falling back to provided refresh_interval=%.2f",
-                    env_refresh_interval,
-                    float(refresh_interval),
-                )
-
         self._refresh_interval = max(0.5, float(refresh_interval))
-
-        effective_stale_after: Optional[float] = stale_after
-        env_stale_after = os.getenv("SIGNAL_STALE_AFTER")
-        if effective_stale_after is None and env_stale_after is not None:
-            try:
-                effective_stale_after = float(env_stale_after)
-            except ValueError:
-                logger.warning(
-                    "Invalid SIGNAL_STALE_AFTER=%s; using refresh-aligned fallback %.2f",
-                    env_stale_after,
-                    self._refresh_interval * 3,
-                )
-
-        if effective_stale_after is None or effective_stale_after <= 0:
+        if stale_after is None or float(stale_after) <= 0:
             effective_stale_after = self._refresh_interval * 3
+        else:
+            effective_stale_after = float(stale_after)
 
         self._stale_after = float(effective_stale_after)
-        if max_concurrent_fetches <= 0:
-            raise ValueError("max_concurrent_fetches must be positive")
-        self._max_concurrent_fetches = int(max_concurrent_fetches)
+
+        if max_concurrency is None:
+            if max_concurrent_fetches is None:
+                max_concurrency = 8
+            else:
+                max_concurrency = int(max_concurrent_fetches)
+        elif max_concurrent_fetches is not None and int(max_concurrency) != int(
+            max_concurrent_fetches
+        ):
+            raise ValueError(
+                "Specify only one of max_concurrency or max_concurrent_fetches",
+            )
+
+        if max_concurrency <= 0:
+            raise ValueError("max_concurrency must be positive")
+
+        self._max_concurrency = int(max_concurrency)
         self._symbols: set[str] = set()
         self._cache: Dict[str, CachedSignal] = {}
         self._lock = threading.Lock()
@@ -111,6 +103,7 @@ class RealTimeSignalCache:
         self._symbol_added_at: Dict[str, float] = {}
         self._symbol_last_attempt: Dict[str, float] = {}
         self._symbol_last_error: Dict[str, Tuple[float, str]] = {}
+        self._primed_symbols: set[str] = set()
 
     @property
     def stale_after(self) -> float:
@@ -169,11 +162,13 @@ class RealTimeSignalCache:
                 self._symbol_added_at.pop(key, None)
                 self._symbol_last_attempt.pop(key, None)
                 self._symbol_last_error.pop(key, None)
+                self._primed_symbols.discard(key)
             now = time.time()
             for key in added:
                 self._symbol_added_at[key] = now
                 self._symbol_last_attempt.pop(key, None)
                 self._symbol_last_error.pop(key, None)
+                self._primed_symbols.discard(key)
         self._wake_event.set()
 
     def get(self, symbol: str) -> Optional[CachedSignal]:
@@ -269,12 +264,23 @@ class RealTimeSignalCache:
             "Starting real-time signal cache worker (interval=%.2fs, stale_after=%.2fs, max_concurrency=%d)",
             self._refresh_interval,
             self._stale_after,
-            self._max_concurrent_fetches,
+            self._max_concurrency,
         )
         while not self._stop_event.is_set():
             loop_started = time.perf_counter()
             symbols = self.symbols()
             if symbols:
+                with self._lock:
+                    primed_snapshot = set(self._primed_symbols)
+                symbols_to_prime = [sym for sym in symbols if sym not in primed_snapshot]
+                if symbols_to_prime:
+                    try:
+                        asyncio.run(self._prime_symbols(symbols_to_prime))
+                    except Exception:
+                        logger.exception("Signal cache prime encountered an error")
+                    finally:
+                        with self._lock:
+                            self._primed_symbols.update(symbols_to_prime)
                 symbols_to_refresh = self._select_symbols_for_refresh(symbols)
                 if symbols_to_refresh:
                     try:
@@ -291,53 +297,83 @@ class RealTimeSignalCache:
     async def _refresh_symbols(self, symbols: Sequence[str]) -> None:
         """Fetch latest price data and evaluate signals for a batch of symbols."""
 
-        semaphore = asyncio.Semaphore(self._max_concurrent_fetches)
+        semaphore = asyncio.Semaphore(self._max_concurrency)
 
-        async def _throttled_fetch(symbol: str) -> object:
+        async def _throttled(symbol: str) -> None:
             async with semaphore:
-                return await self._price_fetcher(symbol)
+                try:
+                    await self._refresh_symbol(symbol)
+                except Exception:
+                    logger.exception("Signal cache refresh encountered an unexpected error for %s", symbol)
 
-        tasks = [asyncio.create_task(_throttled_fetch(sym)) for sym in symbols]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for symbol, result in zip(symbols, results):
-            attempt_ts = time.time()
-            if isinstance(result, Exception):
-                self._record_refresh_error(symbol, f"fetch error: {result}", attempt_ts=attempt_ts)
-                logger.debug("Price fetch failed for %s: %s", symbol, result)
-                continue
-            if result is None or result.empty:
-                self._record_refresh_error(symbol, "no price data returned", attempt_ts=attempt_ts)
-                logger.debug("No price data available for %s", symbol)
-                continue
+        tasks = [asyncio.create_task(_throttled(sym)) for sym in symbols]
+        await asyncio.gather(*tasks)
+
+    async def _prime_symbols(self, symbols: Sequence[str]) -> None:
+        """Run an initial refresh pass for ``symbols`` sequentially."""
+
+        if not symbols:
+            return
+        logger.info("Signal cache first-run: priming %d symbols", len(symbols))
+        for symbol in symbols:
             try:
-                with self._lock:
-                    context = dict(self._context)
-                sentiment_bias = str(context.get("sentiment_bias", "neutral"))
-                eval_start = time.perf_counter()
-                score, direction, position_size, pattern = self._evaluator(
-                    result,
-                    symbol,
-                    sentiment_bias=sentiment_bias,
-                )
-                latency = time.perf_counter() - eval_start
-            except Exception:
-                self._record_refresh_error(symbol, "evaluation error", attempt_ts=attempt_ts)
-                logger.exception("Signal evaluation failed for %s", symbol)
-                continue
-            cached = CachedSignal(
-                symbol=symbol,
-                score=float(score),
-                direction=direction,
-                position_size=float(position_size),
-                pattern=pattern,
-                price_data=result,
-                updated_at=time.time(),
-                compute_latency=float(latency),
-            )
+                await self._refresh_symbol(symbol, propagate_errors=True)
+            except Exception as exc:
+                logger.warning("Prime failed for %s: %s", symbol, exc, exc_info=True)
+
+    async def _refresh_symbol(self, symbol: str, *, propagate_errors: bool = False) -> bool:
+        """Refresh a single symbol and return whether it succeeded."""
+
+        attempt_ts = time.time()
+        try:
+            price_data = await self._price_fetcher(symbol)
+        except Exception as exc:
+            self._record_refresh_error(symbol, f"fetch error: {exc}", attempt_ts=attempt_ts)
+            logger.debug("Price fetch failed for %s: %s", symbol, exc)
+            if propagate_errors:
+                raise
+            return False
+
+        if price_data is None or getattr(price_data, "empty", False):
+            self._record_refresh_error(symbol, "no price data returned", attempt_ts=attempt_ts)
+            logger.debug("No price data available for %s", symbol)
+            if propagate_errors:
+                raise ValueError("no price data returned")
+            return False
+
+        try:
             with self._lock:
-                self._symbol_last_attempt[symbol] = attempt_ts
-                self._cache[symbol] = cached
-                self._symbol_last_error.pop(symbol, None)
+                context = dict(self._context)
+            sentiment_bias = str(context.get("sentiment_bias", "neutral"))
+            eval_start = time.perf_counter()
+            score, direction, position_size, pattern = self._evaluator(
+                price_data,
+                symbol,
+                sentiment_bias=sentiment_bias,
+            )
+            latency = time.perf_counter() - eval_start
+        except Exception as exc:
+            self._record_refresh_error(symbol, "evaluation error", attempt_ts=attempt_ts)
+            logger.exception("Signal evaluation failed for %s", symbol)
+            if propagate_errors:
+                raise
+            return False
+
+        cached = CachedSignal(
+            symbol=symbol,
+            score=float(score),
+            direction=direction,
+            position_size=float(position_size),
+            pattern=pattern,
+            price_data=price_data,
+            updated_at=time.time(),
+            compute_latency=float(latency),
+        )
+        with self._lock:
+            self._symbol_last_attempt[symbol] = attempt_ts
+            self._cache[symbol] = cached
+            self._symbol_last_error.pop(symbol, None)
+        return True
 
     def _select_symbols_for_refresh(self, symbols: Sequence[str]) -> List[str]:
         """Return the subset of ``symbols`` that require a refresh cycle."""
