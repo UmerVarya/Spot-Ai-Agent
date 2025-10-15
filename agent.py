@@ -624,6 +624,7 @@ def run_agent_loop() -> None:
             else:
                 logger.info("All top symbols already have active positions; skipping fresh evaluations.")
             signal_cache.update_universe(symbols_to_fetch)
+            signal_cache.start()
             cache_miss_symbols: list[str] = []
             for symbol in symbols_to_fetch:
                 try:
