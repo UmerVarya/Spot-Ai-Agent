@@ -325,6 +325,15 @@ class RealTimeSignalCache:
         """Refresh a single symbol and return whether it succeeded."""
 
         attempt_ts = time.time()
+        with self._lock:
+            entry = self._cache.get(symbol)
+        entry_age = entry.age() if entry is not None else float("nan")
+        logger.info(
+            "Refreshing symbol %s (age=%.1fs, stale_after=%.1fs)",
+            symbol,
+            entry_age,
+            self._stale_after,
+        )
         try:
             price_data = await self._price_fetcher(symbol)
         except Exception as exc:
