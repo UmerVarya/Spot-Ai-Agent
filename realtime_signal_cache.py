@@ -310,7 +310,17 @@ class RealTimeSignalCache:
 
                 async def run_one(sym: str) -> None:
                     async with semaphore:
-                        await self._refresh_symbol(sym)
+                        try:
+                            await self._refresh_symbol(sym)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:  # pragma: no cover - defensive logging
+                            logger.exception("RTSC: unexpected error refreshing %s", sym)
+                            self._record_refresh_error(
+                                sym,
+                                f"unexpected error: {exc}",
+                                attempt_ts=time.time(),
+                            )
 
                 if due:
                     await asyncio.gather(
