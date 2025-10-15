@@ -588,11 +588,28 @@ def run_agent_loop() -> None:
             if top_symbols:
                 market_stream.set_symbols(top_symbols)
             session = get_market_session()
+            if top_symbols:
+                logger.info(
+                    "Market scan started for %s session covering %d symbols: %s",
+                    session,
+                    len(top_symbols),
+                    ", ".join(top_symbols),
+                )
+            else:
+                logger.info("Market scan started for %s session but no symbols available.", session)
             potential_trades: list[dict] = []
             symbol_scores: dict[str, dict[str, float | None]] = {}
             symbols_to_fetch = [
                 sym for sym in top_symbols if not any(t.get("symbol") == sym for t in active_trades)
             ]
+            if symbols_to_fetch:
+                logger.info(
+                    "Evaluating %d symbols without active positions: %s",
+                    len(symbols_to_fetch),
+                    ", ".join(symbols_to_fetch),
+                )
+            else:
+                logger.info("All top symbols already have active positions; skipping fresh evaluations.")
             signal_cache.update_universe(symbols_to_fetch)
             cache_miss_symbols: list[str] = []
             for symbol in symbols_to_fetch:
