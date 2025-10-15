@@ -120,6 +120,9 @@ SIGNAL_REFRESH_INTERVAL = float(os.getenv("SIGNAL_REFRESH_INTERVAL", "2.0"))
 SIGNAL_STALE_MULT = float(os.getenv("SIGNAL_STALE_AFTER", "3"))
 SIGNAL_STALE_AFTER = SIGNAL_REFRESH_INTERVAL * SIGNAL_STALE_MULT
 MAX_CONCURRENT_FETCHES = int(os.getenv("MAX_CONCURRENT_FETCHES", "10"))
+SIGNAL_CACHE_PRIME_AFTER = float(os.getenv("SIGNAL_CACHE_PRIME_AFTER", "120"))
+SIGNAL_CACHE_PRIME_COOLDOWN = float(os.getenv("SIGNAL_CACHE_PRIME_COOLDOWN", "300"))
+SIGNAL_CACHE_PRIME_TIMEOUT = float(os.getenv("SIGNAL_CACHE_PRIME_TIMEOUT", "15"))
 # Interval between news fetches (in seconds)
 NEWS_INTERVAL = 3600
 NEWS_MONITOR_INTERVAL = float(os.getenv("NEWS_MONITOR_INTERVAL", "3600"))
@@ -329,6 +332,7 @@ def run_agent_loop() -> None:
     guard_stop = threading.Event()
     scan_trigger = threading.Event()
     scan_lock = threading.Lock()
+    manual_cache_primes: dict[str, float] = {}
     guard_interval = float(os.getenv("GUARD_INTERVAL", "0.75"))
     guard_interval = max(0.5, min(1.0, guard_interval))
     macro_task = ScheduledTask("macro", min_interval=60.0, max_interval=300.0)
@@ -880,6 +884,55 @@ def run_agent_loop() -> None:
                         if symbol in pending_lookup
                     ]
                     preview_infos = preview_infos[:5]
+                    now_ts = time.time()
+                    stuck_candidates: list[tuple[str, float, dict[str, object]]] = []
+                    if SIGNAL_CACHE_PRIME_AFTER > 0:
+                        for info in preview_infos:
+                            symbol_key = info["symbol"]
+                            wait_metrics = [
+                                float(val)
+                                for val in (
+                                    info.get("waiting_for"),
+                                    info.get("stale_age"),
+                                    info.get("request_wait"),
+                                )
+                                if isinstance(val, (int, float))
+                            ]
+                            max_wait = max(wait_metrics) if wait_metrics else 0.0
+                            last_prime = manual_cache_primes.get(symbol_key, 0.0)
+                            if (
+                                max_wait >= SIGNAL_CACHE_PRIME_AFTER
+                                and now_ts - last_prime >= SIGNAL_CACHE_PRIME_COOLDOWN
+                            ):
+                                stuck_candidates.append((symbol_key, max_wait, info))
+                    for symbol_key, max_wait, info in stuck_candidates:
+                        last_error = info.get("last_error")
+                        if last_error:
+                            logger.warning(
+                                "Signal cache forcing manual refresh for %s after %.1fs (last error: %s)",
+                                symbol_key,
+                                max_wait,
+                                last_error,
+                            )
+                        else:
+                            logger.warning(
+                                "Signal cache forcing manual refresh for %s after %.1fs without data.",
+                                symbol_key,
+                                max_wait,
+                            )
+                        timeout = max(1.0, SIGNAL_CACHE_PRIME_TIMEOUT)
+                        success = signal_cache.force_refresh(symbol_key, timeout=timeout)
+                        manual_cache_primes[symbol_key] = now_ts
+                        if success:
+                            logger.info(
+                                "Manual refresh succeeded for %s; cache primed.",
+                                symbol_key,
+                            )
+                        else:
+                            logger.error(
+                                "Manual refresh failed for %s; will retry after cooldown.",
+                                symbol_key,
+                            )
                     preview_parts: list[str] = []
                     for info in preview_infos:
                         details: list[str] = []

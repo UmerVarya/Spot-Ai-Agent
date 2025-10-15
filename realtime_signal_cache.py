@@ -11,6 +11,7 @@ deriving indicators right when an order needs to be submitted.
 from __future__ import annotations
 
 import logging, os
+from concurrent.futures import TimeoutError as FutureTimeout
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)        # make it chatty
@@ -286,6 +287,50 @@ class RealTimeSignalCache:
         if limit is not None:
             pending = pending[: int(limit)]
         return pending
+
+    def force_refresh(self, symbol: str, *, timeout: float = 15.0) -> bool:
+        """Synchronously refresh ``symbol`` to break through prolonged warm-ups.
+
+        When the asynchronous worker struggles to prime a symbol (for example
+        because repeated fetch attempts hit transient API failures), the agent
+        can call this helper to perform a blocking refresh.  The call prefers
+        to schedule work on the background loop when it is running, falling
+        back to executing the refresh in a dedicated event loop otherwise.
+
+        Parameters
+        ----------
+        symbol:
+            Trading pair to refresh.
+        timeout:
+            Maximum time (seconds) to wait for the background loop to finish
+            the refresh when it is already running.  This is ignored when the
+            worker is offline and the method spins up a temporary event loop
+            instead.
+        """
+
+        key = self._key(symbol)
+        loop = self._loop
+        if loop and loop.is_running():
+            logger.info("RTSC: force-refresh scheduling %s on worker loop", key)
+            future = asyncio.run_coroutine_threadsafe(self._refresh_symbol(key), loop)
+            try:
+                return bool(future.result(timeout))
+            except FutureTimeout:
+                future.cancel()
+                logger.warning(
+                    "RTSC: force refresh for %s timed out after %.1fs", key, timeout
+                )
+                return False
+            except Exception:
+                logger.exception("RTSC: force refresh for %s failed on worker loop", key)
+                return False
+
+        logger.info("RTSC: force-refresh running %s on temporary event loop", key)
+        try:
+            return bool(asyncio.run(self._refresh_symbol(key)))
+        except Exception:
+            logger.exception("RTSC: force refresh for %s failed via synchronous path", key)
+            return False
 
     async def _worker(self) -> None:
         """Background coroutine that refreshes the cache in near real time."""
