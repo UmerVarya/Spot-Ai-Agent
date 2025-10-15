@@ -23,6 +23,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+VERSION_TAG = "RTSC-2025-10-15-UMER-1"
+logger.info("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
+
 
 PriceFetcher = Callable[[str], Awaitable[pd.DataFrame | None]]
 SignalEvaluator = Callable[..., Tuple[float, Optional[str], float, Optional[str]]]
