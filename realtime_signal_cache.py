@@ -241,46 +241,59 @@ class RealTimeSignalCache:
 
         pending: List[Dict[str, object]] = []
         max_display_age = max(self._stale_after, self._refresh_interval * 3)
+
+        def _metric(raw: Optional[float]) -> Optional[Dict[str, float]]:
+            if raw is None:
+                return None
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return None
+            if value < 0.0:
+                value = 0.0
+            display = value
+            if max_display_age > 0:
+                display = min(display, max_display_age)
+            return {"raw": value, "display": display}
+
+        def _raw_value(metric: Optional[Dict[str, float]]) -> float:
+            if not metric:
+                return 0.0
+            raw_value = metric.get("raw")
+            if isinstance(raw_value, (int, float)):
+                return float(raw_value)
+            return 0.0
         for symbol in symbols:
             entry = cache_snapshot.get(symbol)
             if entry is not None and entry.is_fresh(self._stale_after):
                 continue
-            waiting_for = None
-            if symbol in added_at:
-                waiting_for = max(0.0, now - added_at[symbol])
-                if max_display_age > 0:
-                    waiting_for = min(waiting_for, max_display_age)
-            stale_age = entry.age() if entry is not None else None
-            if stale_age is not None and max_display_age > 0:
-                stale_age = min(stale_age, max_display_age)
-            request_wait = None
-            if symbol in last_attempt:
-                request_wait = max(0.0, now - last_attempt[symbol])
-                if max_display_age > 0:
-                    request_wait = min(request_wait, max_display_age)
+            waiting_for_metric = _metric(now - added_at[symbol]) if symbol in added_at else None
+            stale_age_raw = entry.age() if entry is not None else None
+            stale_age_metric = _metric(stale_age_raw)
+            request_wait_metric = (
+                _metric(now - last_attempt[symbol]) if symbol in last_attempt else None
+            )
             error_msg: Optional[str] = None
-            error_age: Optional[float] = None
+            error_age_metric: Optional[Dict[str, float]] = None
             if symbol in last_error:
                 err_ts, msg = last_error[symbol]
                 error_msg = msg
-                error_age = max(0.0, now - err_ts)
-                if max_display_age > 0:
-                    error_age = min(error_age, max_display_age)
+                error_age_metric = _metric(now - err_ts)
             pending.append(
                 {
                     "symbol": symbol,
-                    "waiting_for": waiting_for,
-                    "stale_age": stale_age,
-                    "request_wait": request_wait,
+                    "waiting_for": waiting_for_metric,
+                    "stale_age": stale_age_metric,
+                    "request_wait": request_wait_metric,
                     "last_error": error_msg,
-                    "error_age": error_age,
+                    "error_age": error_age_metric,
                 }
             )
 
         pending.sort(
             key=lambda item: (
-                item["waiting_for"] if item["waiting_for"] is not None else 0.0,
-                item["stale_age"] if item["stale_age"] is not None else 0.0,
+                _raw_value(item["waiting_for"]),
+                _raw_value(item["stale_age"]),
             ),
             reverse=True,
         )

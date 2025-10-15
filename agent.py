@@ -886,17 +886,38 @@ def run_agent_loop() -> None:
                     preview_infos = preview_infos[:5]
                     now_ts = time.time()
                     stuck_candidates: list[tuple[str, float, dict[str, object]]] = []
+
+                    def _metric_raw(metric: object) -> Optional[float]:
+                        if isinstance(metric, dict):
+                            raw_val = metric.get("raw")
+                            if isinstance(raw_val, (int, float)):
+                                return float(raw_val)
+                            return None
+                        if isinstance(metric, (int, float)):
+                            return float(metric)
+                        return None
+
+                    def _metric_display(metric: object) -> Optional[float]:
+                        if isinstance(metric, dict):
+                            display_val = metric.get("display")
+                            if isinstance(display_val, (int, float)):
+                                return float(display_val)
+                            return None
+                        if isinstance(metric, (int, float)):
+                            return float(metric)
+                        return None
+
                     if SIGNAL_CACHE_PRIME_AFTER > 0:
                         for info in preview_infos:
                             symbol_key = info["symbol"]
                             wait_metrics = [
-                                float(val)
-                                for val in (
-                                    info.get("waiting_for"),
-                                    info.get("stale_age"),
-                                    info.get("request_wait"),
+                                raw
+                                for raw in (
+                                    _metric_raw(info.get("waiting_for")),
+                                    _metric_raw(info.get("stale_age")),
+                                    _metric_raw(info.get("request_wait")),
                                 )
-                                if isinstance(val, (int, float))
+                                if raw is not None
                             ]
                             max_wait = max(wait_metrics) if wait_metrics else 0.0
                             last_prime = manual_cache_primes.get(symbol_key, 0.0)
@@ -936,20 +957,22 @@ def run_agent_loop() -> None:
                     preview_parts: list[str] = []
                     for info in preview_infos:
                         details: list[str] = []
-                        waiting_for = info.get("waiting_for")
-                        if isinstance(waiting_for, (int, float)):
-                            details.append(f"pending={waiting_for:.1f}s")
-                        stale_age = info.get("stale_age")
-                        if isinstance(stale_age, (int, float)):
-                            details.append(f"stale={stale_age:.1f}s")
-                        request_wait = info.get("request_wait")
-                        if isinstance(request_wait, (int, float)):
-                            details.append(f"wait={request_wait:.1f}s")
+                        waiting_for_display = _metric_display(info.get("waiting_for"))
+                        if waiting_for_display is not None:
+                            details.append(f"pending={waiting_for_display:.1f}s")
+                        stale_age_display = _metric_display(info.get("stale_age"))
+                        if stale_age_display is not None:
+                            details.append(f"stale={stale_age_display:.1f}s")
+                        request_wait_display = _metric_display(info.get("request_wait"))
+                        if request_wait_display is not None:
+                            details.append(f"wait={request_wait_display:.1f}s")
                         last_error = info.get("last_error")
                         if last_error:
-                            error_age = info.get("error_age")
-                            if isinstance(error_age, (int, float)):
-                                details.append(f"error {error_age:.1f}s ago: {last_error}")
+                            error_age_display = _metric_display(info.get("error_age"))
+                            if error_age_display is not None:
+                                details.append(
+                                    f"error {error_age_display:.1f}s ago: {last_error}"
+                                )
                             else:
                                 details.append(f"error: {last_error}")
                         descriptor = "; ".join(details)
