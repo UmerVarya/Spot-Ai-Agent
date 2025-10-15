@@ -1,6 +1,7 @@
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+from typing import Iterable, Tuple
 
 # Use the actual data path rather than relying on a potentially restricted
 # symlink. This avoids PermissionError in hardened environments and ensures
@@ -33,6 +34,27 @@ _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 ensure_symlink(LOG_FILE, os.path.join(_REPO_ROOT, "spot_ai.log"))
 
 
+class _SubstringFilter(logging.Filter):
+    """Filter out log records whose message contains suppressed substrings."""
+
+    def __init__(self, suppressed: Iterable[str]) -> None:
+        super().__init__()
+        self._suppressed: Tuple[str, ...] = tuple(suppressed)
+
+    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - thin wrapper
+        try:
+            message = record.getMessage()
+        except Exception:  # pragma: no cover - defensive fallback
+            return True
+        for needle in self._suppressed:
+            if needle and needle in message:
+                return False
+        return True
+
+
+_NOISE_FILTER = _SubstringFilter(["Sending ping frame"])
+
+
 def setup_logger(name: str) -> logging.Logger:
     """Configure and return a module-level logger.
 
@@ -55,6 +77,8 @@ def setup_logger(name: str) -> logging.Logger:
     file_handler.setFormatter(formatter)
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
+    file_handler.addFilter(_NOISE_FILTER)
+    console_handler.addFilter(_NOISE_FILTER)
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     return logger
