@@ -408,11 +408,29 @@ def summarize_recent_news() -> str:
 
 
 def _load_cached_events(path: str = "news_events.json") -> list:
+    """Return cached news events if the on-disk file is available.
+
+    The previous implementation re-raised any exception which in turn forced
+    :func:`summarize_recent_news_async` to fall back to ``run_news_fetcher_async``.
+    In environments without outbound network access (such as unit tests or
+    sandboxed deployments) that fallback would hang indefinitely while the
+    HTTP client waited for a connection.  Instead we now treat missing or
+    malformed cache files as an empty dataset so the caller can continue with a
+    neutral summary immediately.
+    """
+
     try:
         with open(path, "r") as f:
             return json.load(f)
+    except FileNotFoundError:
+        logger.debug("No cached news events found at %s", path)
+        return []
+    except json.JSONDecodeError:
+        logger.warning("Cached news events file %s is corrupt; ignoring", path, exc_info=True)
+        return []
     except Exception:
-        raise
+        logger.debug("Unexpected error loading cached news events", exc_info=True)
+        return []
 
 
 def prepare_trade_decision(
