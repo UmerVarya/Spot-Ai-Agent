@@ -55,6 +55,8 @@ from trade_manager import (
     create_new_trade,
     process_live_kline,
     process_live_ticker,
+    process_book_ticker,
+    process_user_stream_event,
 )  # trade logic
 from trade_storage import (
     load_active_trades,
@@ -92,6 +94,7 @@ from volatility_regime import atr_percentile
 from cache_evaluator_adapter import evaluator_for_cache
 from realtime_signal_cache import RealTimeSignalCache
 from ws_price_bridge import WSPriceBridge
+from ws_user_bridge import UserDataStreamBridge
 from auction_state import get_auction_state
 from alternative_data import get_alternative_data
 from risk_veto import minutes_until_next_event
@@ -127,6 +130,11 @@ SIGNAL_STALE_MULT = float(os.getenv("SIGNAL_STALE_AFTER", "3"))
 SIGNAL_STALE_AFTER = SIGNAL_REFRESH_INTERVAL * SIGNAL_STALE_MULT
 MAX_CONCURRENT_FETCHES = int(os.getenv("MAX_CONCURRENT_FETCHES", "10"))
 ENABLE_WS_BRIDGE = os.getenv("ENABLE_WS_BRIDGE", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+ENABLE_USER_STREAM = os.getenv("ENABLE_USER_STREAM", "1").strip().lower() not in {
     "0",
     "false",
     "no",
@@ -354,12 +362,19 @@ def run_agent_loop() -> None:
             except Exception:
                 logger.debug("WS ticker handler error for %s", symbol, exc_info=True)
 
+        def _handle_book_ticker(symbol: str, payload: Dict[str, Any]) -> None:
+            try:
+                process_book_ticker(symbol, payload)
+            except Exception:
+                logger.debug("WS book ticker handler error for %s", symbol, exc_info=True)
+
         try:
             ws_bridge = WSPriceBridge(
                 symbols=[],
                 kline_interval=os.getenv("WS_BRIDGE_INTERVAL", "1m"),
                 on_kline=_handle_ws_kline,
                 on_ticker=_handle_ws_ticker,
+                on_book_ticker=_handle_book_ticker,
             )
             ws_bridge.start()
         except Exception:
@@ -367,6 +382,23 @@ def run_agent_loop() -> None:
             ws_bridge = None
     else:
         ws_bridge = None
+    user_stream_bridge: Optional[UserDataStreamBridge]
+    if ENABLE_USER_STREAM:
+        def _handle_user_stream(payload: Dict[str, Any]) -> None:
+            try:
+                process_user_stream_event(payload)
+            except Exception:
+                logger.debug("User stream handler error", exc_info=True)
+
+        try:
+            user_stream_bridge = UserDataStreamBridge(on_event=_handle_user_stream)
+            user_stream_bridge.start()
+        except Exception:
+            logger.warning("Failed to initialise Binance user data stream", exc_info=True)
+            user_stream_bridge = None
+    else:
+        user_stream_bridge = None
+
     state = CentralState()
     worker_pools = WorkerPools()
     guard_stop = threading.Event()

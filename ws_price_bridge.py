@@ -2,9 +2,9 @@
 
 This module exposes :class:`WSPriceBridge`, a light wrapper that runs the
 Binance combined stream in a dedicated thread and event loop.  Callers
-register callbacks for klines and ticker updates; the bridge handles
-reconnections with exponential backoff and normalises symbols to upper
-case for downstream consumers.
+register callbacks for klines, mini tickers and (optionally) book ticker
+updates; the bridge handles reconnections with exponential backoff and
+normalises symbols to upper case for downstream consumers.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 KlineCallback = Callable[[str, str, Dict[str, Any]], None]
 TickerCallback = Callable[[str, Dict[str, Any]], None]
+BookTickerCallback = Callable[[str, Dict[str, Any]], None]
 
 
 class WSPriceBridge:
@@ -34,6 +35,7 @@ class WSPriceBridge:
         kline_interval: str = "1m",
         on_kline: Optional[KlineCallback] = None,
         on_ticker: Optional[TickerCallback] = None,
+        on_book_ticker: Optional[BookTickerCallback] = None,
     ) -> None:
         self._symbols: List[str] = self._normalise_symbols(symbols)
         self._kline_interval = str(kline_interval or "1m").strip()
@@ -41,6 +43,7 @@ class WSPriceBridge:
             self._kline_interval = "1m"
         self._on_kline = on_kline
         self._on_ticker = on_ticker
+        self._on_book_ticker = on_book_ticker
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stop = threading.Event()
@@ -172,6 +175,9 @@ class WSPriceBridge:
         if event in ("24hrMiniTicker", "24hrTicker"):
             self._dispatch_ticker(data)
             return
+        if event == "bookTicker":
+            self._dispatch_book_ticker(data)
+            return
         # Combined stream sometimes nests kline under obj['data']['k'] without 'e'
         if "k" in data:
             kline = data.get("k")
@@ -199,11 +205,24 @@ class WSPriceBridge:
         except Exception:  # pragma: no cover - callback safety
             logger.exception("WS bridge ticker callback failed for %s", symbol)
 
+    def _dispatch_book_ticker(self, payload: Mapping[str, Any]) -> None:
+        if self._on_book_ticker is None:
+            return
+        symbol = str(payload.get("s") or "").upper()
+        if not symbol:
+            return
+        try:
+            self._on_book_ticker(symbol, dict(payload))
+        except Exception:  # pragma: no cover - callback safety
+            logger.exception("WS bridge book ticker callback failed for %s", symbol)
+
     def _build_stream_url(self, symbols: Sequence[str]) -> str:
         streams: List[str] = []
         for sym in symbols:
             streams.append(f"{sym}@kline_{self._kline_interval}")
             streams.append(f"{sym}@miniTicker")
+            if self._on_book_ticker is not None:
+                streams.append(f"{sym}@bookTicker")
         params = "/".join(streams)
         return f"{BINANCE_WS}?streams={params}"
 
