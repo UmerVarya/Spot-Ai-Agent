@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import threading
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import requests
 import websockets
