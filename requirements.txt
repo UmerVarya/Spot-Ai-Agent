@@ -17,6 +17,7 @@ lxml
 beautifulsoup4
 psycopg2-binary
 aiohttp
+websockets>=10.0
 pytest
 gunicorn
 

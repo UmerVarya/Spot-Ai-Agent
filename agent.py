@@ -24,7 +24,7 @@ import sys
 import asyncio
 import random
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional, Set
 
 # Centralized configuration loader
 import config
@@ -50,7 +50,12 @@ from trade_utils import (
     summarise_technical_score,
     get_order_book,
 )
-from trade_manager import manage_trades, create_new_trade  # trade logic
+from trade_manager import (
+    manage_trades,
+    create_new_trade,
+    process_live_kline,
+    process_live_ticker,
+)  # trade logic
 from trade_storage import (
     load_active_trades,
     save_active_trades,
@@ -86,6 +91,7 @@ from microstructure import plan_execution
 from volatility_regime import atr_percentile
 from cache_evaluator_adapter import evaluator_for_cache
 from realtime_signal_cache import RealTimeSignalCache
+from ws_price_bridge import WSPriceBridge
 from auction_state import get_auction_state
 from alternative_data import get_alternative_data
 from risk_veto import minutes_until_next_event
@@ -120,6 +126,11 @@ SIGNAL_REFRESH_INTERVAL = float(os.getenv("SIGNAL_REFRESH_INTERVAL", "2.0"))
 SIGNAL_STALE_MULT = float(os.getenv("SIGNAL_STALE_AFTER", "3"))
 SIGNAL_STALE_AFTER = SIGNAL_REFRESH_INTERVAL * SIGNAL_STALE_MULT
 MAX_CONCURRENT_FETCHES = int(os.getenv("MAX_CONCURRENT_FETCHES", "10"))
+ENABLE_WS_BRIDGE = os.getenv("ENABLE_WS_BRIDGE", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
 SIGNAL_CACHE_PRIME_AFTER = float(os.getenv("SIGNAL_CACHE_PRIME_AFTER", "120"))
 SIGNAL_CACHE_PRIME_COOLDOWN = float(os.getenv("SIGNAL_CACHE_PRIME_COOLDOWN", "300"))
 SIGNAL_CACHE_PRIME_TIMEOUT = float(os.getenv("SIGNAL_CACHE_PRIME_TIMEOUT", "15"))
@@ -327,6 +338,35 @@ def run_agent_loop() -> None:
         max_conc,
     )
     signal_cache.start()
+    ws_bridge: Optional[WSPriceBridge]
+    if ENABLE_WS_BRIDGE:
+        def _handle_ws_kline(symbol: str, frame: str, payload: Dict[str, Any]) -> None:
+            try:
+                process_live_kline(symbol, frame, payload)
+                if payload.get("x"):
+                    signal_cache.schedule_refresh(symbol)
+            except Exception:
+                logger.debug("WS kline handler error for %s", symbol, exc_info=True)
+
+        def _handle_ws_ticker(symbol: str, payload: Dict[str, Any]) -> None:
+            try:
+                process_live_ticker(symbol, payload)
+            except Exception:
+                logger.debug("WS ticker handler error for %s", symbol, exc_info=True)
+
+        try:
+            ws_bridge = WSPriceBridge(
+                symbols=[],
+                kline_interval=os.getenv("WS_BRIDGE_INTERVAL", "1m"),
+                on_kline=_handle_ws_kline,
+                on_ticker=_handle_ws_ticker,
+            )
+            ws_bridge.start()
+        except Exception:
+            logger.warning("Failed to initialise WebSocket price bridge", exc_info=True)
+            ws_bridge = None
+    else:
+        ws_bridge = None
     state = CentralState()
     worker_pools = WorkerPools()
     guard_stop = threading.Event()
@@ -627,6 +667,13 @@ def run_agent_loop() -> None:
                 )
             else:
                 logger.info("All top symbols already have active positions; skipping fresh evaluations.")
+            if ws_bridge is not None:
+                ws_symbols: Set[str] = {sym.upper() for sym in top_symbols}
+                for trade in active_trades:
+                    sym = trade.get("symbol")
+                    if isinstance(sym, str) and sym:
+                        ws_symbols.add(str(sym).upper())
+                ws_bridge.update_symbols(ws_symbols)
             signal_cache.update_universe(symbols_to_fetch)
             signal_cache.start()
             cache_miss_symbols: list[str] = []

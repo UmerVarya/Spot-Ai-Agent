@@ -100,6 +100,7 @@ class RealTimeSignalCache:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
+        self._async_wake: Optional[asyncio.Event] = None
         self._thread: Optional[threading.Thread] = None
         self._bg_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -108,6 +109,7 @@ class RealTimeSignalCache:
         self._symbol_last_attempt: Dict[str, float] = {}
         self._symbol_last_error: Dict[str, Tuple[float, str]] = {}
         self._primed_symbols: set[str] = set()
+        self._priority_symbols: set[str] = set()
 
     @property
     def stale_after(self) -> float:
@@ -123,7 +125,7 @@ class RealTimeSignalCache:
         if new_value == self._stale_after:
             return
         self._stale_after = new_value
-        self._wake_event.set()
+        self._signal_wake()
 
     @property
     def refresh_interval(self) -> float:
@@ -135,6 +137,15 @@ class RealTimeSignalCache:
         """Normalize ``symbol`` for internal storage."""
 
         return str(symbol).upper()
+
+    def _signal_wake(self) -> None:
+        """Wake the background worker if it is sleeping."""
+
+        self._wake_event.set()
+        loop = self._loop
+        async_wake = self._async_wake
+        if loop and loop.is_running() and async_wake is not None:
+            loop.call_soon_threadsafe(async_wake.set)
 
     def start(self) -> None:
         """Launch the background refresh worker if it is not already running."""
@@ -164,7 +175,7 @@ class RealTimeSignalCache:
         """Signal the worker to stop and wait briefly for it to exit."""
 
         self._stop_event.set()
-        self._wake_event.set()
+        self._signal_wake()
         task = self._bg_task
         loop = self._loop
         if task and loop and not task.done():
@@ -194,13 +205,26 @@ class RealTimeSignalCache:
                 self._symbol_last_attempt.pop(key, None)
                 self._symbol_last_error.pop(key, None)
                 self._primed_symbols.discard(key)
+                self._priority_symbols.discard(key)
             now = time.time()
             for key in added:
                 self._symbol_added_at[key] = now
                 self._symbol_last_attempt.pop(key, None)
                 self._symbol_last_error.pop(key, None)
                 self._primed_symbols.discard(key)
-        self._wake_event.set()
+        self._signal_wake()
+
+    def schedule_refresh(self, symbol: str) -> None:
+        """Request an immediate refresh for ``symbol`` when possible."""
+
+        key = self._key(symbol)
+        with self._lock:
+            if key not in self._symbols:
+                return
+            if key in self._priority_symbols:
+                return
+            self._priority_symbols.add(key)
+        self._signal_wake()
 
     def get(self, symbol: str) -> Optional[CachedSignal]:
         """Return the cached signal for ``symbol`` if available and fresh."""
@@ -350,6 +374,8 @@ class RealTimeSignalCache:
 
         loop = asyncio.get_running_loop()
         self._loop = loop
+        async_wake = asyncio.Event()
+        self._async_wake = async_wake
         logger.info(
             "RTSC: worker started (interval=%.2fs, stale_after=%.2fs, max_concurrency=%d)",
             self._refresh_interval,
@@ -361,8 +387,28 @@ class RealTimeSignalCache:
         try:
             while not self._stop_event.is_set():
                 syms = list(self.symbols())
-                due = self._symbols_due(syms, first_run=first)
-                logger.info("RTSC: due this cycle = %d / %d", len(due), len(syms))
+                with self._lock:
+                    active_symbols = set(self._symbols)
+                    self._priority_symbols &= active_symbols
+                    priority = list(self._priority_symbols)
+                    self._priority_symbols.clear()
+                baseline_due = self._symbols_due(syms, first_run=first)
+                seen: set[str] = set()
+                due: List[str] = []
+                for sym in priority:
+                    if sym in active_symbols and sym not in seen:
+                        due.append(sym)
+                        seen.add(sym)
+                for sym in baseline_due:
+                    if sym not in seen:
+                        due.append(sym)
+                        seen.add(sym)
+                logger.info(
+                    "RTSC: due this cycle = %d / %d (priority=%d)",
+                    len(due),
+                    len(syms),
+                    len(priority),
+                )
                 first = False
 
                 async def run_one(sym: str) -> None:
@@ -386,13 +432,19 @@ class RealTimeSignalCache:
 
                 if self._wake_event.is_set():
                     self._wake_event.clear()
+                    async_wake.clear()
                     continue
 
-                await asyncio.sleep(self._refresh_interval)
+                try:
+                    await asyncio.wait_for(async_wake.wait(), timeout=self._refresh_interval)
+                except asyncio.TimeoutError:
+                    pass
+                async_wake.clear()
         except asyncio.CancelledError:
             logger.info("RTSC worker cancellation received")
             raise
         finally:
+            self._async_wake = None
             self._loop = None
             self._bg_task = None
             logger.info("RTSC worker stopped")
