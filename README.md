@@ -86,6 +86,10 @@ persists across restarts.
 python agent.py
 ```
 
+See [docs/realtime_timing_guidelines.md](docs/realtime_timing_guidelines.md) for live stream timing and debounce practices that keep
+signal generation aligned with Binance server time and resilient to noisy
+tick bursts.
+
 **Dashboard only**
 
 ```bash
