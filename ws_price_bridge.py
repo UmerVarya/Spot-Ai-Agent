@@ -66,6 +66,10 @@ class WSPriceBridge:
         self._time_sync_stop = threading.Event()
         self._time_sync_thread: Optional[threading.Thread] = None
         self._max_retries = max(1, int(max_retries))
+        self._callback_lock = threading.Lock()
+        self._extra_callbacks: List[
+            Callable[[str, str, Dict[str, Any]], None]
+        ] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -121,6 +125,40 @@ class WSPriceBridge:
         loop = self._loop
         if loop and loop.is_running():
             loop.call_soon_threadsafe(lambda: None)
+
+    def register_callback(
+        self, callback: Callable[[str, str, Dict[str, Any]], None]
+    ) -> None:
+        """Register an external callback for stream events."""
+
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        with self._callback_lock:
+            if callback in self._extra_callbacks:
+                return
+            self._extra_callbacks.append(callback)
+
+    def unregister_callback(
+        self, callback: Callable[[str, str, Dict[str, Any]], None]
+    ) -> None:
+        with self._callback_lock:
+            try:
+                self._extra_callbacks.remove(callback)
+            except ValueError:
+                return
+
+    def _emit_callbacks(
+        self, symbol: str, event_type: str, payload: Mapping[str, Any]
+    ) -> None:
+        with self._callback_lock:
+            callbacks = list(self._extra_callbacks)
+        if not callbacks:
+            return
+        for callback in callbacks:
+            try:
+                callback(symbol, event_type, dict(payload))
+            except Exception:
+                logger.debug("WS bridge external callback failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -240,12 +278,15 @@ class WSPriceBridge:
     def _dispatch_kline(self, kline: Mapping[str, Any]) -> None:
         symbol = str(kline.get("s") or "").upper()
         interval = str(kline.get("i") or "")
-        if not symbol or self._on_kline is None:
+        if not symbol:
             return
-        try:
-            self._on_kline(symbol, interval, dict(kline))
-        except Exception:  # pragma: no cover - callback safety
-            logger.exception("WS bridge kline callback failed for %s", symbol)
+        payload = dict(kline)
+        if self._on_kline is not None:
+            try:
+                self._on_kline(symbol, interval, payload)
+            except Exception:  # pragma: no cover - callback safety
+                logger.exception("WS bridge kline callback failed for %s", symbol)
+        self._emit_callbacks(symbol, "kline", payload)
 
     def _dispatch_ticker(self, payload: Mapping[str, Any]) -> None:
         if self._on_ticker is None:

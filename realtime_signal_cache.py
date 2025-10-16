@@ -72,13 +72,11 @@ class RealTimeSignalCache:
         *,
         max_concurrency: Optional[int] = None,
         use_streams: bool = False,
-        ws_bridge: Optional[object] = None,
     ) -> None:
         self._price_fetcher = price_fetcher
         self._evaluator = evaluator
         self._refresh_interval = max(0.5, float(refresh_interval))
         self.use_streams = bool(use_streams)
-        self.ws_bridge = ws_bridge
         if stale_after is None or float(stale_after) <= 0:
             effective_stale_after = self._refresh_interval * 3
         else:
@@ -126,13 +124,9 @@ class RealTimeSignalCache:
         self._cb_error_times: "deque[float]" = deque()
         self._cb_open_until = 0.0
         self._cb_lock = threading.Lock()
-        if self.use_streams and self.ws_bridge is not None:
-            register_callback = getattr(self.ws_bridge, "register_callback", None)
-            if callable(register_callback):
-                try:
-                    register_callback(self.handle_ws_update)
-                except Exception:
-                    logger.debug("Failed to register WS callback", exc_info=True)
+        self._stream_lock = threading.Lock()
+        self._ws_bridge: Optional[object] = None
+        self._ws_callback_registered = False
 
     @property
     def stale_after(self) -> float:
@@ -169,6 +163,88 @@ class RealTimeSignalCache:
         async_wake = self._async_wake
         if loop and loop.is_running() and async_wake is not None:
             loop.call_soon_threadsafe(async_wake.set)
+
+    def _get_ws_bridge(self) -> Optional[object]:
+        with self._stream_lock:
+            return self._ws_bridge
+
+    def enable_streams(self, ws_bridge: object) -> bool:
+        """Attach ``ws_bridge`` to receive streaming updates when enabled."""
+
+        if ws_bridge is None:
+            self.disable_streams()
+            return False
+
+        if not self.use_streams:
+            logger.debug("RTSC: streaming disabled; ignoring enable_streams call")
+            return False
+
+        with self._stream_lock:
+            already_registered = (
+                self._ws_bridge is ws_bridge and self._ws_callback_registered
+            )
+        if already_registered:
+            self._update_stream_symbols()
+            return True
+
+        self.disable_streams()
+        with self._stream_lock:
+            self._ws_bridge = ws_bridge
+            self._ws_callback_registered = False
+
+        register_callback = getattr(ws_bridge, "register_callback", None)
+        if not callable(register_callback):
+            logger.debug("RTSC: WS bridge missing register_callback; cannot enable streams")
+            return False
+
+        try:
+            register_callback(self.handle_ws_update)
+        except Exception:
+            logger.debug("RTSC: failed to register WS callback", exc_info=True)
+            return False
+
+        with self._stream_lock:
+            self._ws_callback_registered = True
+
+        self._update_stream_symbols()
+        return True
+
+    def disable_streams(self) -> None:
+        """Detach the current WebSocket bridge if one is registered."""
+
+        with self._stream_lock:
+            bridge = self._ws_bridge
+            registered = self._ws_callback_registered
+            self._ws_bridge = None
+            self._ws_callback_registered = False
+
+        if bridge is None:
+            return
+
+        if registered:
+            unregister_callback = getattr(bridge, "unregister_callback", None)
+            if callable(unregister_callback):
+                try:
+                    unregister_callback(self.handle_ws_update)
+                except Exception:
+                    logger.debug(
+                        "RTSC: failed to unregister WS callback", exc_info=True
+                    )
+
+    def _update_stream_symbols(self) -> None:
+        if not self.use_streams:
+            return
+        bridge = self._get_ws_bridge()
+        if bridge is None:
+            return
+        update_symbols = getattr(bridge, "update_symbols", None)
+        if not callable(update_symbols):
+            return
+        symbols_snapshot = sorted(self.symbols())
+        try:
+            update_symbols(symbols_snapshot)
+        except Exception:
+            logger.debug("RTSC: failed to update WS bridge symbols", exc_info=True)
 
     def start(self) -> None:
         """Launch the background refresh worker if it is not already running."""
@@ -236,6 +312,7 @@ class RealTimeSignalCache:
                 self._symbol_last_error.pop(key, None)
                 self._primed_symbols.discard(key)
         self._signal_wake()
+        self._update_stream_symbols()
 
     def configure_runtime(
         self,
