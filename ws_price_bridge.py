@@ -11,10 +11,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import threading
+import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Mapping
 
 import websockets
+import requests
+
+from observability import log_event, record_metric
 
 BINANCE_WS = "wss://stream.binance.com:9443/stream"
 
@@ -36,6 +41,10 @@ class WSPriceBridge:
         on_kline: Optional[KlineCallback] = None,
         on_ticker: Optional[TickerCallback] = None,
         on_book_ticker: Optional[BookTickerCallback] = None,
+        on_stale: Optional[Callable[[float], None]] = None,
+        heartbeat_timeout: float = 10.0,
+        server_time_sync_interval: float = 120.0,
+        max_retries: int = 10,
     ) -> None:
         self._symbols: List[str] = self._normalise_symbols(symbols)
         self._kline_interval = str(kline_interval or "1m").strip()
@@ -44,11 +53,19 @@ class WSPriceBridge:
         self._on_kline = on_kline
         self._on_ticker = on_ticker
         self._on_book_ticker = on_book_ticker
+        self._on_stale = on_stale
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stop = threading.Event()
         self._resubscribe = threading.Event()
         self._symbols_lock = threading.Lock()
+        self._heartbeat_timeout = max(5.0, float(heartbeat_timeout))
+        self._last_message = time.time()
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._time_sync_interval = max(30.0, float(server_time_sync_interval))
+        self._time_sync_stop = threading.Event()
+        self._time_sync_thread: Optional[threading.Thread] = None
+        self._max_retries = max(1, int(max_retries))
 
     # ------------------------------------------------------------------
     # Public API
@@ -63,6 +80,14 @@ class WSPriceBridge:
             target=self._run_loop, name="binance-ws-bridge", daemon=True
         )
         self._thread.start()
+        if self._time_sync_thread is None or not self._time_sync_thread.is_alive():
+            self._time_sync_stop.clear()
+            self._time_sync_thread = threading.Thread(
+                target=self._time_sync_loop,
+                name="binance-time-sync",
+                daemon=True,
+            )
+            self._time_sync_thread.start()
 
     def stop(self, timeout: float = 3.0) -> None:
         """Stop the WebSocket bridge and wait for the thread to exit."""
@@ -77,6 +102,10 @@ class WSPriceBridge:
             thread.join(timeout=timeout)
         self._thread = None
         self._loop = None
+        self._time_sync_stop.set()
+        if self._time_sync_thread and self._time_sync_thread.is_alive():
+            self._time_sync_thread.join(timeout=timeout)
+        self._time_sync_thread = None
 
     def update_symbols(self, symbols: Iterable[str]) -> None:
         """Update the subscribed symbols."""
@@ -116,6 +145,7 @@ class WSPriceBridge:
 
     async def _ws_main(self) -> None:
         backoff = 1.0
+        attempts = 0
         while not self._stop.is_set():
             symbols = self._current_symbols()
             if not symbols:
@@ -128,13 +158,35 @@ class WSPriceBridge:
                     url, ping_interval=15, ping_timeout=15
                 ) as ws:
                     backoff = 1.0
+                    attempts = 0
+                    self._last_message = time.time()
+                    self._heartbeat_task = asyncio.create_task(self._heartbeat_watch())
                     await self._listen(ws)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - network dependent
                 logger.warning("WS bridge error: %s", exc)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, 30.0)
+                attempts += 1
+                jitter = random.uniform(0.5, 1.5)
+                await asyncio.sleep(backoff * jitter)
+                backoff = min(backoff * 2.0, 60.0)
+                record_metric("ws_reconnects", 1.0, labels={"reason": "error"})
+                if attempts >= self._max_retries:
+                    log_event(
+                        logger,
+                        "ws_reconnect_cap",
+                        attempts=attempts,
+                        backoff=backoff,
+                    )
+                    attempts = 0
+            finally:
+                if self._heartbeat_task is not None:
+                    self._heartbeat_task.cancel()
+                    try:
+                        await self._heartbeat_task
+                    except Exception:
+                        pass
+                    self._heartbeat_task = None
 
     async def _listen(self, ws: websockets.WebSocketClientProtocol) -> None:
         while not self._stop.is_set():
@@ -156,6 +208,7 @@ class WSPriceBridge:
             self._handle_msg(msg)
 
     def _handle_msg(self, raw: str) -> None:
+        self._last_message = time.time()
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError:  # pragma: no cover - defensive
@@ -215,6 +268,64 @@ class WSPriceBridge:
             self._on_book_ticker(symbol, dict(payload))
         except Exception:  # pragma: no cover - callback safety
             logger.exception("WS bridge book ticker callback failed for %s", symbol)
+
+    async def _heartbeat_watch(self) -> None:
+        try:
+            while not self._stop.is_set():
+                await asyncio.sleep(self._heartbeat_timeout / 2.0)
+                if self._stop.is_set():
+                    return
+                gap = time.time() - self._last_message
+                if gap >= self._heartbeat_timeout:
+                    log_event(
+                        logger,
+                        "ws_heartbeat_stale",
+                        gap_seconds=gap,
+                        timeout=self._heartbeat_timeout,
+                    )
+                    record_metric("ws_gap_seconds", gap, labels={"stream": "price"})
+                    self._notify_stale(gap)
+                    self._resubscribe.set()
+                    return
+        except asyncio.CancelledError:
+            raise
+
+    def _notify_stale(self, gap: float) -> None:
+        callback = self._on_stale
+        if callback is None:
+            return
+        try:
+            callback(gap)
+        except Exception:
+            logger.debug("WS stale callback failed", exc_info=True)
+
+    def _time_sync_loop(self) -> None:
+        while not self._time_sync_stop.is_set():
+            if self._stop.is_set():
+                break
+            try:
+                response = requests.get(
+                    "https://api.binance.com/api/v3/time", timeout=10
+                )
+                response.raise_for_status()
+                data = response.json()
+                server_time = data.get("serverTime")
+                if server_time is not None:
+                    now_ms = time.time() * 1000.0
+                    skew_ms = float(server_time) - float(now_ms)
+                    log_event(
+                        logger,
+                        "server_time_sync",
+                        skew_ms=skew_ms,
+                    )
+                    record_metric(
+                        "server_time_skew_ms",
+                        skew_ms,
+                        labels={"source": "binance"},
+                    )
+            except Exception:
+                logger.debug("Server time sync failed", exc_info=True)
+            self._time_sync_stop.wait(self._time_sync_interval)
 
     def _build_stream_url(self, symbols: Sequence[str]) -> str:
         streams: List[str] = []

@@ -23,10 +23,13 @@ logger.warning("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
 import asyncio
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
+
+from observability import log_event, record_metric
 
 PriceFetcher = Callable[[str], Awaitable[pd.DataFrame | None]]
 SignalEvaluator = Callable[..., Tuple[float, Optional[str], float, Optional[str]]]
@@ -110,6 +113,15 @@ class RealTimeSignalCache:
         self._symbol_last_error: Dict[str, Tuple[float, str]] = {}
         self._primed_symbols: set[str] = set()
         self._priority_symbols: set[str] = set()
+        self._default_debounce = 0.8
+        self._symbol_debounce: Dict[str, float] = {}
+        self._symbol_refresh_overrides: Dict[str, float] = {}
+        self._last_priority_request: Dict[str, float] = {}
+        self._cb_threshold = 5
+        self._cb_window = 30.0
+        self._cb_error_times: "deque[float]" = deque()
+        self._cb_open_until = 0.0
+        self._cb_lock = threading.Lock()
 
     @property
     def stale_after(self) -> float:
@@ -214,6 +226,35 @@ class RealTimeSignalCache:
                 self._primed_symbols.discard(key)
         self._signal_wake()
 
+    def configure_runtime(
+        self,
+        *,
+        default_debounce_ms: int,
+        debounce_overrides: Mapping[str, int],
+        refresh_overrides: Mapping[str, float],
+        circuit_breaker_threshold: int,
+        circuit_breaker_window: float,
+    ) -> None:
+        """Update runtime knobs sourced from configuration."""
+
+        default_seconds = max(0.0, float(default_debounce_ms) / 1000.0)
+        with self._lock:
+            self._default_debounce = default_seconds
+            self._symbol_debounce = {
+                self._key(symbol): max(0.0, float(value) / 1000.0)
+                for symbol, value in debounce_overrides.items()
+                if value is not None
+            }
+            self._symbol_refresh_overrides = {
+                self._key(symbol): max(0.5, float(value))
+                for symbol, value in refresh_overrides.items()
+                if value is not None
+            }
+        with self._cb_lock:
+            self._cb_threshold = max(1, int(circuit_breaker_threshold))
+            self._cb_window = max(5.0, float(circuit_breaker_window))
+        self._signal_wake()
+
     def schedule_refresh(self, symbol: str) -> None:
         """Request an immediate refresh for ``symbol`` when possible."""
 
@@ -221,9 +262,21 @@ class RealTimeSignalCache:
         with self._lock:
             if key not in self._symbols:
                 return
+            now = time.time()
+            debounce = self._symbol_debounce.get(key, self._default_debounce)
+            last_request = self._last_priority_request.get(key)
+            if last_request is not None and now - last_request < debounce:
+                return
+            self._last_priority_request[key] = now
             if key in self._priority_symbols:
                 return
             self._priority_symbols.add(key)
+        log_event(
+            logger,
+            "cache_refresh_requested",
+            symbol=key,
+            debounce_seconds=debounce,
+        )
         self._signal_wake()
 
     def get(self, symbol: str) -> Optional[CachedSignal]:
@@ -458,6 +511,7 @@ class RealTimeSignalCache:
         with self._lock:
             cache_snapshot = dict(self._cache)
             primed_snapshot = set(self._primed_symbols)
+            refresh_overrides = dict(self._symbol_refresh_overrides)
 
         due: List[str] = []
         for symbol in symbols:
@@ -469,7 +523,8 @@ class RealTimeSignalCache:
             if first_run and key not in primed_snapshot:
                 due.append(key)
                 continue
-            if now - entry.updated_at >= self._refresh_interval:
+            interval = refresh_overrides.get(key, self._refresh_interval)
+            if now - entry.updated_at >= interval:
                 due.append(key)
         return due
 
@@ -487,6 +542,17 @@ class RealTimeSignalCache:
             f"{prev_age:.1f}s" if prev_age is not None else "None",
             self._stale_after,
         )
+        if self._is_circuit_open(attempt_ts):
+            log_event(
+                logger,
+                "cache_circuit_open",
+                symbol=key,
+                open_until=self._cb_open_until,
+                threshold=self._cb_threshold,
+                window=self._cb_window,
+            )
+            return False
+
         try:
             price_data = await self._price_fetcher(key)
         except Exception as exc:
@@ -513,6 +579,7 @@ class RealTimeSignalCache:
         except Exception as exc:
             self._record_refresh_error(key, "evaluation error", attempt_ts=attempt_ts)
             logger.exception("Signal evaluation failed for %s", key)
+            self._register_error(attempt_ts)
             return False
 
         cached = CachedSignal(
@@ -535,6 +602,23 @@ class RealTimeSignalCache:
             key,
             f"{prev_age:.1f}s" if prev_age is not None else "None",
         )
+        with self._lock:
+            request_time = self._last_priority_request.get(key)
+        wake_latency = (attempt_ts - request_time) if request_time else 0.0
+        record_metric("signals_fresh", 1.0, labels={"symbol": key})
+        record_metric("eval_ms", latency * 1000.0, labels={"symbol": key})
+        record_metric("wake_latency_ms", wake_latency * 1000.0, labels={"symbol": key})
+        log_event(
+            logger,
+            "cache_refresh_completed",
+            symbol=key,
+            compute_latency_ms=latency * 1000.0,
+            wake_latency_ms=wake_latency * 1000.0,
+            rows=len(price_data) if hasattr(price_data, "__len__") else None,
+        )
+        with self._cb_lock:
+            self._cb_error_times.clear()
+            self._cb_open_until = 0.0
         return True
 
     def _select_symbols_for_refresh(self, symbols: Sequence[str]) -> List[str]:
@@ -568,4 +652,36 @@ class RealTimeSignalCache:
             key = self._key(symbol)
             self._symbol_last_attempt[key] = ts
             self._symbol_last_error[key] = (ts, normalized_message)
+        log_event(
+            logger,
+            "cache_refresh_error",
+            symbol=self._key(symbol),
+            message=normalized_message,
+        )
+        self._register_error(ts)
+
+    def _register_error(self, timestamp: float) -> None:
+        with self._cb_lock:
+            window_start = timestamp - self._cb_window
+            self._cb_error_times.append(timestamp)
+            while self._cb_error_times and self._cb_error_times[0] < window_start:
+                self._cb_error_times.popleft()
+            if len(self._cb_error_times) >= self._cb_threshold:
+                self._cb_open_until = max(self._cb_open_until, timestamp + self._cb_window)
+                log_event(
+                    logger,
+                    "cache_circuit_tripped",
+                    threshold=self._cb_threshold,
+                    window=self._cb_window,
+                    open_until=self._cb_open_until,
+                )
+
+    def _is_circuit_open(self, now: float) -> bool:
+        with self._cb_lock:
+            return now < self._cb_open_until
+
+    def circuit_breaker_active(self) -> bool:
+        """Return whether the evaluator circuit breaker is currently open."""
+
+        return self._is_circuit_open(time.time())
 

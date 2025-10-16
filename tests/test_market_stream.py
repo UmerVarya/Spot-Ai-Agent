@@ -1,4 +1,4 @@
-from market_stream import BinanceMarketStream, OrderBookState
+from market_stream import BinanceEventStream, BinanceMarketStream, OrderBookState
 
 
 def test_process_depth_message_handles_partial_snapshot() -> None:
@@ -40,3 +40,10 @@ def test_process_depth_message_handles_diff_update() -> None:
     assert snapshot["last_update_id"] == 11.0
     assert snapshot["bids"] == [(100.0, 0.5)]
     assert snapshot["asks"] == []
+
+
+def test_event_queue_is_bounded() -> None:
+    stream = BinanceEventStream(max_queue=2)
+    for idx in range(5):
+        stream._publish_event({"type": "test", "symbol": "BTCUSDT", "timestamp": idx})
+    assert stream.event_queue.qsize() <= 2
