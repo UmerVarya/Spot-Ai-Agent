@@ -673,7 +673,7 @@ def run_agent_loop() -> None:
                     sym = trade.get("symbol")
                     if isinstance(sym, str) and sym:
                         ws_symbols.add(str(sym).upper())
-                ws_bridge.update_symbols(ws_symbols)
+                ws_bridge.update_symbols(sorted(ws_symbols))
             signal_cache.update_universe(symbols_to_fetch)
             signal_cache.start()
             cache_miss_symbols: list[str] = []
