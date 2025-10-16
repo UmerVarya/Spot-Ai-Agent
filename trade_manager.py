@@ -48,6 +48,7 @@ from rl_policy import RLPositionSizer
 from microstructure import plan_execution, detect_sell_pressure
 from orderflow import detect_aggression
 from local_llm import generate_post_trade_summary
+from observability import log_event
 
 # === Constants ===
 
@@ -75,6 +76,22 @@ _LIVE_MARKET: Dict[str, Dict[str, float]] = {}
 _LAST_MANAGE_TRIGGER: Dict[str, float] = {}
 _MANAGE_TRIGGER_COOLDOWN = 2.0
 _ACTIVE_TRADES_LOCK = threading.RLock()
+_KLINE_ID_LOCK = threading.Lock()
+_KLINE_CLOSE_IDS: Dict[str, int] = {}
+
+
+def _register_kline_close_id(symbol: str, close_time: Optional[int]) -> bool:
+    if close_time is None:
+        return True
+    norm = str(symbol or "").upper()
+    if not norm:
+        return True
+    with _KLINE_ID_LOCK:
+        last = _KLINE_CLOSE_IDS.get(norm)
+        if last == close_time:
+            return False
+        _KLINE_CLOSE_IDS[norm] = close_time
+        return True
 
 
 def _coerce_to_utc_datetime(value: Union[str, float, int, datetime, None]) -> Optional[datetime]:
@@ -276,8 +293,34 @@ def process_live_kline(symbol: str, interval: str, payload: Mapping[str, Any]) -
     high = _to_float(payload.get("h"))
     low = _to_float(payload.get("l"))
     event_time = _to_float(payload.get("T") or payload.get("t"))
+    close_time_raw = payload.get("T") or payload.get("t")
+    try:
+        close_time = int(close_time_raw) if close_time_raw is not None else None
+    except (TypeError, ValueError):
+        close_time = None
+    is_closed = bool(payload.get("x"))
+    is_unique_close = True
+    if is_closed:
+        is_unique_close = _register_kline_close_id(symbol, close_time)
     _update_live_market(symbol, price=price, high=high, low=low, event_time=event_time)
+    if is_closed and not is_unique_close:
+        log_event(
+            logger,
+            "duplicate_bar_close",
+            symbol=str(symbol).upper(),
+            close_time=close_time,
+        )
+        return
     _check_live_triggers(symbol, price, high, low)
+    if is_closed:
+        log_event(
+            logger,
+            "bar_close_processed",
+            symbol=str(symbol).upper(),
+            interval=interval,
+            close_time=close_time,
+            price=price,
+        )
 
 
 def process_live_ticker(symbol: str, payload: Mapping[str, Any]) -> None:

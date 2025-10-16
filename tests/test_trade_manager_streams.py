@@ -52,3 +52,24 @@ def test_process_user_stream_event_updates_price(monkeypatch):
     assert snapshot is not None
     assert snapshot["price"] == 2010.5
     assert calls == ["managed"]
+
+
+def test_process_live_kline_deduplicates_close(monkeypatch):
+    tm._KLINE_CLOSE_IDS.clear()
+    calls: list[tuple] = []
+
+    def _noop_update(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(tm, "_update_live_market", _noop_update)
+
+    def _recorder(symbol, price, high, low):
+        calls.append((symbol, price, high, low))
+
+    monkeypatch.setattr(tm, "_check_live_triggers", _recorder)
+
+    payload = {"c": "100", "h": "101", "l": "99", "T": 1234, "x": True}
+    tm.process_live_kline("BTCUSDT", "1m", payload)
+    tm.process_live_kline("BTCUSDT", "1m", payload)
+
+    assert len(calls) == 1
