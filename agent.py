@@ -28,6 +28,8 @@ from typing import Any, Dict, Optional, Set
 
 # Centralized configuration loader
 import config
+
+runtime_settings = config.load_runtime_settings()
 import json
 import threading
 from fetch_news import (
@@ -101,6 +103,7 @@ from risk_veto import minutes_until_next_event
 from state_manager import CentralState
 from worker_pools import ScheduledTask, WorkerPools
 from market_stream import BinanceEventStream
+from observability import log_event, record_metric
 
 
 BREAKOUT_PATTERNS = {
@@ -125,20 +128,13 @@ MAX_ACTIVE_TRADES = 1
 # Interval between scans (in seconds).  Default lowered to tighten reaction time.
 SCAN_INTERVAL = float(os.getenv("SCAN_INTERVAL", "3"))
 # Background refresh cadence for the real-time signal cache.
-SIGNAL_REFRESH_INTERVAL = float(os.getenv("SIGNAL_REFRESH_INTERVAL", "2.0"))
+SIGNAL_REFRESH_INTERVAL = runtime_settings.refresh_interval
 SIGNAL_STALE_MULT = float(os.getenv("SIGNAL_STALE_AFTER", "3"))
 SIGNAL_STALE_AFTER = SIGNAL_REFRESH_INTERVAL * SIGNAL_STALE_MULT
 MAX_CONCURRENT_FETCHES = int(os.getenv("MAX_CONCURRENT_FETCHES", "10"))
-ENABLE_WS_BRIDGE = os.getenv("ENABLE_WS_BRIDGE", "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-}
-ENABLE_USER_STREAM = os.getenv("ENABLE_USER_STREAM", "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-}
+ENABLE_WS_BRIDGE = runtime_settings.use_ws_prices
+ENABLE_USER_STREAM = runtime_settings.use_user_stream
+REST_BACKFILL_ENABLED = runtime_settings.rest_backfill_enabled
 SIGNAL_CACHE_PRIME_AFTER = float(os.getenv("SIGNAL_CACHE_PRIME_AFTER", "120"))
 SIGNAL_CACHE_PRIME_COOLDOWN = float(os.getenv("SIGNAL_CACHE_PRIME_COOLDOWN", "300"))
 SIGNAL_CACHE_PRIME_TIMEOUT = float(os.getenv("SIGNAL_CACHE_PRIME_TIMEOUT", "15"))
@@ -339,6 +335,23 @@ def run_agent_loop() -> None:
         stale_after=refresh_interval * stale_mult,
         max_concurrency=max_conc,
     )
+    debounce_overrides = {
+        symbol: override.debounce_ms
+        for symbol, override in runtime_settings.symbol_overrides.items()
+        if override.debounce_ms is not None
+    }
+    refresh_overrides = {
+        symbol: override.refresh_interval
+        for symbol, override in runtime_settings.symbol_overrides.items()
+        if override.refresh_interval is not None
+    }
+    signal_cache.configure_runtime(
+        default_debounce_ms=runtime_settings.debounce_ms,
+        debounce_overrides=debounce_overrides,
+        refresh_overrides=refresh_overrides,
+        circuit_breaker_threshold=runtime_settings.circuit_breaker_threshold,
+        circuit_breaker_window=runtime_settings.circuit_breaker_window,
+    )
     logger.info(
         "Signal cache params: interval=%.2fs, stale_after=%.2fs, max_concurrency=%d",
         refresh_interval,
@@ -346,35 +359,79 @@ def run_agent_loop() -> None:
         max_conc,
     )
     signal_cache.start()
+    ws_state_lock = threading.Lock()
+    ws_state = {"last": time.time(), "stale": False}
+    closed_bar_lock = threading.Lock()
+    last_closed_bars: Dict[str, int] = {}
+
+    def _mark_ws_activity() -> None:
+        with ws_state_lock:
+            ws_state["last"] = time.time()
+            ws_state["stale"] = False
+
+    def _note_ws_stale(gap: float) -> None:
+        with ws_state_lock:
+            ws_state["stale"] = True
+
+    def _should_emit_close(symbol: str, payload: Dict[str, Any]) -> bool:
+        close_time_raw = payload.get("T") or payload.get("t")
+        try:
+            close_time = int(close_time_raw)
+        except (TypeError, ValueError):
+            close_time = None
+        if close_time is None:
+            return True
+        with closed_bar_lock:
+            last = last_closed_bars.get(symbol)
+            if last == close_time:
+                return False
+            last_closed_bars[symbol] = close_time
+        return True
+
     ws_bridge: Optional[WSPriceBridge]
     if ENABLE_WS_BRIDGE:
         def _handle_ws_kline(symbol: str, frame: str, payload: Dict[str, Any]) -> None:
             try:
+                _mark_ws_activity()
                 process_live_kline(symbol, frame, payload)
-                if payload.get("x"):
+                if payload.get("x") and _should_emit_close(symbol, payload):
+                    log_event(
+                        logger,
+                        "bar_close",
+                        symbol=symbol,
+                        interval=frame,
+                        close_time=payload.get("T") or payload.get("t"),
+                        close_price=payload.get("c"),
+                    )
                     signal_cache.schedule_refresh(symbol)
             except Exception:
                 logger.debug("WS kline handler error for %s", symbol, exc_info=True)
 
         def _handle_ws_ticker(symbol: str, payload: Dict[str, Any]) -> None:
             try:
+                _mark_ws_activity()
                 process_live_ticker(symbol, payload)
             except Exception:
                 logger.debug("WS ticker handler error for %s", symbol, exc_info=True)
 
         def _handle_book_ticker(symbol: str, payload: Dict[str, Any]) -> None:
             try:
+                _mark_ws_activity()
                 process_book_ticker(symbol, payload)
             except Exception:
                 logger.debug("WS book ticker handler error for %s", symbol, exc_info=True)
 
         try:
+            book_callback = _handle_book_ticker if runtime_settings.use_ws_book_ticker else None
             ws_bridge = WSPriceBridge(
                 symbols=[],
                 kline_interval=os.getenv("WS_BRIDGE_INTERVAL", "1m"),
                 on_kline=_handle_ws_kline,
                 on_ticker=_handle_ws_ticker,
-                on_book_ticker=_handle_book_ticker,
+                on_book_ticker=book_callback,
+                on_stale=_note_ws_stale,
+                heartbeat_timeout=runtime_settings.max_ws_gap_before_rest,
+                server_time_sync_interval=runtime_settings.server_time_sync_interval,
             )
             ws_bridge.start()
         except Exception:
@@ -411,6 +468,7 @@ def run_agent_loop() -> None:
     news_task = ScheduledTask("news", min_interval=300.0, max_interval=900.0)
     macro_task.next_run = 0.0
     news_task.next_run = 0.0
+    last_rest_backfill = 0.0
 
     def refresh_macro_state() -> None:
         try:
@@ -475,10 +533,13 @@ def run_agent_loop() -> None:
         except Exception:
             logger.exception("Failed to process market event: %s", event)
 
-    market_stream = BinanceEventStream(symbols=["BTCUSDT"], on_event=on_market_event)
+    market_stream = BinanceEventStream(
+        symbols=["BTCUSDT"], on_event=on_market_event, max_queue=runtime_settings.max_queue
+    )
     market_stream.start()
 
     def guard_loop() -> None:
+        nonlocal last_rest_backfill
         while not guard_stop.is_set():
             now = time.time()
             if macro_task.due(now):
@@ -503,6 +564,28 @@ def run_agent_loop() -> None:
                 if not tracked:
                     tracked = ["BTCUSDT"]
                 market_stream.poll_rest(tracked)
+            if ENABLE_WS_BRIDGE and REST_BACKFILL_ENABLED:
+                with ws_state_lock:
+                    gap = now - ws_state["last"]
+                    stale_flag = ws_state["stale"]
+                    ws_state["stale"] = False
+                if gap >= runtime_settings.max_ws_gap_before_rest or stale_flag:
+                    if now - last_rest_backfill >= runtime_settings.max_ws_gap_before_rest:
+                        tracked_symbols = tuple(signal_cache.symbols())
+                        log_event(
+                            logger,
+                            "ws_gap_fallback",
+                            gap_seconds=gap,
+                            stale_flag=stale_flag,
+                            symbols=len(tracked_symbols),
+                        )
+                        record_metric(
+                            "ws_gap_seconds",
+                            gap,
+                        )
+                        for sym in tracked_symbols:
+                            signal_cache.schedule_refresh(sym)
+                        last_rest_backfill = now
             guard_stop.wait(guard_interval)
 
     threading.Thread(target=guard_loop, daemon=True).start()
@@ -658,7 +741,7 @@ def run_agent_loop() -> None:
             save_active_trades(active_trades)
             # Get top symbols to scan
             try:
-                top_symbols = get_top_symbols(limit=30)
+                top_symbols = get_top_symbols(limit=runtime_settings.max_symbols)
             except Exception as e:
                 logger.error("Error fetching top symbols: %s", e, exc_info=True)
                 top_symbols = []
@@ -708,6 +791,11 @@ def run_agent_loop() -> None:
                 ws_bridge.update_symbols(sorted(ws_symbols))
             signal_cache.update_universe(symbols_to_fetch)
             signal_cache.start()
+            if signal_cache.circuit_breaker_active():
+                logger.warning(
+                    "Signal evaluator circuit breaker active; skipping trade evaluation this cycle."
+                )
+                continue
             cache_miss_symbols: list[str] = []
             for symbol in symbols_to_fetch:
                 try:
