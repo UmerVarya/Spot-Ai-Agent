@@ -592,8 +592,10 @@ def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
             ]].astype(float)
             df["number_of_trades"] = pd.to_numeric(df["number_of_trades"], errors="coerce")
             # Convert timestamp to datetime and set as index
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
-            df = df.set_index("timestamp")
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce", utc=True)
+            df = df.sort_values("timestamp").set_index("timestamp")
+            if getattr(df.index, "tz", None) is not None:
+                df.index = df.index.tz_convert("UTC").tz_localize(None)
             df["quote_volume"] = df["quote_asset_volume"]
             df["taker_sell_base"] = (df["volume"] - df["taker_buy_base"]).clip(lower=0.0)
             df["taker_sell_quote"] = (df["quote_volume"] - df["taker_buy_quote"]).clip(lower=0.0)
@@ -608,8 +610,13 @@ def get_price_data(symbol: str) -> Optional[pd.DataFrame]:
                 h_df[["open", "high", "low", "close", "volume", "quote_asset_volume"]] = h_df[
                     ["open", "high", "low", "close", "volume", "quote_asset_volume"]
                 ].astype(float)
-                h_df["timestamp"] = pd.to_datetime(h_df["timestamp"], unit="ms", errors="coerce").dt.floor("H")
-                h_df = h_df.set_index("timestamp")
+                h_df["timestamp"] = (
+                    pd.to_datetime(h_df["timestamp"], unit="ms", errors="coerce", utc=True)
+                    .dt.floor("H")
+                )
+                h_df = h_df.sort_values("timestamp").set_index("timestamp")
+                if getattr(h_df.index, "tz", None) is not None:
+                    h_df.index = h_df.index.tz_convert("UTC").tz_localize(None)
                 h_df["quote_volume"] = h_df["quote_asset_volume"]
                 df.attrs["hourly_bar"] = h_df[["open", "high", "low", "close", "volume", "quote_volume"]]
 
