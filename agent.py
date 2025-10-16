@@ -44,7 +44,6 @@ from trade_utils import simulate_slippage, estimate_commission  # noqa: F401
 from trade_utils import (
     get_top_symbols,
     get_price_data_async,
-    evaluate_signal,
     get_market_session,
     calculate_indicators,
     compute_performance_metrics,
@@ -85,6 +84,7 @@ from rl_policy import RLPositionSizer
 from trade_utils import get_rl_state
 from microstructure import plan_execution
 from volatility_regime import atr_percentile
+from cache_evaluator_adapter import evaluator_for_cache
 from realtime_signal_cache import RealTimeSignalCache
 from auction_state import get_auction_state
 from alternative_data import get_alternative_data
@@ -315,7 +315,7 @@ def run_agent_loop() -> None:
 
     signal_cache = RealTimeSignalCache(
         price_fetcher=get_price_data_async,
-        evaluator=evaluate_signal,
+        evaluator=evaluator_for_cache,
         refresh_interval=refresh_interval,
         stale_after=refresh_interval * stale_mult,
         max_concurrency=max_conc,
