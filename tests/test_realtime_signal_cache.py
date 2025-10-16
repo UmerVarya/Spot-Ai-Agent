@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Awaitable, Callable, Optional, Tuple
+from typing import Awaitable, Callable, Dict, Iterable, Optional, Tuple
 
 import pandas as pd
 import pytest
@@ -16,18 +16,42 @@ def _dummy_evaluator(*args, **kwargs) -> Tuple[float, Optional[str], float, Opti
     return 0.0, "long", 1.0, None
 
 
+class _DummyBridge:
+    def __init__(self) -> None:
+        self.callbacks: list[Callable[[str, str, Dict[str, object]], None]] = []
+        self.symbols: list[str] = []
+
+    def register_callback(
+        self, callback: Callable[[str, str, Dict[str, object]], None]
+    ) -> None:
+        self.callbacks.append(callback)
+
+    def unregister_callback(
+        self, callback: Callable[[str, str, Dict[str, object]], None]
+    ) -> None:
+        try:
+            self.callbacks.remove(callback)
+        except ValueError:
+            pass
+
+    def update_symbols(self, symbols: Iterable[str]) -> None:
+        self.symbols = list(symbols)
+
+
 def _build_cache(
     fetcher: Callable[[str], Awaitable[Optional[pd.DataFrame]]] = _dummy_fetcher,
     evaluator: Callable[..., Tuple[float, Optional[str], float, Optional[str]]] = _dummy_evaluator,
     *,
     refresh_interval: float = 1.0,
     stale_after: Optional[float] = 3.0,
+    use_streams: bool = False,
 ) -> RealTimeSignalCache:
     cache = RealTimeSignalCache(
         fetcher,
         evaluator,
         refresh_interval=refresh_interval,
         stale_after=stale_after,
+        use_streams=use_streams,
     )
     cache.configure_runtime(
         default_debounce_ms=800,
@@ -196,3 +220,21 @@ def test_circuit_breaker_trips_after_errors() -> None:
     cache._record_refresh_error("BTCUSDT", "boom", attempt_ts=now)
     cache._record_refresh_error("BTCUSDT", "boom", attempt_ts=now + 1)
     assert cache.circuit_breaker_active()
+
+
+def test_stream_enable_requires_flag() -> None:
+    cache = _build_cache(use_streams=False)
+    bridge = _DummyBridge()
+    assert cache.enable_streams(bridge) is False
+    assert bridge.callbacks == []
+
+
+def test_stream_enable_registers_and_updates_symbols() -> None:
+    cache = _build_cache(use_streams=True)
+    cache.update_universe(["ETHUSDT", "BTCUSDT"])
+    bridge = _DummyBridge()
+    assert cache.enable_streams(bridge) is True
+    assert bridge.callbacks == [cache.handle_ws_update]
+    assert bridge.symbols == ["BTCUSDT", "ETHUSDT"]
+    cache.disable_streams()
+    assert bridge.callbacks == []

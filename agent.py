@@ -334,6 +334,7 @@ def run_agent_loop() -> None:
         refresh_interval=refresh_interval,
         stale_after=refresh_interval * stale_mult,
         max_concurrency=max_conc,
+        use_streams=ENABLE_WS_BRIDGE,
     )
     debounce_overrides = {
         symbol: override.debounce_ms
@@ -434,9 +435,11 @@ def run_agent_loop() -> None:
                 server_time_sync_interval=runtime_settings.server_time_sync_interval,
             )
             ws_bridge.start()
+            signal_cache.enable_streams(ws_bridge)
         except Exception:
             logger.warning("Failed to initialise WebSocket price bridge", exc_info=True)
             ws_bridge = None
+            signal_cache.disable_streams()
     else:
         ws_bridge = None
     user_stream_bridge: Optional[UserDataStreamBridge]
