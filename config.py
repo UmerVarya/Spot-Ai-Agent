@@ -1,6 +1,9 @@
 """Central configuration loader for environment variables."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import Dict, Mapping
+
 from dotenv import load_dotenv
 
 # Load environment variables once when this module is imported.
@@ -94,3 +97,131 @@ def get_overflow_model() -> str:
     """Return the overflow model used when primaries are rate limited or down."""
 
     return _resolve_model("GROQ_OVERFLOW_MODEL", DEFAULT_OVERFLOW_MODEL)
+
+
+# ---------------------------------------------------------------------------
+# Runtime configuration for the real-time agent
+# ---------------------------------------------------------------------------
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+@dataclass(frozen=True)
+class SymbolOverride:
+    """Per-symbol runtime overrides loaded from configuration."""
+
+    debounce_ms: int | None = None
+    refresh_interval: float | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeSettings:
+    """Runtime configuration knobs for the live trading agent."""
+
+    use_ws_prices: bool = True
+    use_ws_book_ticker: bool = True
+    use_user_stream: bool = True
+    rest_backfill_enabled: bool = True
+    debounce_ms: int = 1000
+    refresh_interval: float = 2.0
+    max_symbols: int = 30
+    max_queue: int = 100
+    max_ws_gap_before_rest: float = 5.0
+    server_time_sync_interval: float = 120.0
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_window: float = 30.0
+    symbol_overrides: Dict[str, SymbolOverride] = field(default_factory=dict)
+
+
+def _parse_symbol_overrides() -> Dict[str, SymbolOverride]:
+    raw = os.getenv("SYMBOL_RUNTIME_OVERRIDES")
+    overrides: Dict[str, SymbolOverride] = {}
+    if raw:
+        import json
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = {}
+        if isinstance(data, Mapping):
+            for key, value in data.items():
+                if not isinstance(value, Mapping):
+                    continue
+                debounce = value.get("debounce_ms")
+                refresh = value.get("refresh_interval")
+                try:
+                    debounce_val = int(debounce) if debounce is not None else None
+                except (TypeError, ValueError):
+                    debounce_val = None
+                try:
+                    refresh_val = float(refresh) if refresh is not None else None
+                except (TypeError, ValueError):
+                    refresh_val = None
+                overrides[str(key).upper()] = SymbolOverride(
+                    debounce_ms=debounce_val, refresh_interval=refresh_val
+                )
+    if "ETHUSDT" not in overrides:
+        overrides["ETHUSDT"] = SymbolOverride(debounce_ms=1000)
+    return overrides
+
+
+def load_runtime_settings() -> RuntimeSettings:
+    """Load runtime settings for the live agent from environment variables."""
+
+    return RuntimeSettings(
+        use_ws_prices=_env_bool("USE_WS_PRICES", True),
+        use_ws_book_ticker=_env_bool("USE_WS_BOOK_TICKER", True),
+        use_user_stream=_env_bool("USE_USER_STREAM", True),
+        rest_backfill_enabled=_env_bool("REST_BACKFILL_ENABLED", True),
+        debounce_ms=max(100, _env_int("DEBOUNCE_MS", 1000)),
+        refresh_interval=max(0.5, _env_float("REFRESH_INTERVAL", 2.0)),
+        max_symbols=max(1, _env_int("MAX_SYMBOLS", 30)),
+        max_queue=max(10, _env_int("MAX_EVENT_QUEUE", 100)),
+        max_ws_gap_before_rest=max(1.0, _env_float("MAX_WS_GAP_BEFORE_REST", 5.0)),
+        server_time_sync_interval=max(30.0, _env_float("SERVER_TIME_SYNC_INTERVAL", 120.0)),
+        circuit_breaker_threshold=max(1, _env_int("EVALUATOR_CIRCUIT_BREAKER_THRESHOLD", 5)),
+        circuit_breaker_window=max(5.0, _env_float("EVALUATOR_CIRCUIT_BREAKER_WINDOW", 30.0)),
+        symbol_overrides=_parse_symbol_overrides(),
+    )
+
+
+__all__ = [
+    "get",
+    "get_groq_model",
+    "get_macro_model",
+    "get_news_model",
+    "get_overflow_model",
+    "load_runtime_settings",
+    "RuntimeSettings",
+    "SymbolOverride",
+]

@@ -20,6 +20,8 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
+from observability import log_event, record_metric
+
 try:  # pragma: no cover - optional import during docs build
     from binance import ThreadedWebsocketManager  # type: ignore
     from binance.client import Client  # type: ignore
@@ -552,10 +554,12 @@ class BinanceEventStream:
         symbols: Optional[Iterable[str]] = None,
         *,
         on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+        max_queue: int = 100,
     ) -> None:
         self._symbols = {map_symbol_for_binance(symbol) for symbol in (symbols or [])}
         self._on_event = on_event
-        self._queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+        self._queue_maxsize = max(1, int(max_queue))
+        self._queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=self._queue_maxsize)
         self._manager_lock = threading.Lock()
         self._twm: Optional[ThreadedWebsocketManager] = None
         self._client: Optional[Client] = None
@@ -801,7 +805,27 @@ class BinanceEventStream:
         self._last_message = max(self._last_message, float(event.get("timestamp", time.time())))
         self._connected.set()
         try:
+            if self._queue.full():
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+                else:
+                    dropped_type = str(event.get("type"))
+                    log_event(
+                        logger,
+                        "market_queue_drop",
+                        queue_size=self._queue.qsize(),
+                        max_size=self._queue_maxsize,
+                        event_type=dropped_type,
+                    )
+                    record_metric(
+                        "market_queue_drop", 1.0, labels={"type": dropped_type}
+                    )
             self._queue.put_nowait(event)
+            record_metric(
+                "market_queue_len", float(self._queue.qsize()), labels={"queue": "market"}
+            )
         except queue.Full:
             logger.debug("Dropping event due to full queue: %s", event.get("type"))
         if callable(self._on_event):

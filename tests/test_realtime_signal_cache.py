@@ -23,12 +23,20 @@ def _build_cache(
     refresh_interval: float = 1.0,
     stale_after: Optional[float] = 3.0,
 ) -> RealTimeSignalCache:
-    return RealTimeSignalCache(
+    cache = RealTimeSignalCache(
         fetcher,
         evaluator,
         refresh_interval=refresh_interval,
         stale_after=stale_after,
     )
+    cache.configure_runtime(
+        default_debounce_ms=800,
+        debounce_overrides={},
+        refresh_overrides={},
+        circuit_breaker_threshold=5,
+        circuit_breaker_window=30.0,
+    )
+    return cache
 
 
 def test_cache_uses_default_stale_multiplier() -> None:
@@ -162,3 +170,29 @@ def test_force_refresh_while_worker_running() -> None:
         assert calls  # fetcher invoked either by worker or manual refresh
     finally:
         cache.stop()
+
+
+def test_schedule_refresh_respects_debounce() -> None:
+    cache = _build_cache()
+    cache.update_universe(["ETHUSDT"])
+    cache.schedule_refresh("ETHUSDT")
+    first_request = cache._last_priority_request.get("ETHUSDT")
+    assert first_request is not None
+    cache.schedule_refresh("ETHUSDT")
+    assert len(cache._priority_symbols) == 1
+
+
+def test_circuit_breaker_trips_after_errors() -> None:
+    cache = _build_cache()
+    cache.configure_runtime(
+        default_debounce_ms=500,
+        debounce_overrides={},
+        refresh_overrides={},
+        circuit_breaker_threshold=2,
+        circuit_breaker_window=60.0,
+    )
+    cache.update_universe(["BTCUSDT"])
+    now = time.time()
+    cache._record_refresh_error("BTCUSDT", "boom", attempt_ts=now)
+    cache._record_refresh_error("BTCUSDT", "boom", attempt_ts=now + 1)
+    assert cache.circuit_breaker_active()
