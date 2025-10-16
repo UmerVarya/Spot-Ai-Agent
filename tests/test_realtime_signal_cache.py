@@ -162,3 +162,22 @@ def test_force_refresh_while_worker_running() -> None:
         assert calls  # fetcher invoked either by worker or manual refresh
     finally:
         cache.stop()
+
+
+def test_force_refresh_handles_extra_evaluator_values() -> None:
+    payload = {"explanation": "test"}
+
+    async def fetcher(symbol: str) -> Optional[pd.DataFrame]:
+        await asyncio.sleep(0)
+        return pd.DataFrame({"close": [1.0]}, index=[pd.Timestamp.utcnow()])
+
+    def evaluator(*args, **kwargs):
+        return 1.0, "long", 2.0, "pattern", payload
+
+    cache = _build_cache(fetcher=fetcher, evaluator=evaluator)
+    cache.update_universe(["BTCUSDT"])
+
+    assert cache.force_refresh("BTCUSDT", timeout=2.0)
+    cached = cache.get("BTCUSDT")
+    assert cached is not None
+    assert cached.extras == payload

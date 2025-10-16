@@ -44,6 +44,7 @@ class CachedSignal:
     price_data: pd.DataFrame
     updated_at: float
     compute_latency: float
+    extras: Optional[object] = None
 
     def age(self) -> float:
         """Return the age of the cached signal in seconds."""
@@ -435,6 +436,7 @@ class RealTimeSignalCache:
             f"{prev_age:.1f}s" if prev_age is not None else "None",
             self._stale_after,
         )
+        extras: Optional[object] = None
         try:
             price_data = await self._price_fetcher(key)
         except Exception as exc:
@@ -452,11 +454,21 @@ class RealTimeSignalCache:
                 context = dict(self._context)
             sentiment_bias = str(context.get("sentiment_bias", "neutral"))
             eval_start = time.perf_counter()
-            score, direction, position_size, pattern = self._evaluator(
+            result = self._evaluator(
                 price_data,
                 key,
                 sentiment_bias=sentiment_bias,
             )
+            if not isinstance(result, tuple):
+                raise TypeError(
+                    "Signal evaluator must return a tuple with at least four elements"
+                )
+            if len(result) < 4:
+                raise ValueError(
+                    "Signal evaluator returned fewer than four values"
+                )
+            score, direction, position_size, pattern = result[:4]
+            extras = result[4] if len(result) > 4 else None
             latency = time.perf_counter() - eval_start
         except Exception as exc:
             self._record_refresh_error(key, "evaluation error", attempt_ts=attempt_ts)
@@ -472,6 +484,7 @@ class RealTimeSignalCache:
             price_data=price_data,
             updated_at=time.time(),
             compute_latency=float(latency),
+            extras=extras,
         )
         with self._lock:
             self._symbol_last_attempt[key] = attempt_ts
