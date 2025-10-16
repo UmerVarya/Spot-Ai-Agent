@@ -153,6 +153,8 @@ def _update_live_market(
     high: Optional[float],
     low: Optional[float],
     event_time: Optional[float],
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
 ) -> Dict[str, float]:
     """Store the latest live price snapshot for ``symbol`` and return it."""
 
@@ -164,6 +166,18 @@ def _update_live_market(
         price_val = _to_float(price)
         if price_val is not None:
             snapshot["price"] = price_val
+        bid_val = _to_float(bid)
+        if bid_val is not None:
+            snapshot["bid"] = bid_val
+            if price is None:
+                snapshot.setdefault("price", bid_val)
+        ask_val = _to_float(ask)
+        if ask_val is not None:
+            snapshot["ask"] = ask_val
+            if price is None and "price" not in snapshot and bid_val is not None:
+                snapshot["price"] = (bid_val + ask_val) / 2.0
+            elif price is None and "price" not in snapshot:
+                snapshot["price"] = ask_val
         high_val = _to_float(high)
         if high_val is not None:
             snapshot["high"] = high_val
@@ -187,6 +201,24 @@ def _get_live_market(symbol: str) -> Dict[str, float]:
         if not snapshot:
             return {}
         return dict(snapshot)
+
+
+def _request_manage(symbol: str, event_time: Optional[float]) -> None:
+    """Trigger ``manage_trades`` for ``symbol`` while respecting cooldown."""
+
+    norm = str(symbol or "").upper()
+    if not norm:
+        return
+    now = float(event_time if event_time is not None else time.time())
+    with _LIVE_MARKET_LOCK:
+        last = _LAST_MANAGE_TRIGGER.get(norm, 0.0)
+        if now - last < _MANAGE_TRIGGER_COOLDOWN:
+            return
+        _LAST_MANAGE_TRIGGER[norm] = now
+    try:
+        manage_trades()
+    except Exception:
+        logger.exception("manage_trades() failed after live trigger for %s", norm)
 
 
 def _check_live_triggers(
@@ -234,16 +266,7 @@ def _check_live_triggers(
             break
     if not triggered:
         return
-    now = time.time()
-    with _LIVE_MARKET_LOCK:
-        last = _LAST_MANAGE_TRIGGER.get(norm, 0.0)
-        if now - last < _MANAGE_TRIGGER_COOLDOWN:
-            return
-        _LAST_MANAGE_TRIGGER[norm] = now
-    try:
-        manage_trades()
-    except Exception:
-        logger.exception("manage_trades() failed after live trigger for %s", norm)
+    _request_manage(norm, time.time())
 
 
 def process_live_kline(symbol: str, interval: str, payload: Mapping[str, Any]) -> None:
@@ -269,6 +292,72 @@ def process_live_ticker(symbol: str, payload: Mapping[str, Any]) -> None:
     event_time = _to_float(payload.get("E") or payload.get("eventTime"))
     _update_live_market(symbol, price=price, high=None, low=None, event_time=event_time)
     _check_live_triggers(symbol, price, None, None)
+
+
+def process_book_ticker(symbol: str, payload: Mapping[str, Any]) -> None:
+    """Handle book ticker updates to keep bid/ask snapshots fresh."""
+
+    bid = _to_float(payload.get("b") or payload.get("B") or payload.get("bidPrice"))
+    ask = _to_float(payload.get("a") or payload.get("A") or payload.get("askPrice"))
+    event_time = _to_float(payload.get("E") or payload.get("eventTime"))
+    price = bid if bid is not None else ask
+    _update_live_market(
+        symbol,
+        price=price,
+        high=None,
+        low=None,
+        event_time=event_time,
+        bid=bid,
+        ask=ask,
+    )
+    if price is None:
+        return
+    high_for_check = bid if bid is not None else ask
+    low_for_check = bid if bid is not None else ask
+    _check_live_triggers(symbol, price, high_for_check, low_for_check)
+
+
+def process_user_stream_event(payload: Mapping[str, Any]) -> None:
+    """Handle Binance user data stream events (fills, account updates)."""
+
+    if not isinstance(payload, Mapping):
+        return
+    event_type = str(payload.get("e") or payload.get("eventType") or "").lower()
+    symbol = str(payload.get("s") or payload.get("symbol") or "").upper()
+    event_time = _to_float(payload.get("E") or payload.get("eventTime"))
+    should_manage = False
+    last_price: Optional[float] = None
+
+    if event_type == "executionreport":
+        last_price = _to_float(
+            payload.get("L")
+            or payload.get("lPrice")
+            or payload.get("ap")
+            or payload.get("p")
+        )
+        status = str(payload.get("X") or payload.get("orderStatus") or "").upper()
+        if status in {
+            "FILLED",
+            "PARTIALLY_FILLED",
+            "CANCELED",
+            "EXPIRED",
+            "REJECTED",
+            "EXPIRED_IN_MATCH",
+        }:
+            should_manage = True
+    elif event_type == "liststatus":
+        should_manage = True
+        if not symbol:
+            symbol = str(payload.get("s") or payload.get("symbol"))
+    elif event_type in {"balanceupdate", "outboundaccountposition"}:
+        # Balance change does not mandate trade management but we keep track
+        should_manage = False
+
+    if symbol and last_price is not None:
+        _update_live_market(symbol, price=last_price, high=None, low=None, event_time=event_time)
+
+    if should_manage and symbol:
+        _request_manage(symbol, event_time)
 
 
 def _record_partial_exit(
@@ -781,8 +870,14 @@ def _manage_trades_body() -> None:
         live_price = _to_float(live_snapshot.get("price"))
         live_high = _to_float(live_snapshot.get("high"))
         live_low = _to_float(live_snapshot.get("low"))
-        if live_price is not None:
+        live_bid = _to_float(live_snapshot.get("bid"))
+        live_ask = _to_float(live_snapshot.get("ask"))
+        if live_bid is not None:
+            fallback_exit_price = live_bid
+        elif live_price is not None:
             fallback_exit_price = live_price
+        elif live_ask is not None:
+            fallback_exit_price = live_ask
 
         direction = str(trade.get('direction', 'long')).lower()
         entry = _to_float(trade.get('entry'))
@@ -844,8 +939,15 @@ def _manage_trades_body() -> None:
                 current_price = float(price_data['close'].iloc[-1])
             except Exception:
                 current_price = None
-        if live_price is not None:
+        if direction == "long":
+            if live_bid is not None:
+                current_price = live_bid
+            elif live_price is not None:
+                current_price = live_price
+        elif live_price is not None:
             current_price = live_price
+        if direction == "short" and live_ask is not None:
+            current_price = live_ask
         price_for_exit = current_price if current_price is not None else fallback_exit_price
 
         if entry_dt and datetime.utcnow() - entry_dt >= MAX_HOLDING_TIME:
