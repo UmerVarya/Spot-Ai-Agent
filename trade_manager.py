@@ -18,6 +18,8 @@ working directory.
 
 from datetime import datetime, timedelta, timezone
 import math
+import threading
+import time
 from typing import Any, Dict, List, Tuple, Optional, Union, Mapping
 
 import pandas as pd
@@ -67,6 +69,12 @@ MAX_HOLDING_TIME = timedelta(hours=6)
 logger = setup_logger(__name__)
 USE_RL_POSITION_SIZER = False
 rl_sizer = RLPositionSizer() if USE_RL_POSITION_SIZER else None
+
+_LIVE_MARKET_LOCK = threading.Lock()
+_LIVE_MARKET: Dict[str, Dict[str, float]] = {}
+_LAST_MANAGE_TRIGGER: Dict[str, float] = {}
+_MANAGE_TRIGGER_COOLDOWN = 2.0
+_ACTIVE_TRADES_LOCK = threading.RLock()
 
 
 def _coerce_to_utc_datetime(value: Union[str, float, int, datetime, None]) -> Optional[datetime]:
@@ -136,6 +144,131 @@ def _calculate_leg_pnl(trade: dict, exit_price: float, quantity: float, fees: fl
     except Exception:
         pass
     return pnl
+
+
+def _update_live_market(
+    symbol: str,
+    *,
+    price: Optional[float],
+    high: Optional[float],
+    low: Optional[float],
+    event_time: Optional[float],
+) -> Dict[str, float]:
+    """Store the latest live price snapshot for ``symbol`` and return it."""
+
+    norm = str(symbol or "").upper()
+    if not norm:
+        return {}
+    with _LIVE_MARKET_LOCK:
+        snapshot = _LIVE_MARKET.setdefault(norm, {})
+        price_val = _to_float(price)
+        if price_val is not None:
+            snapshot["price"] = price_val
+        high_val = _to_float(high)
+        if high_val is not None:
+            snapshot["high"] = high_val
+        low_val = _to_float(low)
+        if low_val is not None:
+            snapshot["low"] = low_val
+        event_val = _to_float(event_time)
+        if event_val is not None:
+            snapshot["event_time"] = event_val
+        return dict(snapshot)
+
+
+def _get_live_market(symbol: str) -> Dict[str, float]:
+    """Return the most recent live snapshot for ``symbol`` if available."""
+
+    norm = str(symbol or "").upper()
+    if not norm:
+        return {}
+    with _LIVE_MARKET_LOCK:
+        snapshot = _LIVE_MARKET.get(norm)
+        if not snapshot:
+            return {}
+        return dict(snapshot)
+
+
+def _check_live_triggers(
+    symbol: str,
+    price: Optional[float],
+    high: Optional[float],
+    low: Optional[float],
+) -> None:
+    """Check whether live prices trigger stop or target actions."""
+
+    norm = str(symbol or "").upper()
+    if not norm:
+        return
+    effective_price = price
+    if effective_price is None:
+        effective_price = high if high is not None else low
+    if effective_price is None:
+        return
+    high_for_check = high if high is not None else effective_price
+    low_for_check = low if low is not None else effective_price
+    if not _ACTIVE_TRADES_LOCK.acquire(blocking=False):
+        return
+    try:
+        trades = load_active_trades()
+    except Exception:
+        logger.debug(
+            "Failed to load active trades for live trigger check: %s", norm, exc_info=True
+        )
+        return
+    finally:
+        _ACTIVE_TRADES_LOCK.release()
+    triggered = False
+    for trade in trades:
+        trade_symbol = str(trade.get("symbol", "")).upper()
+        if trade_symbol != norm:
+            continue
+        exit_signals = should_exit_position(
+            trade,
+            current_price=effective_price,
+            recent_high=high_for_check,
+            recent_low=low_for_check,
+        )
+        if exit_signals:
+            triggered = True
+            break
+    if not triggered:
+        return
+    now = time.time()
+    with _LIVE_MARKET_LOCK:
+        last = _LAST_MANAGE_TRIGGER.get(norm, 0.0)
+        if now - last < _MANAGE_TRIGGER_COOLDOWN:
+            return
+        _LAST_MANAGE_TRIGGER[norm] = now
+    try:
+        manage_trades()
+    except Exception:
+        logger.exception("manage_trades() failed after live trigger for %s", norm)
+
+
+def process_live_kline(symbol: str, interval: str, payload: Mapping[str, Any]) -> None:
+    """Handle live kline updates and trigger trade management when needed."""
+
+    price = _to_float(payload.get("c"))
+    high = _to_float(payload.get("h"))
+    low = _to_float(payload.get("l"))
+    event_time = _to_float(payload.get("T") or payload.get("t"))
+    _update_live_market(symbol, price=price, high=high, low=low, event_time=event_time)
+    _check_live_triggers(symbol, price, high, low)
+
+
+def process_live_ticker(symbol: str, payload: Mapping[str, Any]) -> None:
+    """Handle ticker updates for rapid stop/target evaluation."""
+
+    price = _to_float(
+        payload.get("c")
+        or payload.get("C")
+        or payload.get("lastPrice")
+        or payload.get("close")
+    )
+    event_time = _to_float(payload.get("E") or payload.get("eventTime"))
+    _update_live_market(symbol, price=price, high=None, low=None, event_time=event_time)
+    _check_live_triggers(symbol, price, None, None)
 
 
 def _record_partial_exit(
@@ -617,8 +750,7 @@ def should_exit_position(
     return signals
 
 
-def manage_trades() -> None:
-    """Iterate over active trades and update or close them."""
+def _manage_trades_body() -> None:
     active_trades = load_active_trades()
     updated_trades: List[dict] = []
     for index, trade in enumerate(active_trades):
@@ -644,6 +776,13 @@ def manage_trades() -> None:
                 break
             except Exception:
                 continue
+
+        live_snapshot = _get_live_market(symbol)
+        live_price = _to_float(live_snapshot.get("price"))
+        live_high = _to_float(live_snapshot.get("high"))
+        live_low = _to_float(live_snapshot.get("low"))
+        if live_price is not None:
+            fallback_exit_price = live_price
 
         direction = str(trade.get('direction', 'long')).lower()
         entry = _to_float(trade.get('entry'))
@@ -705,6 +844,8 @@ def manage_trades() -> None:
                 current_price = float(price_data['close'].iloc[-1])
             except Exception:
                 current_price = None
+        if live_price is not None:
+            current_price = live_price
         price_for_exit = current_price if current_price is not None else fallback_exit_price
 
         if entry_dt and datetime.utcnow() - entry_dt >= MAX_HOLDING_TIME:
@@ -775,6 +916,16 @@ def manage_trades() -> None:
                 observed_price = float(recent_low)
             except Exception:
                 observed_price = None
+        if live_high is not None:
+            if recent_high is None or live_high > recent_high:
+                recent_high = live_high
+        if live_low is not None:
+            if recent_low is None or live_low < recent_low:
+                recent_low = live_low
+            try:
+                observed_price = float(live_low)
+            except Exception:
+                pass
         profit_riding_mode = "🚀 TP4" if trade.get('profit_riding', False) else "—"
         logger.debug(
             "Managing %s | Price=%s High=%s Low=%s SL=%s TP1=%s TP2=%s TP3=%s Status=%s Mode=%s",
@@ -1373,3 +1524,15 @@ def manage_trades() -> None:
         updated_trades.append(trade)
     # Persist updated trades to storage
     save_active_trades(updated_trades)
+
+
+def manage_trades() -> None:
+    """Iterate over active trades and update or close them."""
+
+    if not _ACTIVE_TRADES_LOCK.acquire(blocking=False):
+        logger.debug("manage_trades already running; skipping concurrent call")
+        return
+    try:
+        _manage_trades_body()
+    finally:
+        _ACTIVE_TRADES_LOCK.release()
