@@ -22,8 +22,8 @@ def _coerce_float(value: Any, *, default: float = 0.0) -> float:
 
 
 def evaluator_for_cache(
+    price_data: pd.DataFrame,
     symbol: str,
-    df: pd.DataFrame,
     **kwargs: Any,
 ) -> Tuple[float, Optional[str], float, Optional[str]]:
     """Adapter for :class:`RealTimeSignalCache`.
@@ -33,7 +33,7 @@ def evaluator_for_cache(
     ``(score, direction, position_size, pattern)`` tuple expected by the cache.
     """
 
-    result = _evaluate_signal(price_data=df, symbol=symbol, **kwargs)
+    result = _evaluate_signal(price_data=price_data, symbol=symbol, **kwargs)
 
     score: float
     direction: Optional[str]
