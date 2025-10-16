@@ -122,6 +122,29 @@ when hard conflicts are detected. This happens even if the local LLM layer is
 disabled via `ENABLE_LOCAL_LLM=0`, ensuring imminent news or BTC trend
 conflicts cannot slip through silently when the model fallback is offline.
 
+## Exit trigger precedence
+
+When several exit guards activate during the same evaluation cycle the trade
+manager respects a strict, short-circuiting order so the most urgent
+condition wins:
+
+1. **Hard risk** – stop-loss breaches and OCO stop acknowledgements exit the
+   position immediately.
+2. **Time-based exit** – trades exceeding the configured holding window close
+   on the next tick.
+3. **Macro veto** – a bearish macro signal with confidence ≥ 7 forces the
+   exit before indicator logic is considered.
+4. **Indicator-based early exit** – weighted indicator scores ≥ 0.6 trigger a
+   discretionary exit.
+5. **Order-book pressure** – respects the "no immediate loss" rule unless the
+   signal marks urgency as high.
+6. **Take-profit / trailing management** – manages staged profit taking and
+   trailing stops once all higher-priority guards are clear.
+
+Once an exit condition commits to closing or scaling out of a trade the rest
+of the guards are ignored for that tick to avoid duplicate fills and keep the
+logic idempotent.
+
 ## Testing
 
 Unit tests use `pytest`:

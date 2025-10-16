@@ -510,6 +510,10 @@ def should_exit_early(
         if drawdown > atr * ATR_MULTIPLIER:
             return True, f"Drawdown {drawdown:.4f} exceeds {ATR_MULTIPLIER} ATR ({atr:.4f})"
 
+    macro = analyze_macro_sentiment()
+    if macro.get('bias') == "bearish" and macro.get('confidence', 0) >= MACRO_CONFIDENCE_EXIT_THRESHOLD:
+        return True, f"Macro sentiment shifted to bearish (Confidence: {macro.get('confidence')})"
+
     rsi = indicators.get("rsi", 50)
     macd_hist = indicators.get("macd", 0)
     ema20 = indicators.get("ema_20", current_price)
@@ -547,10 +551,6 @@ def should_exit_early(
             reasons.append("Close below VWAP")
     if score >= EXIT_SCORE_THRESHOLD:
         return True, f"Bearish signals (score {score:.2f}): {', '.join(reasons)}"
-
-    macro = analyze_macro_sentiment()
-    if macro.get('bias') == "bearish" and macro.get('confidence', 0) >= MACRO_CONFIDENCE_EXIT_THRESHOLD:
-        return True, f"Macro sentiment shifted to bearish (Confidence: {macro.get('confidence')})"
     return False, None
 
 
@@ -664,7 +664,8 @@ def manage_trades() -> None:
         status_flags = trade.setdefault('status', {})
         status_flags.setdefault('flow_break_even', False)
         actions = []
-        # Time-based exit: close trades exceeding the maximum holding duration
+        exit_signals: List[dict] = []
+        # Resolve entry timestamp once for downstream exit logic
         primary_entry_time = trade.get('entry_time')
         entry_sources = []
         if 'entry_time' in trade:
@@ -706,6 +707,90 @@ def manage_trades() -> None:
             except Exception:
                 current_price = None
         price_for_exit = current_price if current_price is not None else fallback_exit_price
+        observed_price: Optional[float] = None
+        recent_high: Optional[float] = None
+        recent_low: Optional[float] = None
+        if has_price_data:
+            # Hard-risk exits (stop loss/OCO acknowledgements) take precedence
+            # over every other guard in the current evaluation cycle.
+            if entry_dt is not None:
+                if isinstance(price_data.index, pd.DatetimeIndex):
+                    recent_candles = price_data[price_data.index >= entry_dt]
+                else:
+                    recent_candles = price_data
+                if not recent_candles.empty:
+                    recent_high = recent_candles['high'].iloc[-1]
+                    recent_low = recent_candles['low'].iloc[-1]
+                    try:
+                        observed_price = float(recent_low)
+                    except Exception:
+                        observed_price = None
+                else:
+                    fallback_price = current_price
+                    if fallback_price is None:
+                        fallback_price = trade.get('entry')
+                    try:
+                        fallback_price = float(fallback_price)
+                    except Exception:
+                        fallback_price = 0.0
+                    recent_high = fallback_price
+                    recent_low = fallback_price
+            if recent_high is None:
+                recent_high = price_data['high'].iloc[-1]
+            if recent_low is None:
+                recent_low = price_data['low'].iloc[-1]
+                try:
+                    observed_price = float(recent_low)
+                except Exception:
+                    observed_price = None
+            exit_signals = should_exit_position(
+                trade,
+                current_price=current_price,
+                recent_high=recent_high,
+                recent_low=recent_low,
+            )
+            if exit_signals and exit_signals[0].get("type") == "stop_loss":
+                target_price = _to_float(exit_signals[0].get("price"))
+                if target_price is not None:
+                    qty = _to_float(trade.get('position_size', 1)) or 0.0
+                    exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    outcome_label = "tp4_sl" if trade.get("profit_riding") else "sl"
+                    reason_text = (
+                        "Trailing stop loss"
+                        if trade.get("profit_riding")
+                        else "Stop loss hit"
+                    )
+                    actions.append("stop_loss")
+                    execute_exit_trade(
+                        trade,
+                        exit_price=target_price,
+                        reason=reason_text,
+                        outcome=outcome_label,
+                        quantity=qty,
+                        exit_time=exit_time,
+                    )
+                    _persist_active_snapshot(
+                        updated_trades, active_trades, index, include_current=False
+                    )
+                    _update_rl(trade, target_price)
+                    send_email(
+                        f" Stop Loss Hit: {symbol}",
+                        f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
+                    )
+                    logger.debug("%s actions: %s", symbol, actions)
+                    continue
+        else:
+            fallback_price = current_price
+            if fallback_price is None:
+                fallback_price = trade.get('entry')
+            try:
+                fallback_price = float(fallback_price) if fallback_price is not None else None
+            except Exception:
+                fallback_price = None
+            if fallback_price is None:
+                fallback_price = 0.0
+            recent_high = fallback_price
+            recent_low = fallback_price
 
         if entry_dt and datetime.utcnow() - entry_dt >= MAX_HOLDING_TIME:
             actions.append("time_exit")
@@ -743,38 +828,6 @@ def manage_trades() -> None:
         # pre-entry extremes.
         if current_price is None:
             current_price = price_data['close'].iloc[-1]
-        observed_price: Optional[float] = None
-        recent_high: float
-        recent_low: float
-        if entry_dt is not None:
-            if isinstance(price_data.index, pd.DatetimeIndex):
-                recent_candles = price_data[price_data.index >= entry_dt]
-            else:
-                recent_candles = price_data
-            if not recent_candles.empty:
-                recent_high = recent_candles['high'].iloc[-1]
-                recent_low = recent_candles['low'].iloc[-1]
-                try:
-                    observed_price = float(recent_low)
-                except Exception:
-                    observed_price = None
-            else:
-                fallback_price = current_price
-                if fallback_price is None:
-                    fallback_price = trade.get('entry')
-                try:
-                    fallback_price = float(fallback_price)
-                except Exception:
-                    fallback_price = 0.0
-                recent_high = fallback_price
-                recent_low = fallback_price
-        else:
-            recent_high = price_data['high'].iloc[-1]
-            recent_low = price_data['low'].iloc[-1]
-            try:
-                observed_price = float(recent_low)
-            except Exception:
-                observed_price = None
         profit_riding_mode = "🚀 TP4" if trade.get('profit_riding', False) else "—"
         logger.debug(
             "Managing %s | Price=%s High=%s Low=%s SL=%s TP1=%s TP2=%s TP3=%s Status=%s Mode=%s",
@@ -1019,12 +1072,13 @@ def manage_trades() -> None:
         kc_lower_val = kc_lower_series.iloc[-1] if hasattr(kc_lower_series, 'iloc') else kc_lower_series or 0
         # Only long trades are supported in spot mode
         trade_closed = False
-        exit_signals = should_exit_position(
-            trade,
-            current_price=current_price,
-            recent_high=recent_high,
-            recent_low=recent_low,
-        )
+        if not exit_signals:
+            exit_signals = should_exit_position(
+                trade,
+                current_price=current_price,
+                recent_high=recent_high,
+                recent_low=recent_low,
+            )
         if direction == "long":
             if exit_signals:
                 for signal in exit_signals:
