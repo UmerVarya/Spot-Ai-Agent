@@ -71,10 +71,14 @@ class RealTimeSignalCache:
         max_concurrent_fetches: Optional[int] = None,
         *,
         max_concurrency: Optional[int] = None,
+        use_streams: bool = False,
+        ws_bridge: Optional[object] = None,
     ) -> None:
         self._price_fetcher = price_fetcher
         self._evaluator = evaluator
         self._refresh_interval = max(0.5, float(refresh_interval))
+        self.use_streams = bool(use_streams)
+        self.ws_bridge = ws_bridge
         if stale_after is None or float(stale_after) <= 0:
             effective_stale_after = self._refresh_interval * 3
         else:
@@ -122,6 +126,13 @@ class RealTimeSignalCache:
         self._cb_error_times: "deque[float]" = deque()
         self._cb_open_until = 0.0
         self._cb_lock = threading.Lock()
+        if self.use_streams and self.ws_bridge is not None:
+            register_callback = getattr(self.ws_bridge, "register_callback", None)
+            if callable(register_callback):
+                try:
+                    register_callback(self.handle_ws_update)
+                except Exception:
+                    logger.debug("Failed to register WS callback", exc_info=True)
 
     @property
     def stale_after(self) -> float:
@@ -254,6 +265,32 @@ class RealTimeSignalCache:
             self._cb_threshold = max(1, int(circuit_breaker_threshold))
             self._cb_window = max(5.0, float(circuit_breaker_window))
         self._signal_wake()
+
+    def handle_ws_update(
+        self, symbol: str, event_type: str, data: Mapping[str, object]
+    ) -> None:
+        """Handle WebSocket events and trigger cache refreshes when relevant."""
+
+        if not self.use_streams:
+            return
+        if not symbol:
+            return
+        if not isinstance(data, Mapping):
+            return
+        try:
+            event = str(event_type or "").lower()
+        except Exception:
+            event = ""
+        if event != "kline":
+            return
+        try:
+            closed = bool(data.get("x"))
+        except Exception:
+            closed = False
+        if not closed:
+            return
+        log_event(logger, "ws_bar_close", symbol=self._key(symbol), event=event)
+        self.schedule_refresh(symbol)
 
     def schedule_refresh(self, symbol: str) -> None:
         """Request an immediate refresh for ``symbol`` when possible."""
