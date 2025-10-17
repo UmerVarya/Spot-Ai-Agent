@@ -35,7 +35,7 @@ from observability import log_event, record_metric
 PriceFetcher = Callable[[str], Awaitable[pd.DataFrame | None]]
 SignalEvaluator = Callable[..., Tuple[float, Optional[str], float, Optional[str]]]
 
-# one shared public REST client (no key needed for public data)
+# One shared public REST client (no key needed for public data)
 try:
     REST_CLIENT = Client("", "")
 except Exception as exc:  # pragma: no cover - defensive initialization
@@ -43,17 +43,17 @@ except Exception as exc:  # pragma: no cover - defensive initialization
     REST_CLIENT = None
 
 
-def _get_rest_client() -> Client:
+def _ensure_rest_client() -> Client:
     global REST_CLIENT
     if REST_CLIENT is None:
         REST_CLIENT = Client("", "")
     return REST_CLIENT
 
 
-# helper: run the blocking python-binance call in a thread
 def _fetch_klines_sync(symbol: str, interval: str = "1m", limit: int = 200):
-    # NOTE: interval/limit should match what your indicators need
-    client = _get_rest_client()
+    """Blocking REST call using python-binance."""
+
+    client = _ensure_rest_client()
     return client.get_klines(symbol=symbol, interval=interval, limit=limit)
 
 
@@ -61,8 +61,10 @@ async def fetch_klines_with_timeout(
     symbol: str,
     interval: str = "1m",
     limit: int = 200,
-    timeout: float = 8.0,
+    timeout: float = 10.0,
 ):
+    """Run the blocking call in a thread pool and wait with timeout."""
+
     loop = asyncio.get_running_loop()
     return await asyncio.wait_for(
         loop.run_in_executor(None, _fetch_klines_sync, symbol, interval, limit),
@@ -71,7 +73,7 @@ async def fetch_klines_with_timeout(
 
 
 def _get_ticker_sync(symbol: str):
-    client = _get_rest_client()
+    client = _ensure_rest_client()
     return client.get_symbol_ticker(symbol=symbol)
 
 
@@ -185,6 +187,7 @@ class RealTimeSignalCache:
         max_concurrency: Optional[int] = None,
         use_streams: bool = False,
     ) -> None:
+        self.log = logger
         self._price_fetcher = price_fetcher
         self._evaluator = evaluator
         self._refresh_interval = max(0.5, float(refresh_interval))
@@ -817,7 +820,7 @@ class RealTimeSignalCache:
             logger.debug("No price data available for %s", key)
             return False
 
-        return self._finalize_refresh(
+        return self._update_cache(
             key,
             price_data,
             attempt_ts=attempt_ts,
@@ -831,7 +834,7 @@ class RealTimeSignalCache:
         key, prev_age, attempt_ts = prepared
 
         try:
-            klines = await fetch_klines_with_timeout(key, "1m", 200, timeout=8.0)
+            klines = await fetch_klines_with_timeout(key)
         except Exception as exc:
             self._record_refresh_error(
                 key, f"REST fetch error: {exc}", attempt_ts=attempt_ts
@@ -873,17 +876,17 @@ class RealTimeSignalCache:
                     pass
                 price_data.attrs["hourly_bar"] = hourly_bar
 
-        success = self._finalize_refresh(
+        success = self._update_cache(
             key,
             price_data,
             attempt_ts=attempt_ts,
             prev_age=prev_age,
         )
         if success:
-            logger.info("CachedSignal updated for %s (via REST fallback)", key)
+            self.log.info("CachedSignal updated for %s (REST fallback OK)", key)
         return success
 
-    def _finalize_refresh(
+    def _update_cache(
         self,
         key: str,
         price_data: pd.DataFrame,
