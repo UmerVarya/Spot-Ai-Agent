@@ -215,13 +215,13 @@ class EventRelevanceScorer:
             self.halt_categories = {str(cat) for cat in halt_categories if cat}
 
         if isinstance(volatility_horizon, str):
-            volatility_horizon = volatility_horizon.lower()
+            volatility_horizon = volatility_horizon.strip()
         self.volatility_horizon = pd.Timedelta(volatility_horizon)
         if self.volatility_horizon <= pd.Timedelta(0):
             raise ValueError("volatility_horizon must be positive")
 
         if isinstance(baseline_window, str):
-            baseline_window = baseline_window.lower()
+            baseline_window = baseline_window.strip()
         self.baseline_window = pd.Timedelta(baseline_window)
         if self.baseline_window <= pd.Timedelta(0):
             raise ValueError("baseline_window must be positive")
