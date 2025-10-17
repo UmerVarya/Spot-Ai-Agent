@@ -28,11 +28,123 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
+from binance.client import Client
 
 from observability import log_event, record_metric
 
 PriceFetcher = Callable[[str], Awaitable[pd.DataFrame | None]]
 SignalEvaluator = Callable[..., Tuple[float, Optional[str], float, Optional[str]]]
+
+# one shared public REST client (no key needed for public data)
+try:
+    REST_CLIENT = Client("", "")
+except Exception as exc:  # pragma: no cover - defensive initialization
+    logger.warning("RTSC: REST client initialization failed: %s", exc, exc_info=True)
+    REST_CLIENT = None
+
+
+def _get_rest_client() -> Client:
+    global REST_CLIENT
+    if REST_CLIENT is None:
+        REST_CLIENT = Client("", "")
+    return REST_CLIENT
+
+
+# helper: run the blocking python-binance call in a thread
+def _fetch_klines_sync(symbol: str, interval: str = "1m", limit: int = 200):
+    # NOTE: interval/limit should match what your indicators need
+    client = _get_rest_client()
+    return client.get_klines(symbol=symbol, interval=interval, limit=limit)
+
+
+async def fetch_klines_with_timeout(
+    symbol: str,
+    interval: str = "1m",
+    limit: int = 200,
+    timeout: float = 8.0,
+):
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, _fetch_klines_sync, symbol, interval, limit),
+        timeout=timeout,
+    )
+
+
+def _get_ticker_sync(symbol: str):
+    client = _get_rest_client()
+    return client.get_symbol_ticker(symbol=symbol)
+
+
+async def fetch_ticker_with_timeout(symbol: str, timeout: float = 5.0):
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, _get_ticker_sync, symbol),
+        timeout=timeout,
+    )
+
+
+def _klines_to_dataframe(klines: Sequence[Sequence[object]]) -> pd.DataFrame:
+    if not klines:
+        return pd.DataFrame()
+
+    columns = [
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+        "quote_asset_volume",
+        "number_of_trades",
+        "taker_buy_base",
+        "taker_buy_quote",
+        "ignore",
+    ]
+    df = pd.DataFrame(list(klines), columns=columns)
+    numeric_columns = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_asset_volume",
+        "taker_buy_base",
+        "taker_buy_quote",
+        "number_of_trades",
+    ]
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce", utc=True)
+    df = df.dropna(subset=["timestamp"])
+    if df.empty:
+        return pd.DataFrame()
+
+    df = df.sort_values("timestamp").set_index("timestamp")
+    tz = getattr(df.index, "tz", None)
+    if tz is not None:
+        df.index = df.index.tz_convert("UTC").tz_localize(None)
+
+    df["quote_volume"] = df["quote_asset_volume"].fillna(0.0)
+    df["taker_sell_base"] = (df["volume"].fillna(0.0) - df["taker_buy_base"].fillna(0.0)).clip(lower=0.0)
+    df["taker_sell_quote"] = (
+        df["quote_volume"].fillna(0.0) - df["taker_buy_quote"].fillna(0.0)
+    ).clip(lower=0.0)
+
+    return df[[
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_volume",
+        "taker_buy_base",
+        "taker_buy_quote",
+        "taker_sell_base",
+        "taker_sell_quote",
+        "number_of_trades",
+    ]]
 
 
 @dataclass(slots=True)
@@ -529,7 +641,24 @@ class RealTimeSignalCache:
                 logger.exception("RTSC: force refresh for %s failed on worker loop", key)
                 return False
 
-        logger.info("RTSC: force-refresh running %s on temporary event loop", key)
+        logger.info(
+            "RTSC: force-refresh running %s on temporary event loop via REST fallback",
+            key,
+        )
+        try:
+            rest_success = bool(asyncio.run(self._refresh_symbol_via_rest(key)))
+        except Exception:
+            logger.exception(
+                "RTSC: REST fallback force refresh for %s failed", key
+            )
+            rest_success = False
+        if rest_success:
+            return True
+
+        logger.info(
+            "RTSC: REST fallback failed for %s; retrying with configured fetcher",
+            key,
+        )
         try:
             return bool(asyncio.run(self._refresh_symbol(key)))
         except Exception:
@@ -642,9 +771,9 @@ class RealTimeSignalCache:
                 due.append(key)
         return due
 
-    async def _refresh_symbol(self, symbol: str) -> bool:
-        """Refresh a single symbol and return whether it succeeded."""
-
+    def _prepare_refresh(
+        self, symbol: str
+    ) -> Optional[Tuple[str, Optional[float], float]]:
         attempt_ts = time.time()
         key = self._key(symbol)
         with self._lock:
@@ -665,7 +794,16 @@ class RealTimeSignalCache:
                 threshold=self._cb_threshold,
                 window=self._cb_window,
             )
+            return None
+        return key, prev_age, attempt_ts
+
+    async def _refresh_symbol(self, symbol: str) -> bool:
+        """Refresh a single symbol and return whether it succeeded."""
+
+        prepared = self._prepare_refresh(symbol)
+        if prepared is None:
             return False
+        key, prev_age, attempt_ts = prepared
 
         try:
             price_data = await self._price_fetcher(key)
@@ -679,6 +817,80 @@ class RealTimeSignalCache:
             logger.debug("No price data available for %s", key)
             return False
 
+        return self._finalize_refresh(
+            key,
+            price_data,
+            attempt_ts=attempt_ts,
+            prev_age=prev_age,
+        )
+
+    async def _refresh_symbol_via_rest(self, symbol: str) -> bool:
+        prepared = self._prepare_refresh(symbol)
+        if prepared is None:
+            return False
+        key, prev_age, attempt_ts = prepared
+
+        try:
+            klines = await fetch_klines_with_timeout(key, "1m", 200, timeout=8.0)
+        except Exception as exc:
+            self._record_refresh_error(
+                key, f"REST fetch error: {exc}", attempt_ts=attempt_ts
+            )
+            logger.debug(
+                "REST fallback price fetch failed for %s: %s", key, exc, exc_info=True
+            )
+            return False
+
+        if not klines:
+            self._record_refresh_error(key, "no price data returned", attempt_ts=attempt_ts)
+            logger.debug("No price data available for %s via REST fallback", key)
+            return False
+
+        price_data = _klines_to_dataframe(klines)
+        if price_data.empty:
+            self._record_refresh_error(key, "no price data returned", attempt_ts=attempt_ts)
+            logger.debug("REST fallback produced empty dataframe for %s", key)
+            return False
+
+        try:
+            hourly_klines = await fetch_klines_with_timeout(key, "1h", 2, timeout=5.0)
+        except Exception as exc:
+            logger.debug(
+                "Failed to fetch hourly klines for %s via REST fallback: %s",
+                key,
+                exc,
+                exc_info=True,
+            )
+        else:
+            hourly_df = _klines_to_dataframe(hourly_klines)
+            if not hourly_df.empty:
+                hourly_bar = hourly_df.tail(1)[
+                    ["open", "high", "low", "close", "volume", "quote_volume"]
+                ].copy()
+                try:
+                    hourly_bar.index = hourly_bar.index.floor("H")
+                except Exception:
+                    pass
+                price_data.attrs["hourly_bar"] = hourly_bar
+
+        success = self._finalize_refresh(
+            key,
+            price_data,
+            attempt_ts=attempt_ts,
+            prev_age=prev_age,
+        )
+        if success:
+            logger.info("CachedSignal updated for %s (via REST fallback)", key)
+        return success
+
+    def _finalize_refresh(
+        self,
+        key: str,
+        price_data: pd.DataFrame,
+        *,
+        attempt_ts: float,
+        prev_age: Optional[float],
+    ) -> bool:
         try:
             with self._lock:
                 context = dict(self._context)
