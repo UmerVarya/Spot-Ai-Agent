@@ -21,6 +21,19 @@ import pandas as pd
 from typing import Callable, Dict, List
 
 
+# --- frequency normalization for pandas 2.x ---
+_FREQ_FIX = {"T": "min", "H": "h"}
+
+
+def normalize_freq(freq: str) -> str:
+    """Normalize deprecated Pandas frequency aliases to their replacements."""
+
+    out = freq
+    for k, v in _FREQ_FIX.items():
+        out = out.replace(k, v)
+    return out
+
+
 def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     """
     Resample a lower‑frequency OHLCV DataFrame to a higher timeframe.
@@ -45,7 +58,8 @@ def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         'close': 'last',
         'volume': 'sum',
     }
-    return df.resample(timeframe).apply(ohlc).dropna()
+    tf = normalize_freq(timeframe)
+    return df.resample(tf).apply(ohlc).dropna()
 
 
 def multi_timeframe_confluence(
