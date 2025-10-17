@@ -10,7 +10,7 @@ deriving indicators right when an order needs to be submitted.
 
 from __future__ import annotations
 
-import logging, os
+import logging
 from concurrent.futures import TimeoutError as FutureTimeout
 
 logger = logging.getLogger(__name__)
@@ -20,21 +20,24 @@ logger.propagate = True              # bubble up to root logger
 VERSION_TAG = "RTSC-PRIME-UMER-2"
 logger.warning("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
 
-# --- REST fallback imports (add near the other imports)
-import asyncio
+# --- REST fallback imports / banner ---
+import os, asyncio
 from datetime import datetime, timezone
+import pandas as pd
 from binance.client import Client
 
 # One shared public client; no API key needed for public endpoints
 REST_CLIENT = Client("", "")
+
+print(
+    f"RTSC INIT v2025-10-17 file={__file__} loaded at {datetime.now(timezone.utc).isoformat()}"
+)
 
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
-
-import pandas as pd
 
 from observability import log_event, record_metric
 
@@ -45,7 +48,8 @@ SignalEvaluator = Callable[..., Tuple[float, Optional[str], float, Optional[str]
 
 
 def _fetch_klines_sync(symbol: str, interval: str = "1m", limit: int = 200):
-    # Blocking call; reliable and fast
+    """Blocking REST call using python-binance"""
+
     return REST_CLIENT.get_klines(symbol=symbol, interval=interval, limit=limit)
 
 
@@ -57,8 +61,10 @@ async def fetch_klines_with_timeout(
     symbol: str,
     interval: str = "1m",
     limit: int = 200,
-    timeout: float = 10.0,
+    timeout: float = 15.0,
 ):
+    """Run the blocking call in a thread pool with timeout protection"""
+
     loop = asyncio.get_running_loop()
     return await asyncio.wait_for(
         loop.run_in_executor(None, _fetch_klines_sync, symbol, interval, limit),
@@ -638,7 +644,7 @@ class RealTimeSignalCache:
             key,
         )
         try:
-            rest_success = bool(asyncio.run(self._refresh_symbol_via_rest(key)))
+            rest_success = bool(asyncio.run(self._refresh_symbol_rest(key)))
         except Exception:
             logger.exception(
                 "RTSC: REST fallback force refresh for %s failed", key
@@ -792,6 +798,10 @@ class RealTimeSignalCache:
     async def _refresh_symbol(self, symbol: str) -> bool:
         """Refresh a single symbol and return whether it succeeded."""
 
+        # Prefer REST while warming up; disable via RTSC_FORCE_REST=0
+        if os.getenv("RTSC_FORCE_REST", "1") == "1":
+            return await self._refresh_symbol_rest(symbol)
+
         prepared = self._prepare_refresh(symbol)
         if prepared is None:
             return False
@@ -816,21 +826,99 @@ class RealTimeSignalCache:
             prev_age=prev_age,
         )
 
-    async def _refresh_symbol_via_rest(self, symbol: str) -> bool:
+    async def _refresh_symbol_rest(self, symbol: str) -> bool:
+        """REST fallback refresh using python-binance"""
+
         prepared = self._prepare_refresh(symbol)
         if prepared is None:
             return False
+
         key, prev_age, attempt_ts = prepared
 
         try:
             klines = await fetch_klines_with_timeout(key, "1m", 200, timeout=15.0)
-            self.log.info(
-                "[REST] %s: fetched %d bars successfully", symbol, len(klines)
+            df = pd.DataFrame(
+                klines,
+                columns=[
+                    "open_time",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "close_time",
+                    "quote_vol",
+                    "trades",
+                    "taker_base",
+                    "taker_quote",
+                    "ignore",
+                ],
             )
+            for column in ("open", "high", "low", "close", "volume"):
+                df[column] = df[column].astype(float)
+            for column in ("quote_vol", "taker_base", "taker_quote", "trades"):
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+            df["ts"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+
+            self.log.info(
+                "[REST] %s: fetched %d bars successfully", key, len(df)
+            )
+
+            df = df.dropna(subset=["ts"]).sort_values("ts")
+            if df.empty:
+                raise ValueError("no price data returned")
+
+            indexed = df.set_index("ts")
+            tz = getattr(indexed.index, "tz", None)
+            if tz is not None:
+                indexed.index = indexed.index.tz_convert("UTC").tz_localize(None)
+
+            indexed["quote_volume"] = indexed["quote_vol"].fillna(0.0)
+            indexed["taker_buy_base"] = indexed["taker_base"].fillna(0.0)
+            indexed["taker_buy_quote"] = indexed["taker_quote"].fillna(0.0)
+            indexed["taker_sell_base"] = (
+                indexed["volume"].fillna(0.0) - indexed["taker_buy_base"]
+            ).clip(lower=0.0)
+            indexed["taker_sell_quote"] = (
+                indexed["quote_volume"].fillna(0.0) - indexed["taker_buy_quote"]
+            ).clip(lower=0.0)
+            indexed["number_of_trades"] = indexed["trades"].fillna(0.0)
+
+            price_data = indexed[
+                [
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "quote_volume",
+                    "taker_buy_base",
+                    "taker_buy_quote",
+                    "taker_sell_base",
+                    "taker_sell_quote",
+                    "number_of_trades",
+                ]
+            ].copy()
+            price_data.attrs["rest_refreshed_at"] = datetime.now(timezone.utc)
+
+            success = self._update_cache(
+                key,
+                price_data,
+                attempt_ts=attempt_ts,
+                prev_age=prev_age,
+            )
+            if success and not df.empty:
+                self.log.info(
+                    "CachedSignal updated for %s (REST fallback OK, rows=%d, last=%s)",
+                    key,
+                    len(df),
+                    df["ts"].iloc[-1],
+                )
+            return success
         except Exception as exc:
             self.log.error(
-                "[REST] %s: failed to fetch klines (%s: %s)",
-                symbol,
+                "[REST] %s: %s: %s",
+                key,
                 type(exc).__name__,
                 exc,
             )
@@ -841,115 +929,6 @@ class RealTimeSignalCache:
                 "REST fallback price fetch failed for %s: %s", key, exc, exc_info=True
             )
             return False
-
-        if not klines:
-            self._record_refresh_error(key, "no price data returned", attempt_ts=attempt_ts)
-            logger.debug("No price data available for %s via REST fallback", key)
-            return False
-
-        df = pd.DataFrame(
-            klines,
-            columns=[
-                "open_time",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "close_time",
-                "quote_vol",
-                "trades",
-                "taker_base",
-                "taker_quote",
-                "ignore",
-            ],
-        )
-        numeric_columns = [
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "quote_vol",
-            "trades",
-            "taker_base",
-            "taker_quote",
-        ]
-        for column in numeric_columns:
-            df[column] = pd.to_numeric(df[column], errors="coerce")
-
-        df["ts"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
-        df = df.dropna(subset=["ts"])
-        if df.empty:
-            self._record_refresh_error(key, "no price data returned", attempt_ts=attempt_ts)
-            logger.debug("REST fallback produced empty dataframe for %s", key)
-            return False
-
-        df = df.sort_values("ts").set_index("ts")
-        tz = getattr(df.index, "tz", None)
-        if tz is not None:
-            df.index = df.index.tz_convert("UTC").tz_localize(None)
-
-        df["quote_volume"] = df["quote_vol"].fillna(0.0)
-        df["taker_buy_base"] = df["taker_base"].fillna(0.0)
-        df["taker_buy_quote"] = df["taker_quote"].fillna(0.0)
-        df["taker_sell_base"] = (df["volume"].fillna(0.0) - df["taker_buy_base"]).clip(
-            lower=0.0
-        )
-        df["taker_sell_quote"] = (
-            df["quote_volume"].fillna(0.0) - df["taker_buy_quote"]
-        ).clip(lower=0.0)
-        df["number_of_trades"] = df["trades"].fillna(0.0)
-
-        price_data = df[
-            [
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "quote_volume",
-                "taker_buy_base",
-                "taker_buy_quote",
-                "taker_sell_base",
-                "taker_sell_quote",
-                "number_of_trades",
-            ]
-        ]
-        price_data.attrs["rest_refreshed_at"] = datetime.now(timezone.utc)
-
-        try:
-            hourly_klines = await fetch_klines_with_timeout(key, "1h", 2, timeout=5.0)
-        except Exception as exc:
-            logger.debug(
-                "Failed to fetch hourly klines for %s via REST fallback: %s",
-                key,
-                exc,
-                exc_info=True,
-            )
-        else:
-            hourly_df = _klines_to_dataframe(hourly_klines)
-            if not hourly_df.empty:
-                hourly_bar = hourly_df.tail(1)[
-                    ["open", "high", "low", "close", "volume", "quote_volume"]
-                ].copy()
-                try:
-                    hourly_bar.index = hourly_bar.index.floor("H")
-                except Exception:
-                    pass
-                price_data.attrs["hourly_bar"] = hourly_bar
-
-        success = self._update_cache(
-            key,
-            price_data,
-            attempt_ts=attempt_ts,
-            prev_age=prev_age,
-        )
-        if success:
-            self.log.info(
-                "CachedSignal updated for %s (REST fallback OK)", symbol
-            )
-        return success
 
     def _update_cache(
         self,
