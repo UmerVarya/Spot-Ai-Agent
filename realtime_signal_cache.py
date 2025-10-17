@@ -20,7 +20,14 @@ logger.propagate = True              # bubble up to root logger
 VERSION_TAG = "RTSC-PRIME-UMER-2"
 logger.warning("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
 
+# --- REST fallback imports (add near the other imports)
 import asyncio
+from datetime import datetime, timezone
+from binance.client import Client
+
+# One shared public client; no API key needed for public endpoints
+REST_CLIENT = Client("", "")
+
 import threading
 import time
 from collections import deque
@@ -28,33 +35,22 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
-from binance.client import Client
 
 from observability import log_event, record_metric
 
 PriceFetcher = Callable[[str], Awaitable[pd.DataFrame | None]]
 SignalEvaluator = Callable[..., Tuple[float, Optional[str], float, Optional[str]]]
 
-# One shared public REST client (no key needed for public data)
-try:
-    REST_CLIENT = Client("", "")
-except Exception as exc:  # pragma: no cover - defensive initialization
-    logger.warning("RTSC: REST client initialization failed: %s", exc, exc_info=True)
-    REST_CLIENT = None
-
-
-def _ensure_rest_client() -> Client:
-    global REST_CLIENT
-    if REST_CLIENT is None:
-        REST_CLIENT = Client("", "")
-    return REST_CLIENT
+# --- Thread-pool wrappers: blocking python-binance calls run off the event loop
 
 
 def _fetch_klines_sync(symbol: str, interval: str = "1m", limit: int = 200):
-    """Blocking REST call using python-binance."""
+    # Blocking call; reliable and fast
+    return REST_CLIENT.get_klines(symbol=symbol, interval=interval, limit=limit)
 
-    client = _ensure_rest_client()
-    return client.get_klines(symbol=symbol, interval=interval, limit=limit)
+
+def _get_ticker_sync(symbol: str):
+    return REST_CLIENT.get_symbol_ticker(symbol=symbol)
 
 
 async def fetch_klines_with_timeout(
@@ -63,18 +59,11 @@ async def fetch_klines_with_timeout(
     limit: int = 200,
     timeout: float = 10.0,
 ):
-    """Run the blocking call in a thread pool and wait with timeout."""
-
     loop = asyncio.get_running_loop()
     return await asyncio.wait_for(
         loop.run_in_executor(None, _fetch_klines_sync, symbol, interval, limit),
         timeout=timeout,
     )
-
-
-def _get_ticker_sync(symbol: str):
-    client = _ensure_rest_client()
-    return client.get_symbol_ticker(symbol=symbol)
 
 
 async def fetch_ticker_with_timeout(symbol: str, timeout: float = 5.0):
@@ -834,7 +823,7 @@ class RealTimeSignalCache:
         key, prev_age, attempt_ts = prepared
 
         try:
-            klines = await fetch_klines_with_timeout(key)
+            klines = await fetch_klines_with_timeout(key, "1m", 200, timeout=10.0)
         except Exception as exc:
             self._record_refresh_error(
                 key, f"REST fetch error: {exc}", attempt_ts=attempt_ts
@@ -849,11 +838,76 @@ class RealTimeSignalCache:
             logger.debug("No price data available for %s via REST fallback", key)
             return False
 
-        price_data = _klines_to_dataframe(klines)
-        if price_data.empty:
+        df = pd.DataFrame(
+            klines,
+            columns=[
+                "open_time",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "close_time",
+                "quote_vol",
+                "trades",
+                "taker_base",
+                "taker_quote",
+                "ignore",
+            ],
+        )
+        numeric_columns = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_vol",
+            "trades",
+            "taker_base",
+            "taker_quote",
+        ]
+        for column in numeric_columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+
+        df["ts"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+        df = df.dropna(subset=["ts"])
+        if df.empty:
             self._record_refresh_error(key, "no price data returned", attempt_ts=attempt_ts)
             logger.debug("REST fallback produced empty dataframe for %s", key)
             return False
+
+        df = df.sort_values("ts").set_index("ts")
+        tz = getattr(df.index, "tz", None)
+        if tz is not None:
+            df.index = df.index.tz_convert("UTC").tz_localize(None)
+
+        df["quote_volume"] = df["quote_vol"].fillna(0.0)
+        df["taker_buy_base"] = df["taker_base"].fillna(0.0)
+        df["taker_buy_quote"] = df["taker_quote"].fillna(0.0)
+        df["taker_sell_base"] = (df["volume"].fillna(0.0) - df["taker_buy_base"]).clip(
+            lower=0.0
+        )
+        df["taker_sell_quote"] = (
+            df["quote_volume"].fillna(0.0) - df["taker_buy_quote"]
+        ).clip(lower=0.0)
+        df["number_of_trades"] = df["trades"].fillna(0.0)
+
+        price_data = df[
+            [
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "quote_volume",
+                "taker_buy_base",
+                "taker_buy_quote",
+                "taker_sell_base",
+                "taker_sell_quote",
+                "number_of_trades",
+            ]
+        ]
+        price_data.attrs["rest_refreshed_at"] = datetime.now(timezone.utc)
 
         try:
             hourly_klines = await fetch_klines_with_timeout(key, "1h", 2, timeout=5.0)
