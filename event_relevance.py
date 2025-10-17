@@ -197,7 +197,7 @@ class EventRelevanceScorer:
         *,
         category_weights: Mapping[str, float] | None = None,
         halt_categories: Iterable[str] | None = None,
-        volatility_horizon: str = "6H",
+        volatility_horizon: str = "6h",
         baseline_window: str = "3D",
         quantile: float = 0.9,
         min_observations: int = 3,
@@ -214,10 +214,14 @@ class EventRelevanceScorer:
         else:
             self.halt_categories = {str(cat) for cat in halt_categories if cat}
 
+        if isinstance(volatility_horizon, str):
+            volatility_horizon = volatility_horizon.lower()
         self.volatility_horizon = pd.Timedelta(volatility_horizon)
         if self.volatility_horizon <= pd.Timedelta(0):
             raise ValueError("volatility_horizon must be positive")
 
+        if isinstance(baseline_window, str):
+            baseline_window = baseline_window.lower()
         self.baseline_window = pd.Timedelta(baseline_window)
         if self.baseline_window <= pd.Timedelta(0):
             raise ValueError("baseline_window must be positive")

@@ -82,7 +82,7 @@ def test_fit_updates_halt_categories_based_on_volatility():
         },
     ]
 
-    scorer = EventRelevanceScorer(min_observations=1, quantile=0.6, baseline_window="6H")
+    scorer = EventRelevanceScorer(min_observations=1, quantile=0.6, baseline_window="6h")
     scorer.fit(prices, events)
 
     assert scorer.halt_categories.issuperset({"macro:cpi", "crypto:exchange"})
