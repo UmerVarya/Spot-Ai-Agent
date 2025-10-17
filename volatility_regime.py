@@ -27,18 +27,76 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from typing import Iterable
+from typing import Iterable, Union
 
 
-def atr_percentile(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14, lookback: int = 100) -> float:
+def _ensure_series(data: Union[pd.Series, pd.DataFrame, Iterable[float]], name: str) -> pd.Series:
+    """Return ``data`` as a one-dimensional :class:`pandas.Series`.
+
+    The volatility routines historically expect simple Series inputs but in
+    practice upstream callers sometimes provide single-column DataFrames (for
+    instance when the OHLC data is sliced using ``df[["high"]]``).  Pandas will
+    happily propagate that two-dimensional shape which later confuses
+    operations such as :func:`pandas.concat` or arithmetic that assumes a
+    Series.  This helper normalises the inputs so the downstream logic always
+    receives a plain Series regardless of whether callers provided Series,
+    NumPy arrays or one-column DataFrames.
+
+    Parameters
+    ----------
+    data : pandas.Series or pandas.DataFrame or iterable
+        Input data that should represent a single column of values.
+    name : str
+        Name used when inferring the column from a DataFrame or when creating
+        a Series from an array-like object.
+
+    Returns
+    -------
+    pandas.Series
+        A view (where possible) of the original data as a one-dimensional
+        Series.
+
+    Raises
+    ------
+    ValueError
+        If a DataFrame with multiple columns is provided and the desired
+        column cannot be determined.
+    """
+
+    if isinstance(data, pd.Series):
+        return data
+    if isinstance(data, pd.DataFrame):
+        if name in data.columns:
+            return data[name]
+        if data.shape[1] == 1:
+            series = data.iloc[:, 0]
+            if series.name is None:
+                series = series.rename(name)
+            return series
+        raise ValueError(
+            f"DataFrame input for '{name}' must contain a '{name}' column or"
+            " have exactly one column"
+        )
+    return pd.Series(data, name=name)
+
+
+def atr_percentile(
+    high: Union[pd.Series, pd.DataFrame],
+    low: Union[pd.Series, pd.DataFrame],
+    close: Union[pd.Series, pd.DataFrame],
+    window: int = 14,
+    lookback: int = 100,
+) -> float:
     """
     Compute the percentile of the current ATR relative to its historical
     distribution.
 
     Parameters
     ----------
-    high, low, close : pandas.Series
-        Price series used to compute the Average True Range.
+    high, low, close : pandas.Series or pandas.DataFrame
+        Price series used to compute the Average True Range.  DataFrames must
+        either have a single column or contain a column matching the
+        respective name (``"high"``, ``"low"`` or ``"close"``).
     window : int, optional
         ATR lookback period (default 14).
     lookback : int, optional
@@ -54,9 +112,9 @@ def atr_percentile(high: pd.Series, low: pd.Series, close: pd.Series, window: in
     if len(close) < window + lookback:
         return float('nan')
     # True range calculation
-    high = high[-(lookback + window):].reset_index(drop=True)
-    low = low[-(lookback + window):].reset_index(drop=True)
-    close = close[-(lookback + window):].reset_index(drop=True)
+    high = _ensure_series(high, "high")[-(lookback + window):].reset_index(drop=True)
+    low = _ensure_series(low, "low")[-(lookback + window):].reset_index(drop=True)
+    close = _ensure_series(close, "close")[-(lookback + window):].reset_index(drop=True)
     tr = pd.concat([
         high - low,
         (high - close.shift()).abs(),
