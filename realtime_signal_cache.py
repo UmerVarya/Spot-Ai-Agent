@@ -823,8 +823,17 @@ class RealTimeSignalCache:
         key, prev_age, attempt_ts = prepared
 
         try:
-            klines = await fetch_klines_with_timeout(key, "1m", 200, timeout=10.0)
+            klines = await fetch_klines_with_timeout(key, "1m", 200, timeout=15.0)
+            self.log.info(
+                "[REST] %s: fetched %d bars successfully", symbol, len(klines)
+            )
         except Exception as exc:
+            self.log.error(
+                "[REST] %s: failed to fetch klines (%s: %s)",
+                symbol,
+                type(exc).__name__,
+                exc,
+            )
             self._record_refresh_error(
                 key, f"REST fetch error: {exc}", attempt_ts=attempt_ts
             )
@@ -937,7 +946,9 @@ class RealTimeSignalCache:
             prev_age=prev_age,
         )
         if success:
-            self.log.info("CachedSignal updated for %s (REST fallback OK)", key)
+            self.log.info(
+                "CachedSignal updated for %s (REST fallback OK)", symbol
+            )
         return success
 
     def _update_cache(
