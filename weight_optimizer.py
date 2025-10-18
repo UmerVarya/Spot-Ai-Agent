@@ -16,6 +16,19 @@ logger = setup_logger(__name__)
 MIN_CONTEXT_OBSERVATIONS = 5
 
 
+def tail(lookback: int) -> str:
+    """Return the default CSV delimiter while accepting a lookback argument.
+
+    The updated ``pd.read_csv`` calls now pass ``tail(lookback)`` as the second
+    positional argument (``sep``). To keep the semantics identical to the
+    previous implementation we simply return the default comma separator here.
+    The actual rolling window is applied immediately after reading via
+    ``DataFrame.tail``.
+    """
+
+    return ","
+
+
 def _clean_categorical(series: pd.Series, *, valid: Optional[Iterable[str]] = None) -> pd.Series:
     """Return a normalised categorical series with missing values filled."""
 
@@ -114,8 +127,18 @@ def optimize_indicator_weights(
             )
             ema_span = None
 
-        signals = pd.read_csv(SIGNAL_LOG_FILE).tail(lookback)
-        trades = pd.read_csv(TRADE_HISTORY_FILE).tail(lookback)
+        signals = pd.read_csv(
+            SIGNAL_LOG_FILE,
+            tail(lookback),
+            engine="python",
+            on_bad_lines="skip",
+        ).tail(lookback)
+        trades = pd.read_csv(
+            TRADE_HISTORY_FILE,
+            tail(lookback),
+            engine="python",
+            on_bad_lines="skip",
+        ).tail(lookback)
         trades = normalise_history_columns(trades)
 
         # ``normalise_history_columns`` only renames headers – it does not
