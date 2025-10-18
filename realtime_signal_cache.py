@@ -658,7 +658,7 @@ class RealTimeSignalCache:
             key,
         )
         try:
-            return bool(asyncio.run(self._refresh_symbol(key)))
+            return bool(asyncio.run(self._refresh_symbol(key, force_rest=False)))
         except Exception:
             logger.exception("RTSC: force refresh for %s failed via synchronous path", key)
             return False
@@ -795,12 +795,15 @@ class RealTimeSignalCache:
             return None
         return key, prev_age, attempt_ts
 
-    async def _refresh_symbol(self, symbol: str) -> bool:
+    async def _refresh_symbol(
+        self, symbol: str, *, force_rest: Optional[bool] = None
+    ) -> bool:
         """Refresh a single symbol and return whether it succeeded."""
 
         # Prefer REST while warming up; disable via RTSC_FORCE_REST=0
-        if os.getenv("RTSC_FORCE_REST", "1") == "1":
-            return await self._refresh_symbol_rest(symbol)
+        if force_rest is not False:
+            if force_rest is True or os.getenv("RTSC_FORCE_REST", "1") == "1":
+                return await self._refresh_symbol_rest(symbol)
 
         prepared = self._prepare_refresh(symbol)
         if prepared is None:
