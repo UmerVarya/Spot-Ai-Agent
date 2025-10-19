@@ -10,8 +10,20 @@ deriving indicators right when an order needs to be submitted.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
+import os
+import threading
+import time
+from collections import deque
 from concurrent.futures import TimeoutError as FutureTimeout
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+import pandas as pd
+from binance.client import Client
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)        # make it chatty
@@ -21,10 +33,6 @@ VERSION_TAG = "RTSC-PRIME-UMER-2"
 logger.warning("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
 
 # --- REST fallback imports / banner ---
-import os, asyncio
-from datetime import datetime, timezone
-import pandas as pd
-from binance.client import Client
 
 # One shared public client; no API key needed for public endpoints
 REST_CLIENT = Client("", "")
@@ -33,11 +41,203 @@ print(
     f"RTSC INIT v2025-10-17 file={__file__} loaded at {datetime.now(timezone.utc).isoformat()}"
 )
 
-import threading
-import time
-from collections import deque
-from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+# --- BEGIN: RTSC warmup/refill core integration --------------------------------
+
+# ===== Config (env tunable; safe defaults) =====
+READY_MIN_FRACTION  = float(os.getenv("READY_MIN_FRACTION", "0.80"))   # % of symbols with fresh data
+WARMUP_MAX_SECONDS  = int(os.getenv("WARMUP_MAX_SECONDS", "90"))        # watchdog ceiling
+PRIME_LIMIT_MINUTES = int(os.getenv("PRIME_LIMIT_MINUTES", "300"))      # bars for initial prime
+FRESHNESS_SECONDS   = int(os.getenv("FRESHNESS_SECONDS", "120"))        # what is considered "fresh"
+USE_WS_PRICES       = os.getenv("USE_WS_PRICES", "1").lower() in ("1","true","yes")
+ENABLE_PRIME        = os.getenv("ENABLE_RTSCC_PRIME", "1").lower() in ("1","true","yes")
+ENABLE_REFRESH      = os.getenv("ENABLE_RTSCC_REFRESH", "1").lower() in ("1","true","yes")
+
+# ===== Optional python-binance fallback =====
+def _binance_client_from_env():
+    try:
+        from binance.client import Client
+    except Exception:
+        return None
+    ak = os.getenv("BINANCE_API_KEY") or os.getenv("BINANCE_KEY")
+    sk = os.getenv("BINANCE_API_SECRET") or os.getenv("BINANCE_SECRET")
+    if not ak or not sk:
+        return None
+    try:
+        return Client(api_key=ak, api_secret=sk)
+    except Exception:
+        return None
+
+
+def _binance_fetch_1m(client, symbol: str, limit: int):
+    try:
+        interval = getattr(client, "KLINE_INTERVAL_1MINUTE", "1m")
+        return client.get_klines(symbol=symbol, interval=interval, limit=int(limit)) or []
+    except Exception:
+        return []
+
+
+# ===== General helpers =====
+def _get_logger(obj):
+    lg = getattr(obj, "log", None)
+    return lg
+
+
+def _log(obj, lvl, msg, *args):
+    lg = _get_logger(obj)
+    try:
+        if lg is not None:
+            getattr(lg, lvl, lg.info)(msg, *args)
+    except Exception:
+        # never let logging crash the cache
+        pass
+
+
+def _iter_symbols(obj) -> list[str]:
+    syms = getattr(obj, "symbols", [])
+    if callable(syms):
+        try:
+            syms = syms()
+        except Exception:
+            syms = []
+    return list(syms or [])
+
+
+def _get_rest(obj):
+    # try common attribute names used in the project
+    for attr in ("rest", "_price_fetcher", "rest_client", "binance", "client"):
+        c = getattr(obj, attr, None)
+        if c is not None:
+            if callable(c) and not any(
+                hasattr(c, candidate)
+                for candidate in (
+                    "get_klines",
+                    "fetch_klines",
+                    "get_price_data",
+                    "get_candles",
+                    "get_price_data_async",
+                    "get_candles_async",
+                )
+            ):
+                # plain callables (like coroutine fetchers) are unlikely to expose klines APIs
+                continue
+            return c
+    return None
+
+
+def _fresh_fraction(obj) -> float:
+    now = time.time()
+    fresh = 0
+    syms = _iter_symbols(obj)
+    last = getattr(obj, "_last_update_ts", {})
+    for s in syms:
+        if now - last.get(s, 0) <= FRESHNESS_SECONDS:
+            fresh += 1
+    return fresh / max(1, len(syms))
+
+
+def _run_async_allow_nested(coro):
+    """
+    Run a coroutine even if there is already a running loop.
+    We apply nest_asyncio if needed to avoid 'event loop is already running'.
+    """
+
+    try:
+        import nest_asyncio
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        nest_asyncio.apply()
+        return loop.run_until_complete(coro)
+    except Exception:
+        # last resort: create and close a private loop
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+
+def _fetch_candles(rest, symbol: str, limit: int):
+    """
+    Try the project's fetchers first (sync/async in several spellings).
+    Fall back to python-binance REST if needed.
+    """
+
+    candidates = [
+        ("get_klines", False),
+        ("fetch_klines", False),
+        ("get_price_data", False),
+        ("get_candles", False),
+        ("get_price_data_async", True),
+        ("get_candles_async", True),
+    ]
+
+    now = int(time.time())
+    start_s = now - limit * 60
+    start_ms, end_ms = start_s * 1000, now * 1000
+
+    for name, is_async in candidates:
+        fn = getattr(rest, name, None)
+        if not fn:
+            continue
+        try:
+            sig = inspect.signature(fn)
+            params = set(sig.parameters.keys())
+            kwargs: Dict[str, Any] = {}
+
+            if "symbol" in params:
+                kwargs["symbol"] = symbol
+            elif "symbols" in params:
+                kwargs["symbols"] = [symbol]
+
+            if "interval" in params:
+                kwargs["interval"] = "1m"
+            elif "timeframe" in params:
+                kwargs["timeframe"] = "1m"
+
+            if "limit" in params:
+                kwargs["limit"] = int(limit)
+            elif "lookback" in params:
+                kwargs["lookback"] = int(limit)
+            elif "bars" in params:
+                kwargs["bars"] = int(limit)
+
+            if "start_ts" in params and "end_ts" in params:
+                kwargs["start_ts"], kwargs["end_ts"] = start_ms, end_ms
+            elif "start_time" in params and "end_time" in params:
+                kwargs["start_time"], kwargs["end_time"] = start_ms, end_ms
+
+            if "timeout" in params:
+                kwargs["timeout"] = 15
+
+            if is_async or inspect.iscoroutinefunction(fn):
+                candles = _run_async_allow_nested(fn(**kwargs))
+            else:
+                candles = fn(**kwargs)
+
+            if isinstance(candles, dict):
+                candles = candles.get(symbol) or candles.get(symbol.upper()) or candles.get(symbol.lower())
+
+            if candles and len(candles) > 0:
+                return candles
+        except Exception:
+            # try next candidate
+            continue
+
+    # hard fallback
+    client = _binance_client_from_env()
+    if client is not None:
+        candles = _binance_fetch_1m(client, symbol, limit)
+        if candles:
+            return candles
+
+    return []
+
+
+# --- END: RTSC warmup/refill core integration helpers --------------------------
 
 from observability import log_event, record_metric
 
@@ -212,7 +412,7 @@ class RealTimeSignalCache:
         self._max_concurrency = int(max_concurrency)
         self._symbols: set[str] = set()
         self._cache: Dict[str, CachedSignal] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
         self._async_wake: Optional[asyncio.Event] = None
@@ -237,6 +437,31 @@ class RealTimeSignalCache:
         self._stream_lock = threading.Lock()
         self._ws_bridge: Optional[object] = None
         self._ws_callback_registered = False
+        self.rest = getattr(self, "rest", REST_CLIENT)
+
+        # --- warmup/refill integration state ---
+        self._last_eval: Dict[str, Any] = getattr(self, "_last_eval", {})
+        self._last_update_ts: Dict[str, float] = getattr(self, "_last_update_ts", {})
+        self._ready = getattr(self, "_ready", False)
+
+        evaluator_ref = getattr(self, "evaluator", None)
+        if evaluator_ref is not None and not callable(evaluator_ref):
+            self._evaluator = evaluator_ref
+
+        self._enable_prime = ENABLE_PRIME
+        self._enable_refresh = ENABLE_REFRESH
+
+        _log(
+            self,
+            "info",
+            "RTSC core warmup enabled (prime=%s, refresh=%s, ws=%s | ready>=%.0f%%, ceil=%ss, bars=%dm)",
+            self._enable_prime,
+            self._enable_refresh,
+            USE_WS_PRICES,
+            READY_MIN_FRACTION * 100,
+            WARMUP_MAX_SECONDS,
+            PRIME_LIMIT_MINUTES,
+        )
 
     @property
     def stale_after(self) -> float:
@@ -341,6 +566,141 @@ class RealTimeSignalCache:
                         "RTSC: failed to unregister WS callback", exc_info=True
                     )
 
+    # ---------- Public API you’re adding ----------
+
+    def prime(self):
+        """One-shot initial prime across symbols using REST (with project-first, then fallback)."""
+
+        if not self._enable_prime:
+            _log(self, "info", "prime(): disabled by config.")
+            return
+
+        rest = _get_rest(self)
+        if rest is None:
+            _log(self, "error", "prime(): no REST/price_fetcher found; skipping.")
+            return
+
+        for _ in range(60):  # up to 30s
+            evaluator = getattr(self, "_evaluator", None)
+            if evaluator is None:
+                time.sleep(0.5)
+                continue
+            if hasattr(evaluator, "evaluate_from_klines") or callable(evaluator):
+                break
+            time.sleep(0.5)
+
+        evaluator = getattr(self, "_evaluator", None)
+        if evaluator is None:
+            _log(self, "error", "prime(): evaluator not ready after 30s; skipping prime.")
+            return
+
+        for s in _iter_symbols(self):
+            try:
+                candles = _fetch_candles(rest, s, PRIME_LIMIT_MINUTES)
+                if not candles or len(candles) < 50:
+                    _log(
+                        self,
+                        "warning",
+                        "prime(): insufficient candles for %s (got %s).",
+                        s,
+                        len(candles) if candles else 0,
+                    )
+                    continue
+
+                if hasattr(evaluator, "evaluate_from_klines"):
+                    ev = evaluator.evaluate_from_klines(s, candles)  # type: ignore[attr-defined]
+                    with self._lock:
+                        self._last_eval[s] = ev
+                        self._last_update_ts[s] = time.time()
+                else:
+                    if not self._evaluate_candles_sync(s, candles):
+                        continue
+                time.sleep(0.02)
+            except Exception as e:  # pragma: no cover - defensive logging
+                _log(self, "warning", "prime(): error for %s: %s", s, e)
+                time.sleep(0.02)
+
+        _log(self, "info", "prime(): completed. Fresh=%.0f%%", _fresh_fraction(self) * 100)
+
+    def background_refresh_until_ready(self):
+        """Keep fetching short windows until READY_MIN_FRACTION is reached."""
+
+        if not self._enable_refresh:
+            _log(self, "info", "refresh(): disabled by config.")
+            return
+
+        rest = _get_rest(self)
+        if rest is None:
+            _log(self, "error", "refresh(): no REST/price_fetcher; disabled.")
+            return
+
+        evaluator = getattr(self, "_evaluator", None)
+        if evaluator is None:
+            _log(self, "error", "refresh(): evaluator missing; disabled.")
+            return
+
+        while not self.is_ready():
+            for s in _iter_symbols(self):
+                try:
+                    candles = _fetch_candles(rest, s, 120)
+                    if not candles:
+                        continue
+                    if hasattr(evaluator, "evaluate_from_klines"):
+                        ev = evaluator.evaluate_from_klines(s, candles)  # type: ignore[attr-defined]
+                        with self._lock:
+                            self._last_eval[s] = ev
+                            self._last_update_ts[s] = time.time()
+                    else:
+                        self._evaluate_candles_sync(s, candles)
+                except Exception:
+                    pass
+                time.sleep(0.01)
+
+            fraction = _fresh_fraction(self)
+            if fraction >= READY_MIN_FRACTION:
+                self.mark_ready()
+                _log(
+                    self,
+                    "info",
+                    "refresh(): threshold met (%.0f%% fresh).",
+                    fraction * 100,
+                )
+                break
+
+            time.sleep(0.5)
+
+    def warmup_watchdog(self):
+        """Ensure we proceed after a ceiling even if freshness is not met."""
+
+        start = time.time()
+        while not self.is_ready():
+            frac = _fresh_fraction(self)
+            elapsed = time.time() - start
+            if frac >= READY_MIN_FRACTION:
+                _log(self, "info", "watchdog: threshold met (%.0f%% fresh).", frac * 100)
+                self.mark_ready()
+                break
+            if elapsed >= WARMUP_MAX_SECONDS:
+                _log(
+                    self,
+                    "warning",
+                    "watchdog: ceiling reached (%ds). Proceeding with %.0f%% fresh.",
+                    WARMUP_MAX_SECONDS,
+                    frac * 100,
+                )
+                self.mark_ready()
+                break
+            time.sleep(1.0)
+
+    # ---------- Small adapters to fit the above ----------
+    # If your class already has these, keep your versions.
+
+    def is_ready(self) -> bool:
+        return bool(getattr(self, "_ready", False))
+
+    def mark_ready(self):
+        self._ready = True
+
     def _update_stream_symbols(self) -> None:
         if not self.use_streams:
             return
@@ -367,6 +727,7 @@ class RealTimeSignalCache:
             return
         self._stop_event.clear()
         self._wake_event.clear()
+        self._ready = False
         try:
             loop = asyncio.get_running_loop()
             logger.info("RTSC: starting worker on running loop")
@@ -379,6 +740,20 @@ class RealTimeSignalCache:
 
             self._thread = threading.Thread(target=runner, daemon=True, name="rtsc-worker")
             self._thread.start()
+
+        if self._enable_prime:
+            threading.Thread(target=self.prime, daemon=True, name="rtsc-prime").start()
+        if self._enable_refresh:
+            threading.Thread(
+                target=self.background_refresh_until_ready,
+                daemon=True,
+                name="rtsc-refresh",
+            ).start()
+        threading.Thread(
+            target=self.warmup_watchdog,
+            daemon=True,
+            name="rtsc-watchdog",
+        ).start()
 
     def stop(self) -> None:
         """Signal the worker to stop and wait briefly for it to exit."""
@@ -394,6 +769,7 @@ class RealTimeSignalCache:
         self._bg_task = None
         self._thread = None
         self._loop = None
+        self._ready = False
 
     def update_universe(self, symbols: Iterable[str]) -> None:
         """Update the symbol universe tracked by the cache."""
@@ -415,6 +791,8 @@ class RealTimeSignalCache:
                 self._symbol_last_error.pop(key, None)
                 self._primed_symbols.discard(key)
                 self._priority_symbols.discard(key)
+                self._last_eval.pop(key, None)
+                self._last_update_ts.pop(key, None)
             now = time.time()
             for key in added:
                 self._symbol_added_at[key] = now
@@ -515,6 +893,29 @@ class RealTimeSignalCache:
             logger.debug("Cached signal for %s is stale (age=%.2fs).", key, entry.age())
             return None
         return entry
+
+    def _evaluate_candles_sync(
+        self, symbol: str, candles: Sequence[Sequence[object]]
+    ) -> bool:
+        """Evaluate ``candles`` synchronously and update internal cache state."""
+
+        if isinstance(candles, pd.DataFrame):
+            df = candles.copy()
+        else:
+            df = _klines_to_dataframe(candles)
+        if df.empty:
+            return False
+        key = self._key(symbol)
+        with self._lock:
+            existing = self._cache.get(key)
+        prev_age = existing.age() if existing is not None else None
+        attempt_ts = time.time()
+        return self._update_cache(
+            key,
+            df,
+            attempt_ts=attempt_ts,
+            prev_age=prev_age,
+        )
 
     def symbols(self) -> Sequence[str]:
         """Return the current symbol universe snapshot."""
@@ -973,6 +1374,8 @@ class RealTimeSignalCache:
             self._cache[key] = cached
             self._symbol_last_error.pop(key, None)
             self._primed_symbols.add(key)
+            self._last_eval[key] = cached
+            self._last_update_ts[key] = cached.updated_at
         logger.info(
             "RTSC: refreshed %s (prev_age=%s)",
             key,
