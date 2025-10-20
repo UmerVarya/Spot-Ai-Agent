@@ -1,5 +1,6 @@
 import asyncio
 import time
+from types import MethodType
 from typing import Awaitable, Callable, Dict, Iterable, Optional, Tuple
 
 import pandas as pd
@@ -174,6 +175,32 @@ def test_force_refresh_without_worker_primes_cache() -> None:
     cached = cache.get("BTCUSDT")
     assert cached is not None
     assert calls == ["BTCUSDT"]
+
+
+def test_refresh_symbol_force_rest_false_bypasses_global(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("realtime_signal_cache.RTSC_FORCE_REST", True)
+
+    rest_calls: list[str] = []
+    fetch_calls: list[str] = []
+
+    async def fetcher(symbol: str) -> Optional[pd.DataFrame]:
+        fetch_calls.append(symbol)
+        await asyncio.sleep(0)
+        return pd.DataFrame({"close": [1.0]}, index=[pd.Timestamp.utcnow()])
+
+    async def rest_fetch(self: RealTimeSignalCache, symbol: str) -> bool:
+        rest_calls.append(symbol)
+        return False
+
+    cache = _build_cache(fetcher=fetcher)
+    cache.update_universe(["BTCUSDT"])
+    cache._refresh_symbol_via_rest = MethodType(rest_fetch, cache)
+
+    success = asyncio.run(cache._refresh_symbol("BTCUSDT", force_rest=False))
+
+    assert success is True
+    assert fetch_calls == ["BTCUSDT"]
+    assert rest_calls == []
 
 
 def test_force_refresh_while_worker_running() -> None:
