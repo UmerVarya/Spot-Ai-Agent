@@ -238,3 +238,42 @@ def test_stream_enable_registers_and_updates_symbols() -> None:
     assert bridge.symbols == ["BTCUSDT", "ETHUSDT"]
     cache.disable_streams()
     assert bridge.callbacks == []
+
+
+def test_on_ws_bar_close_updates_last_timestamp() -> None:
+    cache = _build_cache(use_streams=True)
+    cache.update_universe(["BTCUSDT"])
+    close_ts_ms = 1_600_000_000_000
+    cache.on_ws_bar_close("BTCUSDT", close_ts_ms)
+    stored = cache._last_update_ts.get("BTCUSDT")
+    assert stored is not None
+    assert stored == pytest.approx(close_ts_ms / 1000.0)
+
+
+def test_handle_ws_update_triggers_bar_close_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
+    cache = _build_cache(use_streams=True)
+    cache.update_universe(["ETHUSDT"])
+
+    observed: Dict[str, Tuple[str, Optional[int]]] = {}
+
+    def record_bar_close(symbol: str, close_ts_ms: Optional[int]) -> None:
+        observed["bar_close"] = (symbol, close_ts_ms)
+
+    scheduled: list[str] = []
+
+    def record_refresh(symbol: str) -> None:
+        scheduled.append(symbol)
+
+    monkeypatch.setattr(cache, "on_ws_bar_close", record_bar_close)
+    monkeypatch.setattr(cache, "schedule_refresh", record_refresh)
+
+    def fake_create_task(coro):
+        asyncio.run(coro)
+        return object()
+
+    monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+
+    cache.handle_ws_update("ETHUSDT", "kline", {"x": True, "T": 1_700_000_000_000})
+
+    assert observed["bar_close"] == ("ETHUSDT", 1_700_000_000_000)
+    assert scheduled == ["ETHUSDT"]
