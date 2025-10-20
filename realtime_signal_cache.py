@@ -931,7 +931,7 @@ class RealTimeSignalCache:
         """Request an immediate refresh for ``symbol`` when possible."""
 
         logger.info(
-            f"[DEBUG] RTSC.schedule_refresh called for {symbol}, FORCE_REST={RTSC_FORCE_REST}"
+            f"🧠 [DEBUG] schedule_refresh called for {symbol}, FORCE_REST={RTSC_FORCE_REST}"
         )
         key = self._key(symbol)
         with self._lock:
@@ -1335,6 +1335,7 @@ class RealTimeSignalCache:
     async def _refresh_symbol_via_rest(self, symbol: str) -> bool:
         """Refresh ``symbol`` using REST and update the cache with explicit logging."""
 
+        logger.info(f"🚀 [DEBUG] Entering REST fallback for {symbol}")
         prepared = self._prepare_refresh(symbol)
         if prepared is None:
             return False
