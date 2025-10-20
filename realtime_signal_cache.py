@@ -35,7 +35,10 @@ logger.warning("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
 # --- REST fallback imports / banner ---
 
 # One shared public client; no API key needed for public endpoints
-REST_CLIENT = Client("", "")
+try:
+    REST_CLIENT = Client("", "")
+except Exception:  # pragma: no cover - network dependent
+    REST_CLIENT = None
 
 print(
     f"RTSC INIT v2025-10-17 file={__file__} loaded at {datetime.now(timezone.utc).isoformat()}"
@@ -250,10 +253,14 @@ SignalEvaluator = Callable[..., Tuple[float, Optional[str], float, Optional[str]
 def _fetch_klines_sync(symbol: str, interval: str = "1m", limit: int = 200):
     """Blocking REST call using python-binance"""
 
+    if REST_CLIENT is None:
+        raise RuntimeError("REST client unavailable")
     return REST_CLIENT.get_klines(symbol=symbol, interval=interval, limit=limit)
 
 
 def _get_ticker_sync(symbol: str):
+    if REST_CLIENT is None:
+        raise RuntimeError("REST client unavailable")
     return REST_CLIENT.get_symbol_ticker(symbol=symbol)
 
 
@@ -854,8 +861,46 @@ class RealTimeSignalCache:
             closed = False
         if not closed:
             return
-        log_event(logger, "ws_bar_close", symbol=self._key(symbol), event=event)
-        self.schedule_refresh(symbol)
+        close_raw = data.get("T") or data.get("t")
+        try:
+            close_ts_ms = int(close_raw)
+        except (TypeError, ValueError):
+            close_ts_ms = None
+        self.on_ws_bar_close(symbol, close_ts_ms)
+
+        async def _schedule_refresh() -> None:
+            self.schedule_refresh(symbol)
+
+        try:
+            asyncio.create_task(_schedule_refresh())
+        except RuntimeError:
+            self.schedule_refresh(symbol)
+
+    def on_ws_bar_close(self, symbol: str, close_ts_ms: Optional[int]) -> None:
+        """Record metadata for a closed bar received from the WebSocket."""
+
+        key = self._key(symbol)
+        with self._lock:
+            if key not in self._symbols:
+                return
+            timestamp: Optional[float]
+            if close_ts_ms is None:
+                timestamp = None
+            else:
+                try:
+                    timestamp = float(close_ts_ms) / 1000.0
+                except (TypeError, ValueError):
+                    timestamp = None
+            if timestamp is not None:
+                previous = self._last_update_ts.get(key)
+                if previous is None or timestamp >= previous:
+                    self._last_update_ts[key] = timestamp
+        log_event(
+            logger,
+            "ws_bar_close",
+            symbol=key,
+            close_ts_ms=close_ts_ms,
+        )
 
     def schedule_refresh(self, symbol: str) -> None:
         """Request an immediate refresh for ``symbol`` when possible."""
@@ -1040,24 +1085,27 @@ class RealTimeSignalCache:
                 logger.exception("RTSC: force refresh for %s failed on worker loop", key)
                 return False
 
-        logger.info(
-            "RTSC: force-refresh running %s on temporary event loop via REST fallback",
-            key,
-        )
-        try:
-            rest_success = bool(asyncio.run(self._refresh_symbol_rest(key)))
-        except Exception:
-            logger.exception(
-                "RTSC: REST fallback force refresh for %s failed", key
+        rest_available = REST_CLIENT is not None
+        rest_success = False
+        if rest_available:
+            logger.info(
+                "RTSC: force-refresh running %s on temporary event loop via REST fallback",
+                key,
             )
-            rest_success = False
+            try:
+                rest_success = bool(asyncio.run(self._refresh_symbol_rest(key)))
+            except Exception:
+                logger.exception(
+                    "RTSC: REST fallback force refresh for %s failed", key
+                )
         if rest_success:
             return True
 
-        logger.info(
-            "RTSC: REST fallback failed for %s; retrying with configured fetcher",
-            key,
-        )
+        if rest_available:
+            logger.info(
+                "RTSC: REST fallback failed for %s; retrying with configured fetcher",
+                key,
+            )
         try:
             return bool(asyncio.run(self._refresh_symbol(key, force_rest=False)))
         except Exception:
@@ -1202,7 +1250,8 @@ class RealTimeSignalCache:
         """Refresh a single symbol and return whether it succeeded."""
 
         # Prefer REST while warming up; disable via RTSC_FORCE_REST=0
-        if force_rest is not False:
+        rest_available = REST_CLIENT is not None
+        if force_rest is not False and rest_available:
             if force_rest is True or os.getenv("RTSC_FORCE_REST", "1") == "1":
                 return await self._refresh_symbol_rest(symbol)
 
@@ -1232,6 +1281,9 @@ class RealTimeSignalCache:
 
     async def _refresh_symbol_rest(self, symbol: str) -> bool:
         """REST fallback refresh using python-binance"""
+
+        if REST_CLIENT is None:
+            return False
 
         prepared = self._prepare_refresh(symbol)
         if prepared is None:
