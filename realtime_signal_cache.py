@@ -930,6 +930,9 @@ class RealTimeSignalCache:
     def schedule_refresh(self, symbol: str) -> None:
         """Request an immediate refresh for ``symbol`` when possible."""
 
+        logger.info(
+            f"[DEBUG] RTSC.schedule_refresh called for {symbol}, FORCE_REST={RTSC_FORCE_REST}"
+        )
         key = self._key(symbol)
         with self._lock:
             if key not in self._symbols:
@@ -1354,6 +1357,7 @@ class RealTimeSignalCache:
             if df is None or df.empty:
                 raise RuntimeError("empty DataFrame from REST")
 
+            logger.info(f"[DEBUG] REST fetched df shape={df.shape} for {symbol}")
             df.attrs["rest_refreshed_at"] = start_dt
             success = self._update_cache(
                 key,
@@ -1362,6 +1366,7 @@ class RealTimeSignalCache:
                 prev_age=prev_age,
             )
 
+            logger.info(f"[DEBUG] Cache successfully updated for {symbol} via REST")
             duration_ms = (datetime.now(timezone.utc) - start_dt).total_seconds() * 1000.0
             last_idx = df.index[-1] if len(df.index) else "n/a"
             if success:
