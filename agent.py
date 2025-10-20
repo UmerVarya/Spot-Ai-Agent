@@ -396,15 +396,22 @@ def run_agent_loop() -> None:
                 _mark_ws_activity()
                 process_live_kline(symbol, frame, payload)
                 if payload.get("x") and _should_emit_close(symbol, payload):
+                    close_ts = payload.get("T") or payload.get("t")
                     log_event(
                         logger,
                         "bar_close",
                         symbol=symbol,
                         interval=frame,
-                        close_time=payload.get("T") or payload.get("t"),
+                        close_time=close_ts,
                         close_price=payload.get("c"),
                     )
-                    signal_cache.schedule_refresh(symbol)
+                    signal_cache.on_ws_bar_close(symbol, close_ts)
+                    try:
+                        asyncio.create_task(
+                            asyncio.to_thread(signal_cache.schedule_refresh, symbol)
+                        )
+                    except RuntimeError:
+                        signal_cache.schedule_refresh(symbol)
             except Exception:
                 logger.debug("WS kline handler error for %s", symbol, exc_info=True)
 

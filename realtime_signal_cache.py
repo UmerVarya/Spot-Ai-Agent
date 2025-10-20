@@ -893,17 +893,39 @@ class RealTimeSignalCache:
             closed = False
         if not closed:
             return
-        key = self._key(symbol)
         close_ts = data.get("T") or data.get("t") or data.get("closeTime")
-        if close_ts is not None:
+        self.on_ws_bar_close(symbol, close_ts)
+        try:
+            asyncio.create_task(
+                asyncio.to_thread(self.schedule_refresh, symbol)
+            )
+        except RuntimeError:
+            self.schedule_refresh(symbol)
+
+    def on_ws_bar_close(self, symbol: str, close_ts_ms: object | None) -> None:
+        """Record a WebSocket bar close for ``symbol``."""
+
+        if not self.use_streams:
+            return
+        if not symbol:
+            return
+        key = self._key(symbol)
+        timestamp = None
+        if close_ts_ms is not None:
             try:
-                self._last_ws_ts[key] = float(close_ts) / 1000.0
+                timestamp = float(close_ts_ms) / 1000.0
             except Exception:
-                self._last_ws_ts[key] = time.time()
-        else:
-            self._last_ws_ts[key] = time.time()
-        log_event(logger, "ws_bar_close", symbol=key, event=event)
-        self.schedule_refresh(symbol)
+                timestamp = None
+        if timestamp is None:
+            timestamp = time.time()
+        self._last_ws_ts[key] = float(timestamp)
+        log_event(
+            logger,
+            "ws_bar_close",
+            symbol=key,
+            ws_event="kline",
+            close_ts_ms=close_ts_ms,
+        )
 
     def schedule_refresh(self, symbol: str) -> None:
         """Request an immediate refresh for ``symbol`` when possible."""

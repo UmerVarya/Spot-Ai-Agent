@@ -206,6 +206,16 @@ def test_schedule_refresh_respects_debounce() -> None:
     assert len(cache._priority_symbols) == 1
 
 
+def test_on_ws_bar_close_records_timestamp() -> None:
+    cache = _build_cache(use_streams=True)
+    cache.update_universe(["BTCUSDT"])
+    close_ts_ms = 1_700_000_000_000
+    cache.on_ws_bar_close("BTCUSDT", close_ts_ms)
+    recorded = cache._last_ws_ts.get("BTCUSDT")
+    assert recorded is not None
+    assert recorded == pytest.approx(close_ts_ms / 1000.0)
+
+
 def test_circuit_breaker_trips_after_errors() -> None:
     cache = _build_cache()
     cache.configure_runtime(
