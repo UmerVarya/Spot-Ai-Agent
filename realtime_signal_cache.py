@@ -1291,7 +1291,7 @@ class RealTimeSignalCache:
 
         key = self._key(symbol)
 
-        rest_forced = force_rest is True or RTSC_FORCE_REST
+        rest_forced = RTSC_FORCE_REST if force_rest is None else bool(force_rest)
         rest_due_to_stale = False
         if not rest_forced and force_rest is not False:
             rest_due_to_stale = self._ws_is_stale(key)
