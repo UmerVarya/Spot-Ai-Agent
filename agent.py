@@ -801,6 +801,9 @@ def run_agent_loop() -> None:
                 ws_bridge.update_symbols(sorted(ws_symbols))
             signal_cache.update_universe(symbols_to_fetch)
             signal_cache.start()
+            if ws_bridge is None:
+                for symbol in symbols_to_fetch:
+                    signal_cache.schedule_refresh(symbol)
             if signal_cache.circuit_breaker_active():
                 logger.warning(
                     "Signal evaluator circuit breaker active; skipping trade evaluation this cycle."
