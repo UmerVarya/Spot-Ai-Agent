@@ -23,7 +23,20 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
-from binance.client import Client
+
+# python-binance (a.k.a binance-connector legacy) exceptions can vary by version.
+# Import defensively so minor packaging changes do not break the cache module.
+try:  # pragma: no cover - import guard for optional dependency
+    from binance.client import Client as BinanceClient
+    from binance.exceptions import BinanceAPIException, BinanceRequestException
+except Exception:  # pragma: no cover - allow runtime without python-binance
+    BinanceClient = None
+
+    class BinanceAPIException(Exception):
+        ...
+
+    class BinanceRequestException(Exception):
+        ...
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)        # make it chatty
@@ -32,14 +45,28 @@ logger.propagate = True              # bubble up to root logger
 VERSION_TAG = "RTSC-PRIME-UMER-2"
 logger.warning("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
 
-# --- REST fallback imports / banner ---
-
-# One shared public client; no API key needed for public endpoints
-REST_CLIENT = Client("", "")
-
 print(
     f"RTSC INIT v2025-10-17 file={__file__} loaded at {datetime.now(timezone.utc).isoformat()}"
 )
+
+# Hard switch to force REST refreshes when websockets stall.
+RTSC_FORCE_REST: bool = os.getenv("RTSC_FORCE_REST", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+# Timeout (seconds) for REST kline calls.
+RTSC_REST_TIMEOUT: float = float(os.getenv("RTSC_REST_TIMEOUT", "15"))
+# Number of klines to request during REST refreshes.
+RTSC_REST_LIMIT: int = int(os.getenv("RTSC_REST_LIMIT", "200"))
+# Interval for REST klines (should align with trading horizon).
+RTSC_REST_INTERVAL: str = os.getenv("RTSC_REST_INTERVAL", "1m")
+# Seconds after which WS is considered stale and REST is triggered.
+RTSC_WS_STALE_AFTER_SEC: float = float(os.getenv("RTSC_WS_STALE_AFTER", "12"))
+
+# Optional proxy support for REST client.
+HTTP_PROXY = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
+HTTPS_PROXY = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
 
 # --- BEGIN: RTSC warmup/refill core integration --------------------------------
 
@@ -244,42 +271,6 @@ from observability import log_event, record_metric
 PriceFetcher = Callable[[str], Awaitable[pd.DataFrame | None]]
 SignalEvaluator = Callable[..., Tuple[float, Optional[str], float, Optional[str]]]
 
-# --- Thread-pool wrappers: blocking python-binance calls run off the event loop
-
-
-def _fetch_klines_sync(symbol: str, interval: str = "1m", limit: int = 200):
-    """Blocking REST call using python-binance"""
-
-    return REST_CLIENT.get_klines(symbol=symbol, interval=interval, limit=limit)
-
-
-def _get_ticker_sync(symbol: str):
-    return REST_CLIENT.get_symbol_ticker(symbol=symbol)
-
-
-async def fetch_klines_with_timeout(
-    symbol: str,
-    interval: str = "1m",
-    limit: int = 200,
-    timeout: float = 15.0,
-):
-    """Run the blocking call in a thread pool with timeout protection"""
-
-    loop = asyncio.get_running_loop()
-    return await asyncio.wait_for(
-        loop.run_in_executor(None, _fetch_klines_sync, symbol, interval, limit),
-        timeout=timeout,
-    )
-
-
-async def fetch_ticker_with_timeout(symbol: str, timeout: float = 5.0):
-    loop = asyncio.get_running_loop()
-    return await asyncio.wait_for(
-        loop.run_in_executor(None, _get_ticker_sync, symbol),
-        timeout=timeout,
-    )
-
-
 def _klines_to_dataframe(klines: Sequence[Sequence[object]]) -> pd.DataFrame:
     if not klines:
         return pd.DataFrame()
@@ -437,7 +428,22 @@ class RealTimeSignalCache:
         self._stream_lock = threading.Lock()
         self._ws_bridge: Optional[object] = None
         self._ws_callback_registered = False
-        self.rest = getattr(self, "rest", REST_CLIENT)
+        self._last_ws_ts: Dict[str, float] = {}
+
+        existing_rest = getattr(self, "rest", None)
+        if existing_rest is not None:
+            self._rest_client = existing_rest
+        else:
+            self._rest_client = self._init_rest_client()
+            if self._rest_client is not None:
+                self.rest = self._rest_client
+            else:
+                self.rest = None
+
+        if RTSC_FORCE_REST:
+            logger.warning(
+                "RealTimeSignalCache: RTSC_FORCE_REST=1 → routing refreshes through REST"
+            )
 
         # --- warmup/refill integration state ---
         self._last_eval: Dict[str, Any] = getattr(self, "_last_eval", {})
@@ -489,6 +495,39 @@ class RealTimeSignalCache:
         """Normalize ``symbol`` for internal storage."""
 
         return str(symbol).upper()
+
+    def _init_rest_client(self) -> Optional["BinanceClient"]:
+        """Initialise a python-binance client for REST fallback operations."""
+
+        if BinanceClient is None:
+            logger.warning(
+                "RTSC: python-binance not available; REST fallback disabled."
+            )
+            return None
+
+        api_key = (
+            os.getenv("BINANCE_API_KEY")
+            or os.getenv("BINANCE_KEY")
+            or ""
+        )
+        api_secret = (
+            os.getenv("BINANCE_API_SECRET")
+            or os.getenv("BINANCE_SECRET")
+            or ""
+        )
+
+        try:
+            client = BinanceClient(api_key=api_key, api_secret=api_secret)
+            if HTTP_PROXY or HTTPS_PROXY:
+                logger.info(
+                    "RTSC: REST client initialised (proxies handled by requests layer)."
+                )
+            else:
+                logger.info("RTSC: REST client initialised.")
+            return client
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.exception("RTSC: Failed to initialise REST client: %s", exc)
+            return None
 
     def _signal_wake(self) -> None:
         """Wake the background worker if it is sleeping."""
@@ -854,7 +893,16 @@ class RealTimeSignalCache:
             closed = False
         if not closed:
             return
-        log_event(logger, "ws_bar_close", symbol=self._key(symbol), event=event)
+        key = self._key(symbol)
+        close_ts = data.get("T") or data.get("t") or data.get("closeTime")
+        if close_ts is not None:
+            try:
+                self._last_ws_ts[key] = float(close_ts) / 1000.0
+            except Exception:
+                self._last_ws_ts[key] = time.time()
+        else:
+            self._last_ws_ts[key] = time.time()
+        log_event(logger, "ws_bar_close", symbol=key, event=event)
         self.schedule_refresh(symbol)
 
     def schedule_refresh(self, symbol: str) -> None:
@@ -880,6 +928,24 @@ class RealTimeSignalCache:
             debounce_seconds=debounce,
         )
         self._signal_wake()
+
+    def _ws_is_stale(self, symbol: str) -> bool:
+        """Return True when the last WS update for ``symbol`` is stale."""
+
+        last = self._last_ws_ts.get(self._key(symbol))
+        if last is None:
+            logger.debug("RTSC: No WS timestamp for %s yet → treating as stale", symbol)
+            return True
+        age = datetime.now(timezone.utc).timestamp() - float(last)
+        if age > RTSC_WS_STALE_AFTER_SEC:
+            logger.debug(
+                "RTSC: WS data for %s is stale (age=%.2fs > %.2fs)",
+                symbol,
+                age,
+                RTSC_WS_STALE_AFTER_SEC,
+            )
+            return True
+        return False
 
     def get(self, symbol: str) -> Optional[CachedSignal]:
         """Return the cached signal for ``symbol`` if available and fresh."""
@@ -1045,7 +1111,7 @@ class RealTimeSignalCache:
             key,
         )
         try:
-            rest_success = bool(asyncio.run(self._refresh_symbol_rest(key)))
+            rest_success = bool(asyncio.run(self._refresh_symbol_via_rest(key)))
         except Exception:
             logger.exception(
                 "RTSC: REST fallback force refresh for %s failed", key
@@ -1201,10 +1267,21 @@ class RealTimeSignalCache:
     ) -> bool:
         """Refresh a single symbol and return whether it succeeded."""
 
-        # Prefer REST while warming up; disable via RTSC_FORCE_REST=0
-        if force_rest is not False:
-            if force_rest is True or os.getenv("RTSC_FORCE_REST", "1") == "1":
-                return await self._refresh_symbol_rest(symbol)
+        key = self._key(symbol)
+
+        rest_forced = force_rest is True or RTSC_FORCE_REST
+        rest_due_to_stale = False
+        if not rest_forced and force_rest is not False:
+            rest_due_to_stale = self._ws_is_stale(key)
+
+        if rest_forced or rest_due_to_stale:
+            rest_success = await self._refresh_symbol_via_rest(symbol)
+            if rest_success or rest_forced:
+                return rest_success
+            logger.info(
+                "RTSC: REST refresh for %s failed; retrying configured fetcher",
+                key,
+            )
 
         prepared = self._prepare_refresh(symbol)
         if prepared is None:
@@ -1230,109 +1307,164 @@ class RealTimeSignalCache:
             prev_age=prev_age,
         )
 
-    async def _refresh_symbol_rest(self, symbol: str) -> bool:
-        """REST fallback refresh using python-binance"""
+    async def _refresh_symbol_via_rest(self, symbol: str) -> bool:
+        """Refresh ``symbol`` using REST and update the cache with explicit logging."""
 
         prepared = self._prepare_refresh(symbol)
         if prepared is None:
             return False
 
         key, prev_age, attempt_ts = prepared
+        if self._rest_client is None:
+            logger.error("RTSC: REST client unavailable; cannot refresh %s", key)
+            self._record_refresh_error(
+                key, "REST client unavailable", attempt_ts=attempt_ts
+            )
+            return False
+
+        interval = RTSC_REST_INTERVAL
+        limit = max(1, RTSC_REST_LIMIT)
+        timeout = max(1.0, RTSC_REST_TIMEOUT)
+        start_dt = datetime.now(timezone.utc)
 
         try:
-            klines = await fetch_klines_with_timeout(key, "1m", 200, timeout=15.0)
-            df = pd.DataFrame(
-                klines,
-                columns=[
-                    "open_time",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "close_time",
-                    "quote_vol",
-                    "trades",
-                    "taker_base",
-                    "taker_quote",
-                    "ignore",
-                ],
-            )
-            for column in ("open", "high", "low", "close", "volume"):
-                df[column] = df[column].astype(float)
-            for column in ("quote_vol", "taker_base", "taker_quote", "trades"):
-                df[column] = pd.to_numeric(df[column], errors="coerce")
-            df["ts"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+            df = await self._fetch_klines_rest_df(key, interval, limit, timeout)
+            if df is None or df.empty:
+                raise RuntimeError("empty DataFrame from REST")
 
-            self.log.info(
-                "[REST] %s: fetched %d bars successfully", key, len(df)
-            )
-
-            df = df.dropna(subset=["ts"]).sort_values("ts")
-            if df.empty:
-                raise ValueError("no price data returned")
-
-            indexed = df.set_index("ts")
-            tz = getattr(indexed.index, "tz", None)
-            if tz is not None:
-                indexed.index = indexed.index.tz_convert("UTC").tz_localize(None)
-
-            indexed["quote_volume"] = indexed["quote_vol"].fillna(0.0)
-            indexed["taker_buy_base"] = indexed["taker_base"].fillna(0.0)
-            indexed["taker_buy_quote"] = indexed["taker_quote"].fillna(0.0)
-            indexed["taker_sell_base"] = (
-                indexed["volume"].fillna(0.0) - indexed["taker_buy_base"]
-            ).clip(lower=0.0)
-            indexed["taker_sell_quote"] = (
-                indexed["quote_volume"].fillna(0.0) - indexed["taker_buy_quote"]
-            ).clip(lower=0.0)
-            indexed["number_of_trades"] = indexed["trades"].fillna(0.0)
-
-            price_data = indexed[
-                [
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "quote_volume",
-                    "taker_buy_base",
-                    "taker_buy_quote",
-                    "taker_sell_base",
-                    "taker_sell_quote",
-                    "number_of_trades",
-                ]
-            ].copy()
-            price_data.attrs["rest_refreshed_at"] = datetime.now(timezone.utc)
-
+            df.attrs["rest_refreshed_at"] = start_dt
             success = self._update_cache(
                 key,
-                price_data,
+                df,
                 attempt_ts=attempt_ts,
                 prev_age=prev_age,
             )
-            if success and not df.empty:
-                self.log.info(
-                    "CachedSignal updated for %s (REST fallback OK, rows=%d, last=%s)",
+
+            duration_ms = (datetime.now(timezone.utc) - start_dt).total_seconds() * 1000.0
+            last_idx = df.index[-1] if len(df.index) else "n/a"
+            if success:
+                logger.info(
+                    "RTSC: REST refresh OK for %s (interval=%s, limit=%d, last=%s) in %.0fms",
                     key,
-                    len(df),
-                    df["ts"].iloc[-1],
+                    interval,
+                    limit,
+                    last_idx,
+                    duration_ms,
+                )
+            else:
+                logger.warning(
+                    "RTSC: REST refresh fetched data for %s but cache update failed", key
                 )
             return success
-        except Exception as exc:
-            self.log.error(
-                "[REST] %s: %s: %s",
-                key,
-                type(exc).__name__,
-                exc,
+        except asyncio.TimeoutError:
+            logger.warning(
+                "RTSC: REST fetch timed out for %s after %.1fs", key, timeout
             )
+            self._record_refresh_error(
+                key,
+                f"REST fetch timeout after {timeout:.0f}s",
+                attempt_ts=attempt_ts,
+            )
+        except (BinanceAPIException, BinanceRequestException) as exc:
+            logger.warning("RTSC: REST fetch Binance error for %s: %s", key, exc)
             self._record_refresh_error(
                 key, f"REST fetch error: {exc}", attempt_ts=attempt_ts
             )
-            logger.debug(
-                "REST fallback price fetch failed for %s: %s", key, exc, exc_info=True
+        except Exception as exc:
+            logger.exception("RTSC: REST refresh failed for %s: %s", key, exc)
+            self._record_refresh_error(
+                key, f"REST fetch error: {exc}", attempt_ts=attempt_ts
             )
-            return False
+        return False
+
+    async def _fetch_klines_rest_df(
+        self, symbol: str, interval: str, limit: int, timeout: float
+    ) -> Optional[pd.DataFrame]:
+        """Fetch klines from REST and convert them to a DataFrame."""
+
+        client = self._rest_client
+        if client is None:
+            return None
+
+        loop = asyncio.get_running_loop()
+
+        def _call() -> List[List[Any]]:
+            return client.get_klines(symbol=symbol, interval=interval, limit=limit)
+
+        raw = await asyncio.wait_for(loop.run_in_executor(None, _call), timeout=timeout)
+        if not raw:
+            return pd.DataFrame()
+
+        columns = [
+            "open_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "quote_volume",
+            "number_of_trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "ignore",
+        ]
+        df_raw = pd.DataFrame(raw, columns=columns)
+        numeric_columns = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "number_of_trades",
+        ]
+        for column in numeric_columns:
+            df_raw[column] = pd.to_numeric(df_raw[column], errors="coerce")
+
+        df_raw["close_dt"] = pd.to_datetime(df_raw["close_time"], unit="ms", utc=True)
+        df_raw = df_raw.dropna(subset=["close_dt"]).sort_values("close_dt")
+        if df_raw.empty:
+            return pd.DataFrame()
+
+        indexed = df_raw.set_index("close_dt")
+        tz = getattr(indexed.index, "tz", None)
+        if tz is not None:
+            indexed.index = indexed.index.tz_convert("UTC").tz_localize(None)
+
+        indexed["taker_sell_base"] = (
+            indexed["volume"].fillna(0.0) - indexed["taker_buy_base"].fillna(0.0)
+        ).clip(lower=0.0)
+        indexed["taker_sell_quote"] = (
+            indexed["quote_volume"].fillna(0.0) - indexed["taker_buy_quote"].fillna(0.0)
+        ).clip(lower=0.0)
+
+        df = indexed[
+            [
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "quote_volume",
+                "taker_buy_base",
+                "taker_buy_quote",
+                "taker_sell_base",
+                "taker_sell_quote",
+                "number_of_trades",
+            ]
+        ].copy()
+
+        logger.debug(
+            "RTSC: REST fetched %d klines for %s [%s → %s]",
+            len(df),
+            symbol,
+            df.index[0],
+            df.index[-1],
+        )
+        return df
 
     def _update_cache(
         self,
