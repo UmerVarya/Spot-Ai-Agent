@@ -1363,9 +1363,9 @@ class RealTimeSignalCache:
         try:
             df = await self._fetch_klines_any(
                 symbol,
-                interval=RTSC_REST_INTERVAL,
-                limit=RTSC_REST_LIMIT,
-                timeout=RTSC_REST_TIMEOUT,
+                interval=interval,
+                limit=limit,
+                timeout=timeout,
             )
             if df is None or df.empty:
                 raise RuntimeError(f"All REST attempts failed for {symbol}")
