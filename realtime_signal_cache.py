@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
+import requests  # used for mirror fallback (no proxies)
 
 # python-binance (a.k.a binance-connector legacy) exceptions can vary by version.
 # Import defensively so minor packaging changes do not break the cache module.
@@ -48,6 +49,15 @@ logger.warning("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
 print(
     f"RTSC INIT v2025-10-17 file={__file__} loaded at {datetime.now(timezone.utc).isoformat()}"
 )
+
+BINANCE_MIRRORS = [
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    # Public mirror (Binance Vision)
+    "https://data-api.binance.vision",
+]
 
 # Hard switch to force REST refreshes when websockets stall.
 RTSC_FORCE_REST: bool = os.getenv("RTSC_FORCE_REST", "0").strip().lower() in (
@@ -930,9 +940,7 @@ class RealTimeSignalCache:
     def schedule_refresh(self, symbol: str) -> None:
         """Request an immediate refresh for ``symbol`` when possible."""
 
-        logger.info(
-            f"🧠 [DEBUG] schedule_refresh called for {symbol}, FORCE_REST={RTSC_FORCE_REST}"
-        )
+        logger.info(f"[RTSC] schedule_refresh({symbol}) FORCE_REST={RTSC_FORCE_REST}")
         key = self._key(symbol)
         with self._lock:
             if key not in self._symbols:
@@ -1335,18 +1343,17 @@ class RealTimeSignalCache:
     async def _refresh_symbol_via_rest(self, symbol: str) -> bool:
         """Refresh ``symbol`` using REST and update the cache with explicit logging."""
 
-        logger.info(f"🚀 [DEBUG] Entering REST fallback for {symbol}")
+        logger.info(f"[RTSC] _refresh_symbol_via_rest ENTER for {symbol}")
         prepared = self._prepare_refresh(symbol)
         if prepared is None:
             return False
 
         key, prev_age, attempt_ts = prepared
         if self._rest_client is None:
-            logger.error("RTSC: REST client unavailable; cannot refresh %s", key)
-            self._record_refresh_error(
-                key, "REST client unavailable", attempt_ts=attempt_ts
+            logger.warning(
+                "RTSC: REST client unavailable; attempting HTTP mirrors for %s",
+                key,
             )
-            return False
 
         interval = RTSC_REST_INTERVAL
         limit = max(1, RTSC_REST_LIMIT)
@@ -1354,9 +1361,14 @@ class RealTimeSignalCache:
         start_dt = datetime.now(timezone.utc)
 
         try:
-            df = await self._fetch_klines_rest_df(key, interval, limit, timeout)
+            df = await self._fetch_klines_any(
+                symbol,
+                interval=RTSC_REST_INTERVAL,
+                limit=RTSC_REST_LIMIT,
+                timeout=RTSC_REST_TIMEOUT,
+            )
             if df is None or df.empty:
-                raise RuntimeError("empty DataFrame from REST")
+                raise RuntimeError(f"All REST attempts failed for {symbol}")
 
             logger.info(f"[DEBUG] REST fetched df shape={df.shape} for {symbol}")
             df.attrs["rest_refreshed_at"] = start_dt
@@ -1405,21 +1417,84 @@ class RealTimeSignalCache:
             )
         return False
 
-    async def _fetch_klines_rest_df(
+    async def _fetch_klines_any(
         self, symbol: str, interval: str, limit: int, timeout: float
     ) -> Optional[pd.DataFrame]:
-        """Fetch klines from REST and convert them to a DataFrame."""
-
-        client = self._rest_client
-        if client is None:
-            return None
+        """
+        Try official python-binance client first (if present), then try several HTTP mirrors directly.
+        Logs each URL attempted and returns the first non-empty DataFrame.
+        """
 
         loop = asyncio.get_running_loop()
 
-        def _call() -> List[List[Any]]:
-            return client.get_klines(symbol=symbol, interval=interval, limit=limit)
+        # 1) python-binance (if available)
+        if self._rest_client is not None:
+            def _call():
+                return self._rest_client.get_klines(symbol=symbol, interval=interval, limit=limit)
 
-        raw = await asyncio.wait_for(loop.run_in_executor(None, _call), timeout=timeout)
+            try:
+                logger.info(
+                    f"[RTSC] REST primary (python-binance) for {symbol} interval={interval} limit={limit}"
+                )
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(None, _call),
+                    timeout=timeout,
+                )
+                df = self._shape_klines_df(raw)
+                if df is not None and not df.empty:
+                    logger.info(f"[RTSC] REST primary OK for {symbol}")
+                    return df
+                logger.warning(f"[RTSC] REST primary empty for {symbol}")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[RTSC] REST primary TIMEOUT for {symbol} after {timeout}s"
+                )
+            except Exception as e:
+                logger.warning(f"[RTSC] REST primary ERROR for {symbol}: {e}")
+
+        # 2) Direct HTTP mirrors (no proxies)
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        for base in BINANCE_MIRRORS:
+            url = f"{base}/api/v3/klines"
+            try:
+                logger.info(f"[RTSC] REST mirror try {url} for {symbol}")
+                r = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: requests.get(
+                            url,
+                            params=params,
+                            timeout=timeout,
+                            proxies={},
+                        ),
+                    ),
+                    timeout=timeout + 1,
+                )
+                r.raise_for_status()
+                raw = r.json()
+                df = self._shape_klines_df(raw)
+                if df is not None and not df.empty:
+                    logger.info(f"[RTSC] REST mirror OK {base} for {symbol}")
+                    return df
+                logger.warning(f"[RTSC] REST mirror EMPTY {base} for {symbol}")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[RTSC] REST mirror TIMEOUT {base} for {symbol} after {timeout}s"
+                )
+            except Exception as e:
+                logger.warning(f"[RTSC] REST mirror ERROR {base} for {symbol}: {e}")
+
+        return None
+
+    def _shape_klines_df(self, raw: Any) -> Optional[pd.DataFrame]:
+        """Convert raw kline payloads to the canonical DataFrame shape."""
+
+        if raw is None:
+            return None
+
+        if isinstance(raw, pd.DataFrame):
+            return raw
+
         if not raw:
             return pd.DataFrame()
 
@@ -1437,7 +1512,13 @@ class RealTimeSignalCache:
             "taker_buy_quote",
             "ignore",
         ]
-        df_raw = pd.DataFrame(raw, columns=columns)
+
+        try:
+            df_raw = pd.DataFrame(raw, columns=columns)
+        except Exception:
+            logger.exception("RTSC: Failed to shape klines payload")
+            return None
+
         numeric_columns = [
             "open",
             "high",
@@ -1485,13 +1566,13 @@ class RealTimeSignalCache:
             ]
         ].copy()
 
-        logger.debug(
-            "RTSC: REST fetched %d klines for %s [%s → %s]",
-            len(df),
-            symbol,
-            df.index[0],
-            df.index[-1],
-        )
+        if not df.empty:
+            logger.debug(
+                "RTSC: REST shaped %d klines [%s → %s]",
+                len(df),
+                df.index[0],
+                df.index[-1],
+            )
         return df
 
     def _update_cache(
