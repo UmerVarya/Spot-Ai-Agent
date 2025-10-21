@@ -1308,7 +1308,8 @@ class RealTimeSignalCache:
             rest_due_to_stale = self._ws_is_stale(key)
 
         if rest_forced or rest_due_to_stale:
-            rest_success = await self._refresh_symbol_via_rest(symbol)
+            rest_task = asyncio.create_task(self._refresh_symbol_via_rest(symbol))
+            rest_success = await rest_task
             if rest_success or rest_forced:
                 return rest_success
             logger.info(
