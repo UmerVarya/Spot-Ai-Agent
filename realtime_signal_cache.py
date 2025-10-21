@@ -1343,7 +1343,7 @@ class RealTimeSignalCache:
     async def _refresh_symbol_via_rest(self, symbol: str) -> bool:
         """Refresh ``symbol`` using REST and update the cache with explicit logging."""
 
-        logger.info(f"[RTSC] _refresh_symbol_via_rest ENTER for {symbol}")
+        logger.info(f"[RTSC] ENTER _refresh_symbol_via_rest for {symbol}")
         prepared = self._prepare_refresh(symbol)
         if prepared is None:
             return False
