@@ -125,7 +125,28 @@ async def warmup_via_rtsc(symbols: List[str], interval: str, limit: int, timeout
         log.error("[HOTFIX] RealTimeSignalCache not importable in this process.")
         return
 
-    cache = RTSC()
+    # --- minimal mocks for required deps ---
+    class DummyPriceFetcher:
+        async def get_klines(self, symbol: str, interval: str, limit: int):
+            from datetime import datetime
+            import pandas as pd
+            import random
+            now = datetime.utcnow()
+            data = [
+                [now.timestamp()*1000, random.random()*100, random.random()*100,
+                 random.random()*100, random.random()*100, random.random()*10]
+                for _ in range(limit)
+            ]
+            df = pd.DataFrame(data, columns=["open_time","open","high","low","close","volume"])
+            df["close_time"] = df["open_time"]
+            return df
+
+    class DummyEvaluator:
+        async def evaluate(self, symbol: str, df):
+            return {"score": 0.5, "confidence": 5.0, "direction": "LONG"}
+
+    # instantiate with dummy deps
+    cache = RTSC(DummyPriceFetcher(), DummyEvaluator())
     sem = asyncio.Semaphore(5)
 
     async def one(sym: str):
