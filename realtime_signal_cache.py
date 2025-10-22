@@ -1390,19 +1390,38 @@ class RealTimeSignalCache:
 
         key, _prev_age, attempt_ts = prepared
 
+        df: Optional[pd.DataFrame] = None
+        fetch_exc: Optional[Exception] = None
+
+        logger.warning(f"[RTSC-DEBUG] ENTERED _refresh_symbol_via_rest({key})")
         try:
-            df = await self._fetch_klines_any(
+            df = await self._fetch_klines_rest_df(
                 key,
                 interval=RTSC_REST_INTERVAL,
                 limit=RTSC_REST_LIMIT,
                 timeout=RTSC_REST_TIMEOUT,
             )
-        except Exception as exc:
-            logger.warning(f"[RTSC] REST fetch exception for {key}: {exc}")
+            if df is not None and not df.empty:
+                logger.warning(f"[RTSC-DEBUG] SUCCESS {key}: got {len(df)} bars")
+            else:
+                logger.warning(
+                    f"[RTSC-DEBUG] EMPTY {key}: REST returned no data"
+                )
+        except Exception as exc:  # pragma: no cover - debug logging only
+            fetch_exc = exc
+            logger.error(
+                f"[RTSC-DEBUG] ERROR in _refresh_symbol_via_rest({key}): {exc}"
+            )
+        finally:
+            logger.warning(f"[RTSC-DEBUG] EXIT _refresh_symbol_via_rest({key})")
+
+        if fetch_exc is not None:
+            logger.warning(f"[RTSC] REST fetch exception for {key}: {fetch_exc}")
             self._record_refresh_error(
-                key, f"REST fetch exception: {exc}", attempt_ts=attempt_ts
+                key, f"REST fetch exception: {fetch_exc}", attempt_ts=attempt_ts
             )
             return False
+
         if df is None or df.empty:
             logger.warning(f"[RTSC] REST fetch produced no data for {key}")
             self._record_refresh_error(
@@ -1466,6 +1485,15 @@ class RealTimeSignalCache:
 
         logger.info(f"[RTSC] cache updated for {key} via REST")
         return True
+
+    async def _fetch_klines_rest_df(
+        self, symbol: str, interval: str, limit: int, timeout: float
+    ) -> Optional[pd.DataFrame]:
+        """Compatibility wrapper to keep debug logging focused on REST fetches."""
+
+        return await self._fetch_klines_any(
+            symbol, interval=interval, limit=limit, timeout=timeout
+        )
 
     async def _fetch_klines_any(
         self, symbol: str, interval: str, limit: int, timeout: float
