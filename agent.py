@@ -372,21 +372,12 @@ def run_agent_loop() -> None:
         max_conc,
     )
     signal_cache.start()
+    boot_syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT"]
+    for sym in boot_syms:
+        dispatch_schedule_refresh(signal_cache, sym)
+
+    time.sleep(1.0)
     signal_cache.flush_pending()
-
-    async def _prime() -> None:
-        sym = "BTCUSDT"
-        logger.info(f"[RTSC] PRIME: scheduling first refresh for {sym}")
-        await signal_cache.schedule_refresh(sym)
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        sym = "BTCUSDT"
-        logger.info(f"[RTSC] PRIME: scheduling first refresh for {sym}")
-        asyncio.run(signal_cache.schedule_refresh(sym))
-    else:
-        loop.create_task(_prime())
 
     ws_state_lock = threading.Lock()
     ws_state = {"last": time.time(), "stale": False}
@@ -437,7 +428,9 @@ def run_agent_loop() -> None:
                     signal_cache.on_ws_bar_close(symbol, close_ts)
                     kicked = [symbol]
                     dispatch_schedule_refresh(signal_cache, symbol)
-                    logger.info(f"[RTSC] kicked {len(kicked)} symbols this pass: {kicked}")
+                    logging.getLogger(__name__).warning(
+                        f"[AGENT] kicked {len(kicked)}: {kicked}"
+                    )
             except Exception:
                 logger.debug("WS kline handler error for %s", symbol, exc_info=True)
 
@@ -622,8 +615,8 @@ def run_agent_loop() -> None:
                         kicked = list(tracked_symbols)
                         for sym in kicked:
                             dispatch_schedule_refresh(signal_cache, sym)
-                        logger.info(
-                            f"[RTSC] kicked {len(kicked)} symbols this pass: {kicked}"
+                        logging.getLogger(__name__).warning(
+                            f"[AGENT] kicked {len(kicked)}: {kicked}"
                         )
                         last_rest_backfill = now
             guard_stop.wait(guard_interval)
@@ -837,8 +830,8 @@ def run_agent_loop() -> None:
                 kicked = list(symbols_to_fetch[:kick])
                 for symbol in kicked:
                     dispatch_schedule_refresh(signal_cache, symbol)
-                logger.info(
-                    f"[RTSC] kicked {len(kicked)} symbols this pass: {kicked}"
+                logging.getLogger(__name__).warning(
+                    f"[AGENT] kicked {len(kicked)}: {kicked}"
                 )
             if signal_cache.circuit_breaker_active():
                 logger.warning(
