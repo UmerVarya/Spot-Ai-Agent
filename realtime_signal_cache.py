@@ -905,12 +905,16 @@ class RealTimeSignalCache:
             return
         close_ts = data.get("T") or data.get("t") or data.get("closeTime")
         self.on_ws_bar_close(symbol, close_ts)
+        loop = self._loop
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.schedule_refresh(symbol), loop)
+            return
         try:
-            asyncio.create_task(
-                asyncio.to_thread(self.schedule_refresh, symbol)
-            )
+            running_loop = asyncio.get_running_loop()
         except RuntimeError:
-            self.schedule_refresh(symbol)
+            _run_async_allow_nested(self._refresh_symbol_via_rest(symbol))
+        else:
+            running_loop.create_task(self.schedule_refresh(symbol))
 
     def on_ws_bar_close(self, symbol: str, close_ts_ms: object | None) -> None:
         """Record a WebSocket bar close for ``symbol``."""
@@ -937,30 +941,36 @@ class RealTimeSignalCache:
             close_ts_ms=close_ts_ms,
         )
 
-    def schedule_refresh(self, symbol: str) -> None:
-        """Request an immediate refresh for ``symbol`` when possible."""
+    async def schedule_refresh(self, symbol: str):
+        """
+        Schedule a refresh for the given symbol.
+        Forces REST path when RTSC_FORCE_REST=1.
+        Runs concurrent non-blocking refresh tasks.
+        """
 
-        logger.info(f"[RTSC] schedule_refresh({symbol}) FORCE_REST={RTSC_FORCE_REST}")
-        key = self._key(symbol)
-        with self._lock:
-            if key not in self._symbols:
-                return
-            now = time.time()
-            debounce = self._symbol_debounce.get(key, self._default_debounce)
-            last_request = self._last_priority_request.get(key)
-            if last_request is not None and now - last_request < debounce:
-                return
-            self._last_priority_request[key] = now
-            if key in self._priority_symbols:
-                return
-            self._priority_symbols.add(key)
-        log_event(
-            logger,
-            "cache_refresh_requested",
-            symbol=key,
-            debounce_seconds=debounce,
-        )
-        self._signal_wake()
+        try:
+            logger.info(
+                f"[RTSC] schedule_refresh called for {symbol}, FORCE_REST={RTSC_FORCE_REST}"
+            )
+
+            # make sure semaphore exists
+            if not hasattr(self, "refresh_semaphore"):
+                self.refresh_semaphore = asyncio.Semaphore(5)  # limit to 5 concurrent tasks
+
+            async def _refresh_with_lock(sym: str):
+                async with self.refresh_semaphore:
+                    logger.info(f"[RTSC] ENTER _refresh_symbol_via_rest for {sym}")
+                    try:
+                        await self._refresh_symbol_via_rest(sym)
+                        logger.info(f"[RTSC] ✅ Refresh success for {sym}")
+                    except Exception as e:
+                        logger.warning(f"[RTSC] ❌ Refresh failed for {sym}: {e}")
+
+            # fire and forget → don't block other symbols
+            asyncio.create_task(_refresh_with_lock(symbol))
+
+        except Exception as e:
+            logger.error(f"[RTSC] schedule_refresh error for {symbol}: {e}")
 
     def _ws_is_stale(self, symbol: str) -> bool:
         """Return True when the last WS update for ``symbol`` is stale."""

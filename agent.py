@@ -390,6 +390,24 @@ def run_agent_loop() -> None:
         return True
 
     ws_bridge: Optional[WSPriceBridge]
+
+    def _dispatch_schedule_refresh(symbol: str) -> None:
+        loop = getattr(signal_cache, "_loop", None)
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(signal_cache.schedule_refresh(symbol), loop)
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                signal_cache.force_refresh(symbol)
+            except Exception:
+                logger.debug(
+                    "Fallback force_refresh failed for %s", symbol, exc_info=True
+                )
+        else:
+            running_loop.create_task(signal_cache.schedule_refresh(symbol))
+
     if ENABLE_WS_BRIDGE:
         def _handle_ws_kline(symbol: str, frame: str, payload: Dict[str, Any]) -> None:
             try:
@@ -406,12 +424,7 @@ def run_agent_loop() -> None:
                         close_price=payload.get("c"),
                     )
                     signal_cache.on_ws_bar_close(symbol, close_ts)
-                    try:
-                        asyncio.create_task(
-                            asyncio.to_thread(signal_cache.schedule_refresh, symbol)
-                        )
-                    except RuntimeError:
-                        signal_cache.schedule_refresh(symbol)
+                    _dispatch_schedule_refresh(symbol)
             except Exception:
                 logger.debug("WS kline handler error for %s", symbol, exc_info=True)
 
@@ -594,7 +607,7 @@ def run_agent_loop() -> None:
                             gap,
                         )
                         for sym in tracked_symbols:
-                            signal_cache.schedule_refresh(sym)
+                            _dispatch_schedule_refresh(sym)
                         last_rest_backfill = now
             guard_stop.wait(guard_interval)
 
@@ -803,7 +816,7 @@ def run_agent_loop() -> None:
             signal_cache.start()
             if ws_bridge is None:
                 for symbol in symbols_to_fetch:
-                    signal_cache.schedule_refresh(symbol)
+                    _dispatch_schedule_refresh(symbol)
             if signal_cache.circuit_breaker_active():
                 logger.warning(
                     "Signal evaluator circuit breaker active; skipping trade evaluation this cycle."
