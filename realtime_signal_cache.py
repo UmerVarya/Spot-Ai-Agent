@@ -1260,6 +1260,13 @@ class RealTimeSignalCache:
             instead.
         """
 
+        import traceback
+
+        logging.getLogger("RTSC").warning(
+            f"[RTSC] force_refresh CALLED for {symbol}\n"
+            + "".join(traceback.format_stack(limit=8))
+        )
+
         key = self._key(symbol)
         loop = self._worker_loop
         if loop and loop.is_running():

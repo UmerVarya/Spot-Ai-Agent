@@ -108,13 +108,12 @@ from observability import log_event, record_metric
 
 
 def dispatch_schedule_refresh(cache, symbol: str) -> None:
-    """Route refresh requests through the cache enqueue path."""
-
+    # Always enqueue; the cache handles loop readiness/queueing internally
     try:
         cache.enqueue_refresh(symbol)
-    except Exception as exc:
+    except Exception as e:
         logging.getLogger(__name__).warning(
-            f"[AGENT] enqueue_refresh failed for {symbol}: {exc}"
+            f"[AGENT] enqueue_refresh failed for {symbol}: {e}"
         )
 
 
@@ -348,6 +347,7 @@ def run_agent_loop() -> None:
         max_concurrency=max_conc,
         use_streams=ENABLE_WS_BRIDGE,
     )
+    signal_cache.start()
     debounce_overrides = {
         symbol: override.debounce_ms
         for symbol, override in runtime_settings.symbol_overrides.items()
@@ -371,8 +371,7 @@ def run_agent_loop() -> None:
         refresh_interval * stale_mult,
         max_conc,
     )
-    signal_cache.start()
-    boot_syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT"]
+    boot_syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
     for sym in boot_syms:
         dispatch_schedule_refresh(signal_cache, sym)
 
