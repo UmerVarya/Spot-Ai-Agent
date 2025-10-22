@@ -428,6 +428,7 @@ class RealTimeSignalCache:
         self._thread: Optional[threading.Thread] = None
         self._bg_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_ready = threading.Event()
         self._context: Dict[str, object] = {}
         self._symbol_added_at: Dict[str, float] = {}
         self._symbol_last_attempt: Dict[str, float] = {}
@@ -831,6 +832,7 @@ class RealTimeSignalCache:
         self._stop_event.clear()
         self._wake_event.clear()
         self._ready = False
+        self._loop_ready.clear()
         try:
             loop = asyncio.get_running_loop()
             logger.info("RTSC: starting worker on running loop")
@@ -839,10 +841,20 @@ class RealTimeSignalCache:
             logger.info("RTSC: no running loop; starting worker in daemon thread")
 
             def runner() -> None:
-                asyncio.run(self._worker())
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(self._worker())
+                finally:
+                    try:
+                        loop.close()
+                    except Exception:
+                        logger.debug("RTSC: error closing worker loop", exc_info=True)
 
             self._thread = threading.Thread(target=runner, daemon=True, name="rtsc-worker")
             self._thread.start()
+            if not self._loop_ready.wait(timeout=1.0):
+                logger.warning("RTSC: worker loop did not signal readiness within 1s")
 
         if self._enable_prime:
             threading.Thread(target=self.prime, daemon=True, name="rtsc-prime").start()
@@ -872,6 +884,7 @@ class RealTimeSignalCache:
         self._bg_task = None
         self._thread = None
         self._loop = None
+        self._loop_ready.clear()
         self._ready = False
         if getattr(self, "_bg_loop", None) is not None:
             try:
@@ -1264,6 +1277,7 @@ class RealTimeSignalCache:
 
         loop = asyncio.get_running_loop()
         self._loop = loop
+        self._loop_ready.set()
         async_wake = asyncio.Event()
         self._async_wake = async_wake
         logger.info(
@@ -1337,6 +1351,7 @@ class RealTimeSignalCache:
             self._async_wake = None
             self._loop = None
             self._bg_task = None
+            self._loop_ready.clear()
             logger.info("RTSC worker stopped")
 
     def _symbols_due(self, symbols: Sequence[str], *, first_run: bool) -> List[str]:
