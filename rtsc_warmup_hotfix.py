@@ -137,9 +137,10 @@ async def warmup_via_rtsc(symbols: List[str], interval: str, limit: int, timeout
                 if method is None:
                     raise RuntimeError("Cache has no _refresh_symbol_via_rest method.")
                 await asyncio.wait_for(method(sym), timeout=timeout + 2)
-                data = await cache.get(sym)
-                ok = bool(data)
-                log.info(f"[HOTFIX] cache update for {sym}: {ok} | {('score=' + str(data.get('score')) if ok else 'no payload')}")
+                data = cache.get(sym)
+                ok = data is not None
+                detail = f"score={data.score}" if ok else "no payload"
+                log.info(f"[HOTFIX] cache update for {sym}: {ok} | {detail}")
             except asyncio.TimeoutError:
                 log.warning(f"[HOTFIX] TIMEOUT _refresh_symbol_via_rest({sym}) after {timeout+2:.1f}s")
             except Exception as e:
