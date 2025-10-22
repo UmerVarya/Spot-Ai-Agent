@@ -427,8 +427,8 @@ class RealTimeSignalCache:
         self._async_wake: Optional[asyncio.Event] = None
         self._thread: Optional[threading.Thread] = None
         self._bg_task: Optional[asyncio.Task] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._loop_ready = threading.Event()
+        self._worker_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._worker_loop_ready = threading.Event()
         self._context: Dict[str, object] = {}
         self._symbol_added_at: Dict[str, float] = {}
         self._symbol_last_attempt: Dict[str, float] = {}
@@ -449,36 +449,11 @@ class RealTimeSignalCache:
         self._ws_bridge: Optional[object] = None
         self._ws_callback_registered = False
         self._last_ws_ts: Dict[str, float] = {}
-        self._refresh_sem: Optional[asyncio.Semaphore] = None
-
-        # --- background loop dedicated to refresh tasks ---
-        self._bg_loop = asyncio.new_event_loop()
-
-        def _bg_loop_runner(loop: asyncio.AbstractEventLoop) -> None:
-            asyncio.set_event_loop(loop)
-            loop.run_forever()
-
-        self._bg_thread = threading.Thread(
-            target=_bg_loop_runner,
-            args=(self._bg_loop,),
-            name="rtsc-bg-loop",
-            daemon=True,
-        )
-        self._bg_thread.start()
-        logging.getLogger(__name__).info(
-            "[RTSC] background loop started in thread rtsc-bg-loop"
-        )
-
-        try:
-            refresh_sem_future = asyncio.run_coroutine_threadsafe(
-                self._create_refresh_semaphore(), self._bg_loop
-            )
-            self._refresh_sem = refresh_sem_future.result()
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logging.getLogger(__name__).error(
-                f"[RTSC] failed to initialize refresh semaphore: {exc}"
-            )
-            raise
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_ready = threading.Event()
+        self._bg_thread: threading.Thread | None = None
+        self._pending_syms: list[str] = []
+        self._sem: asyncio.Semaphore | None = None  # initialised when loop starts
 
         existing_rest = getattr(self, "rest", None)
         if existing_rest is not None:
@@ -583,7 +558,7 @@ class RealTimeSignalCache:
         """Wake the background worker if it is sleeping."""
 
         self._wake_event.set()
-        loop = self._loop
+        loop = self._worker_loop
         async_wake = self._async_wake
         if loop and loop.is_running() and async_wake is not None:
             loop.call_soon_threadsafe(async_wake.set)
@@ -823,6 +798,35 @@ class RealTimeSignalCache:
     def start(self) -> None:
         """Launch the background refresh worker if it is not already running."""
 
+        def _run() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._loop = loop
+            self._sem = asyncio.Semaphore(5)
+            self._loop_ready.set()
+            logger.warning("[RTSC] bg loop READY, starting run_forever()")
+            try:
+                loop.run_forever()
+            finally:
+                self._loop_ready.clear()
+                self._sem = None
+                self._loop = None
+                logger.warning("[RTSC] bg loop STOPPED")
+                try:
+                    loop.close()
+                except Exception:
+                    logger.debug("[RTSC] error closing bg loop", exc_info=True)
+
+        if self._bg_thread and self._bg_thread.is_alive():
+            logger.warning("[RTSC] bg loop already running")
+        else:
+            self._bg_thread = threading.Thread(
+                target=_run,
+                name="rtsc-bg",
+                daemon=True,
+            )
+            self._bg_thread.start()
+
         if getattr(self, "_bg_task", None) and not self._bg_task.done():
             logger.info("RTSC: worker already running")
             return
@@ -832,7 +836,7 @@ class RealTimeSignalCache:
         self._stop_event.clear()
         self._wake_event.clear()
         self._ready = False
-        self._loop_ready.clear()
+        self._worker_loop_ready.clear()
         try:
             loop = asyncio.get_running_loop()
             logger.info("RTSC: starting worker on running loop")
@@ -853,7 +857,7 @@ class RealTimeSignalCache:
 
             self._thread = threading.Thread(target=runner, daemon=True, name="rtsc-worker")
             self._thread.start()
-            if not self._loop_ready.wait(timeout=1.0):
+            if not self._worker_loop_ready.wait(timeout=1.0):
                 logger.warning("RTSC: worker loop did not signal readiness within 1s")
 
         if self._enable_prime:
@@ -876,23 +880,25 @@ class RealTimeSignalCache:
         self._stop_event.set()
         self._signal_wake()
         task = self._bg_task
-        loop = self._loop
+        loop = self._worker_loop
         if task and loop and not task.done():
             loop.call_soon_threadsafe(task.cancel)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         self._bg_task = None
         self._thread = None
+        self._worker_loop = None
+        self._worker_loop_ready.clear()
+        self._ready = False
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+        if self._bg_thread and self._bg_thread.is_alive():
+            self._bg_thread.join(timeout=2.0)
+        self._bg_thread = None
         self._loop = None
         self._loop_ready.clear()
-        self._ready = False
-        if getattr(self, "_bg_loop", None) is not None:
-            try:
-                self._bg_loop.call_soon_threadsafe(self._bg_loop.stop)
-            except RuntimeError:
-                pass
-        if getattr(self, "_bg_thread", None) is not None and self._bg_thread.is_alive():
-            self._bg_thread.join(timeout=2.0)
+        self._sem = None
 
     def update_universe(self, symbols: Iterable[str]) -> None:
         """Update the symbol universe tracked by the cache."""
@@ -979,7 +985,7 @@ class RealTimeSignalCache:
             return
         close_ts = data.get("T") or data.get("t") or data.get("closeTime")
         self.on_ws_bar_close(symbol, close_ts)
-        loop = self._loop
+        loop = self._worker_loop
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(self.schedule_refresh(symbol), loop)
             return
@@ -1016,21 +1022,43 @@ class RealTimeSignalCache:
         )
 
     def _submit_bg(self, coro: Awaitable[Any]) -> asyncio.Future:
-        """Submit a coroutine to the dedicated RTSC background loop."""
+        """Submit a coroutine to the private RTSC background loop."""
 
-        logger = logging.getLogger(__name__)
-        try:
-            fut = asyncio.run_coroutine_threadsafe(coro, self._bg_loop)
-            logger.info("[RTSC] submitted refresh task to bg loop")
-            return fut
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.error(f"[RTSC] failed to submit task to bg loop: {exc}")
-            raise
+        assert (
+            self._loop is not None and self._loop_ready.is_set()
+        ), "bg loop not ready"
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        logger.warning(f"[RTSC] submitted task to bg loop: {fut}")
+        return fut
 
-    async def _create_refresh_semaphore(self) -> asyncio.Semaphore:
-        """Create the REST refresh semaphore on the background loop."""
+    def enqueue_refresh(self, symbol: str) -> None:
+        """Queue a REST refresh for ``symbol`` on the background loop."""
 
-        return asyncio.Semaphore(5)
+        key = self._key(symbol)
+        if not self._loop_ready.is_set() or self._loop is None:
+            self._pending_syms.append(key)
+            logger.warning(f"[RTSC] queued (loop not ready): {key}")
+            return
+
+        async def _runner(sym: str) -> None:
+            logger.warning(f"[RTSC-DEBUG] ENTER runner({sym})")
+            sem = self._sem
+            if sem is None:
+                sem = asyncio.Semaphore(5)
+                self._sem = sem
+            async with sem:
+                logger.warning(f"[RTSC-DEBUG] ENTER _refresh_symbol_via_rest({sym})")
+                try:
+                    await asyncio.wait_for(
+                        self._refresh_symbol_via_rest(sym), timeout=10
+                    )
+                    logger.warning(f"[RTSC-DEBUG] OK refresh({sym})")
+                except asyncio.TimeoutError:
+                    logger.warning(f"[RTSC-DEBUG] TIMEOUT refresh({sym})")
+                except Exception as exc:
+                    logger.warning(f"[RTSC-DEBUG] FAIL refresh({sym}): {exc}")
+
+        self._submit_bg(_runner(key))
 
     async def schedule_refresh(self, symbol: str) -> None:
         """Non-blocking dispatcher: always spawns a refresh task."""
@@ -1046,30 +1074,19 @@ class RealTimeSignalCache:
         logger.info(
             f"[RTSC] schedule_refresh({key}) FORCE_REST={os.getenv('RTSC_FORCE_REST','0')}"
         )
+        self.enqueue_refresh(key)
 
-        async def _runner(sym: str) -> None:
-            logger = logging.getLogger(__name__)
-            refresh_sem = self._refresh_sem
-            if refresh_sem is None:  # pragma: no cover - defensive guard
-                logger.warning("[RTSC] refresh semaphore not initialized")
-                return
-            async with refresh_sem:
-                logger.info(f"[RTSC] ENTER _refresh_symbol_via_rest({sym}) [bg-loop]")
-                try:
-                    result = await asyncio.wait_for(
-                        self._refresh_symbol_via_rest(sym),
-                        timeout=10.0,
-                    )
-                    if not result:
-                        logger.warning(f"[RTSC] FAIL refresh({sym}): no data returned")
-                    else:
-                        logger.info(f"[RTSC] OK refresh({sym})")
-                except asyncio.TimeoutError:
-                    logger.warning(f"[RTSC] TIMEOUT refresh({sym}) after 10.0s")
-                except Exception as exc:
-                    logger.warning(f"[RTSC] FAIL refresh({sym}): {exc}")
+    def flush_pending(self) -> None:
+        """Flush any symbols queued before the background loop was ready."""
 
-        self._submit_bg(_runner(key))
+        if not self._loop_ready.is_set() or not self._pending_syms:
+            logger.warning("[RTSC] nothing to flush or loop not ready")
+            return
+        syms = self._pending_syms[:]
+        self._pending_syms.clear()
+        logger.warning(f"[RTSC] flushing {len(syms)} queued symbols: {syms}")
+        for sym in syms:
+            self.enqueue_refresh(sym)
 
     def _ws_is_stale(self, symbol: str) -> bool:
         """Return True when the last WS update for ``symbol`` is stale."""
@@ -1232,7 +1249,7 @@ class RealTimeSignalCache:
         """
 
         key = self._key(symbol)
-        loop = self._loop
+        loop = self._worker_loop
         if loop and loop.is_running():
             logger.info("RTSC: force-refresh scheduling %s on worker loop", key)
             future = asyncio.run_coroutine_threadsafe(self._refresh_symbol(key), loop)
@@ -1276,8 +1293,8 @@ class RealTimeSignalCache:
         """Background coroutine that refreshes the cache in near real time."""
 
         loop = asyncio.get_running_loop()
-        self._loop = loop
-        self._loop_ready.set()
+        self._worker_loop = loop
+        self._worker_loop_ready.set()
         async_wake = asyncio.Event()
         self._async_wake = async_wake
         logger.info(
@@ -1349,9 +1366,9 @@ class RealTimeSignalCache:
             raise
         finally:
             self._async_wake = None
-            self._loop = None
+            self._worker_loop = None
             self._bg_task = None
-            self._loop_ready.clear()
+            self._worker_loop_ready.clear()
             logger.info("RTSC worker stopped")
 
     def _symbols_due(self, symbols: Sequence[str], *, first_run: bool) -> List[str]:

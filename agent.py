@@ -23,6 +23,7 @@ import os
 import sys
 import asyncio
 import random
+import logging
 from datetime import datetime
 from typing import Any, Dict, Optional, Set
 
@@ -107,26 +108,14 @@ from observability import log_event, record_metric
 
 
 def dispatch_schedule_refresh(cache, symbol: str) -> None:
-    """Route schedule_refresh through the running loop without blocking."""
-
-    worker_loop = getattr(cache, "_loop", None)
-    if worker_loop and worker_loop.is_running():
-        asyncio.run_coroutine_threadsafe(cache.schedule_refresh(symbol), worker_loop)
-        return
+    """Route refresh requests through the cache enqueue path."""
 
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        try:
-            cache.force_refresh(symbol)
-        except Exception:
-            logger.debug(
-                "dispatch_schedule_refresh fallback force_refresh failed for %s",
-                symbol,
-                exc_info=True,
-            )
-    else:
-        loop.create_task(cache.schedule_refresh(symbol))
+        cache.enqueue_refresh(symbol)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            f"[AGENT] enqueue_refresh failed for {symbol}: {exc}"
+        )
 
 
 BREAKOUT_PATTERNS = {
@@ -383,6 +372,7 @@ def run_agent_loop() -> None:
         max_conc,
     )
     signal_cache.start()
+    signal_cache.flush_pending()
 
     async def _prime() -> None:
         sym = "BTCUSDT"
@@ -841,6 +831,7 @@ def run_agent_loop() -> None:
                 ws_bridge.update_symbols(sorted(ws_symbols))
             signal_cache.update_universe(symbols_to_fetch)
             signal_cache.start()
+            signal_cache.flush_pending()
             if ws_bridge is None:
                 kick = 6
                 kicked = list(symbols_to_fetch[:kick])

@@ -229,6 +229,8 @@ def test_schedule_refresh_triggers_rest_refresh(monkeypatch: pytest.MonkeyPatch)
 
     cache = _build_cache()
     cache.update_universe(["ETHUSDT"])
+    cache.start()
+    cache.flush_pending()
 
     async def fake_rest(symbol: str) -> bool:
         calls.append(symbol)
@@ -244,6 +246,9 @@ def test_schedule_refresh_triggers_rest_refresh(monkeypatch: pytest.MonkeyPatch)
     finally:
         asyncio.set_event_loop(None)
         loop.close()
+
+    cache.flush_pending()
+    cache.stop()
 
     assert calls == ["ETHUSDT"]
 
