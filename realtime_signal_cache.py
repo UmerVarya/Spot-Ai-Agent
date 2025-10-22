@@ -50,15 +50,6 @@ print(
     f"RTSC INIT v2025-10-17 file={__file__} loaded at {datetime.now(timezone.utc).isoformat()}"
 )
 
-BINANCE_MIRRORS = [
-    "https://api.binance.com",
-    "https://api1.binance.com",
-    "https://api2.binance.com",
-    "https://api3.binance.com",
-    # Public mirror (Binance Vision)
-    "https://data-api.binance.vision",
-]
-
 # Hard switch to force REST refreshes when websockets stall.
 RTSC_FORCE_REST: bool = os.getenv("RTSC_FORCE_REST", "0").strip().lower() in (
     "1",
@@ -66,13 +57,21 @@ RTSC_FORCE_REST: bool = os.getenv("RTSC_FORCE_REST", "0").strip().lower() in (
     "yes",
 )
 # Timeout (seconds) for REST kline calls.
-RTSC_REST_TIMEOUT: float = float(os.getenv("RTSC_REST_TIMEOUT", "15"))
+RTSC_REST_TIMEOUT: float = float(os.getenv("RTSC_REST_TIMEOUT", "8"))
 # Number of klines to request during REST refreshes.
-RTSC_REST_LIMIT: int = int(os.getenv("RTSC_REST_LIMIT", "200"))
+RTSC_REST_LIMIT: int = int(os.getenv("RTSC_REST_LIMIT", "2"))
 # Interval for REST klines (should align with trading horizon).
 RTSC_REST_INTERVAL: str = os.getenv("RTSC_REST_INTERVAL", "1m")
 # Seconds after which WS is considered stale and REST is triggered.
 RTSC_WS_STALE_AFTER_SEC: float = float(os.getenv("RTSC_WS_STALE_AFTER", "12"))
+
+BINANCE_MIRRORS = [
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://data-api.binance.vision",
+]
 
 # Optional proxy support for REST client.
 HTTP_PROXY = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
@@ -440,6 +439,7 @@ class RealTimeSignalCache:
         self._ws_bridge: Optional[object] = None
         self._ws_callback_registered = False
         self._last_ws_ts: Dict[str, float] = {}
+        self._refresh_sem = asyncio.Semaphore(5)
 
         existing_rest = getattr(self, "rest", None)
         if existing_rest is not None:
@@ -958,60 +958,36 @@ class RealTimeSignalCache:
         )
 
     async def schedule_refresh(self, symbol: str) -> None:
-        """Schedule a REST refresh for ``symbol`` with per-symbol debouncing."""
+        """Non-blocking dispatcher: always spawns a refresh task."""
 
         key = self._key(symbol)
-        try:
-            logger.info(
-                f"[RTSC] schedule_refresh called for {key}, FORCE_REST={RTSC_FORCE_REST}"
-            )
 
-            with self._lock:
-                if key not in self._symbols:
-                    logger.debug("[RTSC] schedule_refresh ignored for unknown symbol %s", key)
-                    return
+        with self._lock:
+            if key not in self._symbols:
+                logger.debug("[RTSC] schedule_refresh ignored for unknown symbol %s", key)
+                return
 
-                now = time.time()
-                debounce = self._symbol_debounce.get(key, self._default_debounce)
-                last_request = self._last_priority_request.get(key)
-                pending_task = self._rest_refresh_tasks.get(key)
+        self._signal_wake()
+        logger.info(f"[RTSC] schedule_refresh({key}) FORCE_REST={RTSC_FORCE_REST}")
 
-                if pending_task is not None and not pending_task.done():
-                    logger.debug("[RTSC] refresh already pending for %s; skipping", key)
-                    return
-
-                if last_request is not None and now - last_request < debounce:
-                    logger.debug(
-                        "[RTSC] refresh for %s debounced (elapsed=%.3fs < %.3fs)",
-                        key,
-                        now - last_request,
-                        debounce,
+        async def _runner() -> None:
+            async with self._refresh_sem:
+                try:
+                    result = await asyncio.wait_for(
+                        self._refresh_symbol_via_rest(key),
+                        timeout=RTSC_REST_TIMEOUT + 2,
                     )
-                    return
+                    if not result:
+                        raise RuntimeError("REST refresh returned no data")
+                    logger.info(f"[RTSC] OK refresh({key})")
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"[RTSC] TIMEOUT refresh({key}) after {RTSC_REST_TIMEOUT + 2:.1f}s"
+                    )
+                except Exception as exc:
+                    logger.warning(f"[RTSC] FAIL refresh({key}): {exc}")
 
-                self._last_priority_request[key] = now
-                self._priority_symbols.add(key)
-
-            self._signal_wake()
-
-            if not hasattr(self, "refresh_semaphore"):
-                self.refresh_semaphore = asyncio.Semaphore(5)
-
-            async def _refresh_with_lock(sym: str) -> None:
-                async with self.refresh_semaphore:
-                    try:
-                        await self._refresh_symbol_via_rest(sym)
-                        logger.info(f"[RTSC] ✅ Refresh success for {sym}")
-                    except Exception as exc:
-                        logger.warning(f"[RTSC] ❌ Refresh failed for {sym}: {exc}")
-
-            task = asyncio.create_task(_refresh_with_lock(symbol))
-            with self._lock:
-                self._rest_refresh_tasks[key] = task
-            task.add_done_callback(lambda t, k=key: self._on_rest_refresh_done(k, t))
-
-        except Exception as exc:
-            logger.error(f"[RTSC] schedule_refresh error for {key}: {exc}")
+        asyncio.create_task(_runner())
 
     def _ws_is_stale(self, symbol: str) -> bool:
         """Return True when the last WS update for ``symbol`` is stale."""
@@ -1393,104 +1369,91 @@ class RealTimeSignalCache:
         )
 
     async def _refresh_symbol_via_rest(self, symbol: str) -> bool:
-        """Refresh ``symbol`` using REST and update the cache with explicit logging."""
+        """Fetch small recent klines via REST mirrors and update the cache."""
 
-        logger.info(f"[RTSC] ENTER _refresh_symbol_via_rest for {symbol}")
-        prepared = self._prepare_refresh(symbol)
-        if prepared is None:
-            return False
-
-        key, prev_age, attempt_ts = prepared
-        if self._rest_client is None:
-            logger.warning(
-                "RTSC: REST client unavailable; attempting HTTP mirrors for %s",
-                key,
-            )
-
-        interval = RTSC_REST_INTERVAL
-        limit = max(1, RTSC_REST_LIMIT)
-        timeout = max(1.0, RTSC_REST_TIMEOUT)
-        start_dt = datetime.now(timezone.utc)
-
+        key = self._key(symbol)
+        logger.info(f"[RTSC] ENTER _refresh_symbol_via_rest({key})")
         try:
             df = await self._fetch_klines_any(
-                symbol,
-                interval=interval,
-                limit=limit,
-                timeout=timeout,
-            )
-            if df is None or df.empty:
-                raise RuntimeError(f"All REST attempts failed for {symbol}")
-
-            logger.info(f"[DEBUG] REST fetched df shape={df.shape} for {symbol}")
-            df.attrs["rest_refreshed_at"] = start_dt
-            success = self._update_cache(
                 key,
-                df,
-                attempt_ts=attempt_ts,
-                prev_age=prev_age,
-            )
-
-            logger.info(f"[DEBUG] Cache successfully updated for {symbol} via REST")
-            duration_ms = (datetime.now(timezone.utc) - start_dt).total_seconds() * 1000.0
-            last_idx = df.index[-1] if len(df.index) else "n/a"
-            if success:
-                logger.info(
-                    "RTSC: REST refresh OK for %s (interval=%s, limit=%d, last=%s) in %.0fms",
-                    key,
-                    interval,
-                    limit,
-                    last_idx,
-                    duration_ms,
-                )
-            else:
-                logger.warning(
-                    "RTSC: REST refresh fetched data for %s but cache update failed", key
-                )
-            return success
-        except asyncio.TimeoutError:
-            logger.warning(
-                "RTSC: REST fetch timed out for %s after %.1fs", key, timeout
-            )
-            self._record_refresh_error(
-                key,
-                f"REST fetch timeout after {timeout:.0f}s",
-                attempt_ts=attempt_ts,
-            )
-        except (BinanceAPIException, BinanceRequestException) as exc:
-            logger.warning("RTSC: REST fetch Binance error for %s: %s", key, exc)
-            self._record_refresh_error(
-                key, f"REST fetch error: {exc}", attempt_ts=attempt_ts
+                interval=RTSC_REST_INTERVAL,
+                limit=RTSC_REST_LIMIT,
+                timeout=RTSC_REST_TIMEOUT,
             )
         except Exception as exc:
-            logger.exception("RTSC: REST refresh failed for %s: %s", key, exc)
-            self._record_refresh_error(
-                key, f"REST fetch error: {exc}", attempt_ts=attempt_ts
+            logger.warning(f"[RTSC] REST fetch exception for {key}: {exc}")
+            return False
+        if df is None or df.empty:
+            logger.warning(f"[RTSC] REST fetch produced no data for {key}")
+            return False
+
+        score = self._quick_score(key, df)
+        payload = {
+            "df": df,
+            "score": score,
+            "source": "REST",
+            "refreshed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        cached_score = 0.5 if score is None else float(score)
+        direction: Optional[str]
+        if cached_score > 0.5:
+            direction = "long"
+        elif cached_score < 0.5:
+            direction = "short"
+        else:
+            direction = None
+
+        try:
+            cached = CachedSignal(
+                symbol=key,
+                score=cached_score,
+                direction=direction,
+                position_size=0.0,
+                pattern="rest_quick_score",
+                price_data=df,
+                updated_at=time.time(),
+                compute_latency=0.0,
             )
-        return False
+            cached.price_data.attrs["rest_meta"] = {
+                "score": payload["score"],
+                "source": payload["source"],
+                "refreshed_at": payload["refreshed_at"],
+            }
+            logger.debug(
+                "[RTSC] REST payload for %s: rows=%s score=%s",
+                key,
+                len(df),
+                score,
+            )
+
+            with self._lock:
+                self._cache[key] = cached
+                self._last_eval[key] = cached
+                self._last_update_ts[key] = cached.updated_at
+                self._symbol_last_attempt[key] = cached.updated_at
+                self._symbol_last_error.pop(key, None)
+                self._primed_symbols.add(key)
+        except Exception as exc:
+            logger.warning(f"[RTSC] cache update failed for {key}: {exc}")
+            return False
+
+        logger.info(f"[RTSC] cache updated for {key} via REST")
+        return True
 
     async def _fetch_klines_any(
         self, symbol: str, interval: str, limit: int, timeout: float
     ) -> Optional[pd.DataFrame]:
-        """
-        Temporarily skip the python-binance client and try several HTTP mirrors directly.
-        Logs each URL attempted and returns the first non-empty DataFrame.
-        """
+        """Try multiple Binance endpoints directly; log each attempt."""
 
         loop = asyncio.get_running_loop()
-
-        # --- temporarily skip python-binance path ---
-        logger.info(
-            f"[RTSC] Skipping python-binance client for {symbol}; using direct REST mirrors only"
-        )
-
-        # Direct HTTP mirrors (no proxies)
         params = {"symbol": symbol, "interval": interval, "limit": limit}
+
         for base in BINANCE_MIRRORS:
             url = f"{base}/api/v3/klines"
             try:
                 logger.info(f"[RTSC] REST mirror try {url} for {symbol}")
-                r = await asyncio.wait_for(
+                response = await asyncio.wait_for(
                     loop.run_in_executor(
                         None,
                         lambda: requests.get(
@@ -1502,38 +1465,23 @@ class RealTimeSignalCache:
                     ),
                     timeout=timeout + 1,
                 )
-                r.raise_for_status()
-                raw = r.json()
+                response.raise_for_status()
+                raw = response.json()
                 df = self._shape_klines_df(raw)
                 if df is not None and not df.empty:
                     logger.info(
-                        f"[RTSC] REST mirror OK {base} for {symbol} (len={len(df)})"
+                        f"[RTSC] REST mirror OK {base} for {symbol} (n={len(df)})"
                     )
                     return df
                 logger.warning(f"[RTSC] REST mirror EMPTY {base} for {symbol}")
-            except asyncio.TimeoutError:
-                logger.warning(
-                    f"[RTSC] REST mirror TIMEOUT {base} for {symbol} after {timeout}s"
-                )
-            except Exception as e:
-                logger.warning(f"[RTSC] REST mirror ERROR {base} for {symbol}: {e}")
-
-        logger.error(f"[RTSC] All REST mirrors failed for {symbol}")
+            except Exception as exc:
+                logger.warning(f"[RTSC] REST mirror ERROR {base} for {symbol}: {exc}")
         return None
 
-    def _shape_klines_df(self, raw: Any) -> Optional[pd.DataFrame]:
-        """Convert raw kline payloads to the canonical DataFrame shape."""
-
-        if raw is None:
-            return None
-
-        if isinstance(raw, pd.DataFrame):
-            return raw
-
+    def _shape_klines_df(self, raw) -> Optional[pd.DataFrame]:
         if not raw:
-            return pd.DataFrame()
-
-        columns = [
+            return None
+        cols = [
             "open_time",
             "open",
             "high",
@@ -1541,74 +1489,30 @@ class RealTimeSignalCache:
             "close",
             "volume",
             "close_time",
-            "quote_volume",
-            "number_of_trades",
-            "taker_buy_base",
-            "taker_buy_quote",
+            "qav",
+            "num_trades",
+            "taker_base_vol",
+            "taker_quote_vol",
             "ignore",
         ]
-
         try:
-            df_raw = pd.DataFrame(raw, columns=columns)
+            df = pd.DataFrame(raw, columns=cols)
         except Exception:
-            logger.exception("RTSC: Failed to shape klines payload")
+            df = pd.DataFrame(raw)
+            df.columns = cols[: len(df.columns)]
+        for col in ("open", "high", "low", "close", "volume"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["close_dt"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+        df = df.set_index("close_dt").sort_index()
+        return df[["open", "high", "low", "close", "volume"]]
+
+    def _quick_score(self, symbol: str, df: pd.DataFrame) -> Optional[float]:
+        try:
+            last = df["close"].iloc[-1]
+            prev = df["close"].iloc[-2] if len(df) > 1 else last
+            return 0.6 if last > prev else 0.4 if last < prev else 0.5
+        except Exception:
             return None
-
-        numeric_columns = [
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "quote_volume",
-            "taker_buy_base",
-            "taker_buy_quote",
-            "number_of_trades",
-        ]
-        for column in numeric_columns:
-            df_raw[column] = pd.to_numeric(df_raw[column], errors="coerce")
-
-        df_raw["close_dt"] = pd.to_datetime(df_raw["close_time"], unit="ms", utc=True)
-        df_raw = df_raw.dropna(subset=["close_dt"]).sort_values("close_dt")
-        if df_raw.empty:
-            return pd.DataFrame()
-
-        indexed = df_raw.set_index("close_dt")
-        tz = getattr(indexed.index, "tz", None)
-        if tz is not None:
-            indexed.index = indexed.index.tz_convert("UTC").tz_localize(None)
-
-        indexed["taker_sell_base"] = (
-            indexed["volume"].fillna(0.0) - indexed["taker_buy_base"].fillna(0.0)
-        ).clip(lower=0.0)
-        indexed["taker_sell_quote"] = (
-            indexed["quote_volume"].fillna(0.0) - indexed["taker_buy_quote"].fillna(0.0)
-        ).clip(lower=0.0)
-
-        df = indexed[
-            [
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "quote_volume",
-                "taker_buy_base",
-                "taker_buy_quote",
-                "taker_sell_base",
-                "taker_sell_quote",
-                "number_of_trades",
-            ]
-        ].copy()
-
-        if not df.empty:
-            logger.debug(
-                "RTSC: REST shaped %d klines [%s → %s]",
-                len(df),
-                df.index[0],
-                df.index[-1],
-            )
-        return df
 
     def _update_cache(
         self,

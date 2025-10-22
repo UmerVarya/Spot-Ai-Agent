@@ -106,6 +106,29 @@ from market_stream import BinanceEventStream
 from observability import log_event, record_metric
 
 
+def dispatch_schedule_refresh(cache, symbol: str) -> None:
+    """Route schedule_refresh through the running loop without blocking."""
+
+    worker_loop = getattr(cache, "_loop", None)
+    if worker_loop and worker_loop.is_running():
+        asyncio.run_coroutine_threadsafe(cache.schedule_refresh(symbol), worker_loop)
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            cache.force_refresh(symbol)
+        except Exception:
+            logger.debug(
+                "dispatch_schedule_refresh fallback force_refresh failed for %s",
+                symbol,
+                exc_info=True,
+            )
+    else:
+        loop.create_task(cache.schedule_refresh(symbol))
+
+
 BREAKOUT_PATTERNS = {
     "triangle_wedge",
     "flag",
@@ -391,23 +414,6 @@ def run_agent_loop() -> None:
 
     ws_bridge: Optional[WSPriceBridge]
 
-    def _dispatch_schedule_refresh(symbol: str) -> None:
-        loop = getattr(signal_cache, "_loop", None)
-        if loop and loop.is_running():
-            asyncio.run_coroutine_threadsafe(signal_cache.schedule_refresh(symbol), loop)
-            return
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            try:
-                signal_cache.force_refresh(symbol)
-            except Exception:
-                logger.debug(
-                    "Fallback force_refresh failed for %s", symbol, exc_info=True
-                )
-        else:
-            running_loop.create_task(signal_cache.schedule_refresh(symbol))
-
     if ENABLE_WS_BRIDGE:
         def _handle_ws_kline(symbol: str, frame: str, payload: Dict[str, Any]) -> None:
             try:
@@ -424,7 +430,7 @@ def run_agent_loop() -> None:
                         close_price=payload.get("c"),
                     )
                     signal_cache.on_ws_bar_close(symbol, close_ts)
-                    _dispatch_schedule_refresh(symbol)
+                    dispatch_schedule_refresh(signal_cache, symbol)
             except Exception:
                 logger.debug("WS kline handler error for %s", symbol, exc_info=True)
 
@@ -607,7 +613,7 @@ def run_agent_loop() -> None:
                             gap,
                         )
                         for sym in tracked_symbols:
-                            _dispatch_schedule_refresh(sym)
+                            dispatch_schedule_refresh(signal_cache, sym)
                         last_rest_backfill = now
             guard_stop.wait(guard_interval)
 
@@ -815,8 +821,9 @@ def run_agent_loop() -> None:
             signal_cache.update_universe(symbols_to_fetch)
             signal_cache.start()
             if ws_bridge is None:
-                for symbol in symbols_to_fetch:
-                    _dispatch_schedule_refresh(symbol)
+                kick = 6
+                for symbol in symbols_to_fetch[:kick]:
+                    dispatch_schedule_refresh(signal_cache, symbol)
             if signal_cache.circuit_breaker_active():
                 logger.warning(
                     "Signal evaluator circuit breaker active; skipping trade evaluation this cycle."
