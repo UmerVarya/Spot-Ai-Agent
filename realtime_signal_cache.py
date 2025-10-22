@@ -820,12 +820,16 @@ class RealTimeSignalCache:
         if self._bg_thread and self._bg_thread.is_alive():
             logger.warning("[RTSC] bg loop already running")
         else:
+            self._loop_ready.clear()
             self._bg_thread = threading.Thread(
                 target=_run,
                 name="rtsc-bg",
                 daemon=True,
             )
             self._bg_thread.start()
+
+        if not self._loop_ready.wait(timeout=5.0):
+            logger.warning("[RTSC] bg loop did not signal readiness within 5s")
 
         if getattr(self, "_bg_task", None) and not self._bg_task.done():
             logger.info("RTSC: worker already running")
