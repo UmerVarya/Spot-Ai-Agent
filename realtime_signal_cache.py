@@ -450,6 +450,24 @@ class RealTimeSignalCache:
         self._last_ws_ts: Dict[str, float] = {}
         self._refresh_sem = asyncio.Semaphore(5)
 
+        # --- background loop dedicated to refresh tasks ---
+        self._bg_loop = asyncio.new_event_loop()
+
+        def _bg_loop_runner(loop: asyncio.AbstractEventLoop) -> None:
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        self._bg_thread = threading.Thread(
+            target=_bg_loop_runner,
+            args=(self._bg_loop,),
+            name="rtsc-bg-loop",
+            daemon=True,
+        )
+        self._bg_thread.start()
+        logging.getLogger(__name__).info(
+            "[RTSC] background loop started in thread rtsc-bg-loop"
+        )
+
         existing_rest = getattr(self, "rest", None)
         if existing_rest is not None:
             self._rest_client = existing_rest
@@ -844,6 +862,13 @@ class RealTimeSignalCache:
         self._thread = None
         self._loop = None
         self._ready = False
+        if getattr(self, "_bg_loop", None) is not None:
+            try:
+                self._bg_loop.call_soon_threadsafe(self._bg_loop.stop)
+            except RuntimeError:
+                pass
+        if getattr(self, "_bg_thread", None) is not None and self._bg_thread.is_alive():
+            self._bg_thread.join(timeout=2.0)
 
     def update_universe(self, symbols: Iterable[str]) -> None:
         """Update the symbol universe tracked by the cache."""
@@ -966,6 +991,18 @@ class RealTimeSignalCache:
             close_ts_ms=close_ts_ms,
         )
 
+    def _submit_bg(self, coro: Awaitable[Any]) -> asyncio.Future:
+        """Submit a coroutine to the dedicated RTSC background loop."""
+
+        logger = logging.getLogger(__name__)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, self._bg_loop)
+            logger.info("[RTSC] submitted refresh task to bg loop")
+            return fut
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.error(f"[RTSC] failed to submit task to bg loop: {exc}")
+            raise
+
     async def schedule_refresh(self, symbol: str) -> None:
         """Non-blocking dispatcher: always spawns a refresh task."""
 
@@ -977,26 +1014,29 @@ class RealTimeSignalCache:
                 return
 
         self._signal_wake()
-        logger.info(f"[RTSC] schedule_refresh({key}) FORCE_REST={RTSC_FORCE_REST}")
+        logger.info(
+            f"[RTSC] schedule_refresh({key}) FORCE_REST={os.getenv('RTSC_FORCE_REST','0')}"
+        )
 
-        async def _runner() -> None:
+        async def _runner(sym: str) -> None:
+            logger = logging.getLogger(__name__)
             async with self._refresh_sem:
+                logger.info(f"[RTSC] ENTER _refresh_symbol_via_rest({sym}) [bg-loop]")
                 try:
                     result = await asyncio.wait_for(
-                        self._refresh_symbol_via_rest(key),
-                        timeout=RTSC_REST_TIMEOUT + 2,
+                        self._refresh_symbol_via_rest(sym),
+                        timeout=10.0,
                     )
                     if not result:
-                        raise RuntimeError("REST refresh returned no data")
-                    logger.info(f"[RTSC] OK refresh({key})")
+                        logger.warning(f"[RTSC] FAIL refresh({sym}): no data returned")
+                    else:
+                        logger.info(f"[RTSC] OK refresh({sym})")
                 except asyncio.TimeoutError:
-                    logger.warning(
-                        f"[RTSC] TIMEOUT refresh({key}) after {RTSC_REST_TIMEOUT + 2:.1f}s"
-                    )
+                    logger.warning(f"[RTSC] TIMEOUT refresh({sym}) after 10.0s")
                 except Exception as exc:
-                    logger.warning(f"[RTSC] FAIL refresh({key}): {exc}")
+                    logger.warning(f"[RTSC] FAIL refresh({sym}): {exc}")
 
-        asyncio.create_task(_runner())
+        self._submit_bg(_runner(key))
 
     def _ws_is_stale(self, symbol: str) -> bool:
         """Return True when the last WS update for ``symbol`` is stale."""
