@@ -448,7 +448,7 @@ class RealTimeSignalCache:
         self._ws_bridge: Optional[object] = None
         self._ws_callback_registered = False
         self._last_ws_ts: Dict[str, float] = {}
-        self._refresh_sem = asyncio.Semaphore(5)
+        self._refresh_sem: Optional[asyncio.Semaphore] = None
 
         # --- background loop dedicated to refresh tasks ---
         self._bg_loop = asyncio.new_event_loop()
@@ -467,6 +467,17 @@ class RealTimeSignalCache:
         logging.getLogger(__name__).info(
             "[RTSC] background loop started in thread rtsc-bg-loop"
         )
+
+        try:
+            refresh_sem_future = asyncio.run_coroutine_threadsafe(
+                self._create_refresh_semaphore(), self._bg_loop
+            )
+            self._refresh_sem = refresh_sem_future.result()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logging.getLogger(__name__).error(
+                f"[RTSC] failed to initialize refresh semaphore: {exc}"
+            )
+            raise
 
         existing_rest = getattr(self, "rest", None)
         if existing_rest is not None:
@@ -1003,6 +1014,11 @@ class RealTimeSignalCache:
             logger.error(f"[RTSC] failed to submit task to bg loop: {exc}")
             raise
 
+    async def _create_refresh_semaphore(self) -> asyncio.Semaphore:
+        """Create the REST refresh semaphore on the background loop."""
+
+        return asyncio.Semaphore(5)
+
     async def schedule_refresh(self, symbol: str) -> None:
         """Non-blocking dispatcher: always spawns a refresh task."""
 
@@ -1020,7 +1036,11 @@ class RealTimeSignalCache:
 
         async def _runner(sym: str) -> None:
             logger = logging.getLogger(__name__)
-            async with self._refresh_sem:
+            refresh_sem = self._refresh_sem
+            if refresh_sem is None:  # pragma: no cover - defensive guard
+                logger.warning("[RTSC] refresh semaphore not initialized")
+                return
+            async with refresh_sem:
                 logger.info(f"[RTSC] ENTER _refresh_symbol_via_rest({sym}) [bg-loop]")
                 try:
                     result = await asyncio.wait_for(
