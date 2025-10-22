@@ -1,3 +1,6 @@
+import logging, traceback
+logging.getLogger("RTSC").warning(f"[RTSC] MODULE LOADED FROM: {__file__}")
+
 """Real-time signal evaluation cache for the trading agent.
 
 This module decouples heavy indicator computation from the synchronous
@@ -1246,7 +1249,13 @@ class RealTimeSignalCache:
         This makes legacy call sites behave correctly without changing their code.
         """
 
-        import logging, asyncio, threading, time
+        import logging, traceback
+        logging.getLogger("RTSC").warning(
+            f"[RTSC] force_refresh WRAPPER CALLED for {{symbol}}; self={{id(self)}}\n"
+            + "".join(traceback.format_stack(limit=6))
+        )
+
+        import asyncio, threading, time
         logger = logging.getLogger("RTSC")
 
         # Make sure the background loop exists and is running
