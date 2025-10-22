@@ -1314,9 +1314,12 @@ class RealTimeSignalCache:
 
         try:
             fut = asyncio.run_coroutine_threadsafe(_runner(), self._loop)
-            _ = fut.result(timeout=timeout)  # wait for REST path to complete
-            logger.warning(f"[RTSC] OK force_refresh({symbol})")
-            return True
+            result = fut.result(timeout=timeout)  # wait for REST path to complete
+            if result:
+                logger.warning(f"[RTSC] OK force_refresh({symbol})")
+            else:
+                logger.warning(f"[RTSC] FAIL force_refresh({symbol}): refresh returned False")
+            return bool(result)
         except asyncio.TimeoutError:
             logger.warning(f"[RTSC] TIMEOUT force_refresh({symbol}) after {timeout:.1f}s")
             return False
