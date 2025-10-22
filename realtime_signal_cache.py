@@ -1373,6 +1373,14 @@ class RealTimeSignalCache:
 
         key = self._key(symbol)
         logger.info(f"[RTSC] ENTER _refresh_symbol_via_rest({key})")
+
+        prepared = self._prepare_refresh(symbol)
+        if prepared is None:
+            logger.info(f"[RTSC] REST refresh aborted for {key} (circuit open)")
+            return False
+
+        key, _prev_age, attempt_ts = prepared
+
         try:
             df = await self._fetch_klines_any(
                 key,
@@ -1382,9 +1390,15 @@ class RealTimeSignalCache:
             )
         except Exception as exc:
             logger.warning(f"[RTSC] REST fetch exception for {key}: {exc}")
+            self._record_refresh_error(
+                key, f"REST fetch exception: {exc}", attempt_ts=attempt_ts
+            )
             return False
         if df is None or df.empty:
             logger.warning(f"[RTSC] REST fetch produced no data for {key}")
+            self._record_refresh_error(
+                key, "REST fetch produced no data", attempt_ts=attempt_ts
+            )
             return False
 
         score = self._quick_score(key, df)
@@ -1436,6 +1450,9 @@ class RealTimeSignalCache:
                 self._primed_symbols.add(key)
         except Exception as exc:
             logger.warning(f"[RTSC] cache update failed for {key}: {exc}")
+            self._record_refresh_error(
+                key, f"REST cache update failed: {exc}", attempt_ts=attempt_ts
+            )
             return False
 
         logger.info(f"[RTSC] cache updated for {key} via REST")
