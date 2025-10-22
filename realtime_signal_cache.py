@@ -426,6 +426,7 @@ class RealTimeSignalCache:
         self._symbol_last_error: Dict[str, Tuple[float, str]] = {}
         self._primed_symbols: set[str] = set()
         self._priority_symbols: set[str] = set()
+        self._rest_refresh_tasks: Dict[str, asyncio.Task[Any]] = {}
         self._default_debounce = 0.8
         self._symbol_debounce: Dict[str, float] = {}
         self._symbol_refresh_overrides: Dict[str, float] = {}
@@ -547,6 +548,21 @@ class RealTimeSignalCache:
         async_wake = self._async_wake
         if loop and loop.is_running() and async_wake is not None:
             loop.call_soon_threadsafe(async_wake.set)
+
+    def _on_rest_refresh_done(self, key: str, task: asyncio.Task[Any]) -> None:
+        """Cleanup callback for REST refresh tasks to release bookkeeping state."""
+
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.debug("[RTSC] REST refresh task for %s cancelled", key)
+        except Exception as exc:
+            logger.warning("[RTSC] REST refresh task for %s raised: %s", key, exc)
+        finally:
+            with self._lock:
+                existing = self._rest_refresh_tasks.get(key)
+                if existing is task:
+                    self._rest_refresh_tasks.pop(key, None)
 
     def _get_ws_bridge(self) -> Optional[object]:
         with self._stream_lock:
@@ -941,36 +957,61 @@ class RealTimeSignalCache:
             close_ts_ms=close_ts_ms,
         )
 
-    async def schedule_refresh(self, symbol: str):
-        """
-        Schedule a refresh for the given symbol.
-        Forces REST path when RTSC_FORCE_REST=1.
-        Runs concurrent non-blocking refresh tasks.
-        """
+    async def schedule_refresh(self, symbol: str) -> None:
+        """Schedule a REST refresh for ``symbol`` with per-symbol debouncing."""
 
+        key = self._key(symbol)
         try:
             logger.info(
-                f"[RTSC] schedule_refresh called for {symbol}, FORCE_REST={RTSC_FORCE_REST}"
+                f"[RTSC] schedule_refresh called for {key}, FORCE_REST={RTSC_FORCE_REST}"
             )
 
-            # make sure semaphore exists
-            if not hasattr(self, "refresh_semaphore"):
-                self.refresh_semaphore = asyncio.Semaphore(5)  # limit to 5 concurrent tasks
+            with self._lock:
+                if key not in self._symbols:
+                    logger.debug("[RTSC] schedule_refresh ignored for unknown symbol %s", key)
+                    return
 
-            async def _refresh_with_lock(sym: str):
+                now = time.time()
+                debounce = self._symbol_debounce.get(key, self._default_debounce)
+                last_request = self._last_priority_request.get(key)
+                pending_task = self._rest_refresh_tasks.get(key)
+
+                if pending_task is not None and not pending_task.done():
+                    logger.debug("[RTSC] refresh already pending for %s; skipping", key)
+                    return
+
+                if last_request is not None and now - last_request < debounce:
+                    logger.debug(
+                        "[RTSC] refresh for %s debounced (elapsed=%.3fs < %.3fs)",
+                        key,
+                        now - last_request,
+                        debounce,
+                    )
+                    return
+
+                self._last_priority_request[key] = now
+                self._priority_symbols.add(key)
+
+            self._signal_wake()
+
+            if not hasattr(self, "refresh_semaphore"):
+                self.refresh_semaphore = asyncio.Semaphore(5)
+
+            async def _refresh_with_lock(sym: str) -> None:
                 async with self.refresh_semaphore:
-                    logger.info(f"[RTSC] ENTER _refresh_symbol_via_rest for {sym}")
                     try:
                         await self._refresh_symbol_via_rest(sym)
                         logger.info(f"[RTSC] ✅ Refresh success for {sym}")
-                    except Exception as e:
-                        logger.warning(f"[RTSC] ❌ Refresh failed for {sym}: {e}")
+                    except Exception as exc:
+                        logger.warning(f"[RTSC] ❌ Refresh failed for {sym}: {exc}")
 
-            # fire and forget → don't block other symbols
-            asyncio.create_task(_refresh_with_lock(symbol))
+            task = asyncio.create_task(_refresh_with_lock(symbol))
+            with self._lock:
+                self._rest_refresh_tasks[key] = task
+            task.add_done_callback(lambda t, k=key: self._on_rest_refresh_done(k, t))
 
-        except Exception as e:
-            logger.error(f"[RTSC] schedule_refresh error for {symbol}: {e}")
+        except Exception as exc:
+            logger.error(f"[RTSC] schedule_refresh error for {key}: {exc}")
 
     def _ws_is_stale(self, symbol: str) -> bool:
         """Return True when the last WS update for ``symbol`` is stale."""
