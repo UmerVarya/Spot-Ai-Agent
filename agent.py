@@ -1150,6 +1150,9 @@ def run_agent_loop() -> None:
                                 max_wait,
                             )
                         timeout = max(1.0, SIGNAL_CACHE_PRIME_TIMEOUT)
+                        # better, non-blocking:
+                        # dispatch_schedule_refresh(signal_cache, symbol_key) or signal_cache.enqueue_refresh(symbol_key)
+                        # if you need a boolean *now*, you can still:
                         success = signal_cache.force_refresh(symbol_key, timeout=timeout)
                         manual_cache_primes[symbol_key] = now_ts
                         if success:

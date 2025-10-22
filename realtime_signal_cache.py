@@ -28,7 +28,6 @@ import os
 import threading
 import time
 from collections import deque
-from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -1240,72 +1239,89 @@ class RealTimeSignalCache:
             pending = pending[: int(limit)]
         return pending
 
-    def force_refresh(self, symbol: str, *, timeout: float = 15.0) -> bool:
-        """Synchronously refresh ``symbol`` to break through prolonged warm-ups.
-
-        When the asynchronous worker struggles to prime a symbol (for example
-        because repeated fetch attempts hit transient API failures), the agent
-        can call this helper to perform a blocking refresh.  The call prefers
-        to schedule work on the background loop when it is running, falling
-        back to executing the refresh in a dedicated event loop otherwise.
-
-        Parameters
-        ----------
-        symbol:
-            Trading pair to refresh.
-        timeout:
-            Maximum time (seconds) to wait for the background loop to finish
-            the refresh when it is already running.  This is ignored when the
-            worker is offline and the method spins up a temporary event loop
-            instead.
+    def force_refresh(self, symbol: str, timeout: float = 15.0) -> bool:
+        """
+        Backward-compatible synchronous entry that now *runs the async REST refresh
+        on the RTSC background loop* and waits for completion up to `timeout`.
+        This makes legacy call sites behave correctly without changing their code.
         """
 
-        import traceback
+        import logging, asyncio, threading, time
+        logger = logging.getLogger("RTSC")
 
-        logging.getLogger("RTSC").warning(
-            f"[RTSC] force_refresh CALLED for {symbol}\n"
-            + "".join(traceback.format_stack(limit=8))
-        )
+        # Make sure the background loop exists and is running
+        if getattr(self, "_loop_ready", None) is None:
+            self._loop_ready = threading.Event()
 
-        key = self._key(symbol)
-        loop = self._worker_loop
-        if loop and loop.is_running():
-            logger.info("RTSC: force-refresh scheduling %s on worker loop", key)
-            future = asyncio.run_coroutine_threadsafe(self._refresh_symbol(key), loop)
-            try:
-                return bool(future.result(timeout))
-            except FutureTimeout:
-                future.cancel()
-                logger.warning(
-                    "RTSC: force refresh for %s timed out after %.1fs", key, timeout
-                )
-                return False
-            except Exception:
-                logger.exception("RTSC: force refresh for %s failed on worker loop", key)
-                return False
+        loop = getattr(self, "_loop", None)
+        if loop is None or not self._loop_ready.is_set() or not loop.is_running():
+            bg_thread = getattr(self, "_bg_thread", None)
+            if bg_thread is None or not bg_thread.is_alive():
+                self._loop_ready.clear()
 
-        logger.info(
-            "RTSC: force-refresh running %s on temporary event loop via REST fallback",
-            key,
-        )
-        try:
-            rest_success = bool(asyncio.run(self._refresh_symbol_via_rest(key)))
-        except Exception:
-            logger.exception(
-                "RTSC: REST fallback force refresh for %s failed", key
+                def _run_loop() -> None:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    self._loop = loop
+                    self._sem = asyncio.Semaphore(5)
+                    self._loop_ready.set()
+                    LOGGER.warning("[RTSC] bg loop READY [force_refresh]")
+                    try:
+                        loop.run_forever()
+                    finally:
+                        self._loop_ready.clear()
+                        self._sem = None
+                        self._loop = None
+                        LOGGER.warning("[RTSC] bg loop STOPPED [force_refresh]")
+                        try:
+                            loop.close()
+                        except Exception:
+                            logger.debug("[RTSC] error closing bg loop", exc_info=True)
+
+                try:
+                    self._bg_thread = threading.Thread(
+                        target=_run_loop,
+                        name="rtsc-bg",
+                        daemon=True,
+                    )
+                    self._bg_thread.start()
+                except Exception as e:
+                    logger.warning(
+                        f"[RTSC] force_refresh({symbol}) could not spawn bg loop: {e}"
+                    )
+                    return False
+
+            # small wait for READY (avoid a race)
+            for _ in range(100):  # up to ~1s in 10ms steps
+                loop = getattr(self, "_loop", None)
+                if loop is not None and self._loop_ready.is_set() and loop.is_running():
+                    break
+                time.sleep(0.01)
+
+        if getattr(self, "_loop", None) is None or not self._loop.is_running():
+            logger.warning(f"[RTSC] force_refresh({symbol}) bg loop not running")
+            return False
+
+        async def _runner():
+            logger.warning(f"[RTSC] ENTER _refresh_symbol_via_rest({symbol}) [force_refresh]")
+            ok = await self._refresh_symbol_via_rest(symbol)
+            if ok:
+                return True
+            logger.warning(
+                f"[RTSC] REST force_refresh({symbol}) failed; retrying configured fetcher"
             )
-            rest_success = False
-        if rest_success:
-            return True
+            return await self._refresh_symbol(symbol, force_rest=False)
 
-        logger.info(
-            "RTSC: REST fallback failed for %s; retrying with configured fetcher",
-            key,
-        )
         try:
-            return bool(asyncio.run(self._refresh_symbol(key, force_rest=False)))
-        except Exception:
-            logger.exception("RTSC: force refresh for %s failed via synchronous path", key)
+            fut = asyncio.run_coroutine_threadsafe(_runner(), self._loop)
+            _ = fut.result(timeout=timeout)  # wait for REST path to complete
+            logger.warning(f"[RTSC] OK force_refresh({symbol})")
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(f"[RTSC] TIMEOUT force_refresh({symbol}) after {timeout:.1f}s")
+            return False
+        except Exception as e:
+            logger.warning(f"[RTSC] FAIL force_refresh({symbol}): {e}")
             return False
 
     async def _worker(self) -> None:
