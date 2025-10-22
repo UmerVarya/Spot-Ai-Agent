@@ -383,6 +383,21 @@ def run_agent_loop() -> None:
         max_conc,
     )
     signal_cache.start()
+
+    async def _prime() -> None:
+        sym = "BTCUSDT"
+        logger.info(f"[RTSC] PRIME: scheduling first refresh for {sym}")
+        await signal_cache.schedule_refresh(sym)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        sym = "BTCUSDT"
+        logger.info(f"[RTSC] PRIME: scheduling first refresh for {sym}")
+        asyncio.run(signal_cache.schedule_refresh(sym))
+    else:
+        loop.create_task(_prime())
+
     ws_state_lock = threading.Lock()
     ws_state = {"last": time.time(), "stale": False}
     closed_bar_lock = threading.Lock()
@@ -430,7 +445,9 @@ def run_agent_loop() -> None:
                         close_price=payload.get("c"),
                     )
                     signal_cache.on_ws_bar_close(symbol, close_ts)
+                    kicked = [symbol]
                     dispatch_schedule_refresh(signal_cache, symbol)
+                    logger.info(f"[RTSC] kicked {len(kicked)} symbols this pass: {kicked}")
             except Exception:
                 logger.debug("WS kline handler error for %s", symbol, exc_info=True)
 
@@ -612,8 +629,12 @@ def run_agent_loop() -> None:
                             "ws_gap_seconds",
                             gap,
                         )
-                        for sym in tracked_symbols:
+                        kicked = list(tracked_symbols)
+                        for sym in kicked:
                             dispatch_schedule_refresh(signal_cache, sym)
+                        logger.info(
+                            f"[RTSC] kicked {len(kicked)} symbols this pass: {kicked}"
+                        )
                         last_rest_backfill = now
             guard_stop.wait(guard_interval)
 
@@ -822,8 +843,12 @@ def run_agent_loop() -> None:
             signal_cache.start()
             if ws_bridge is None:
                 kick = 6
-                for symbol in symbols_to_fetch[:kick]:
+                kicked = list(symbols_to_fetch[:kick])
+                for symbol in kicked:
                     dispatch_schedule_refresh(signal_cache, symbol)
+                logger.info(
+                    f"[RTSC] kicked {len(kicked)} symbols this pass: {kicked}"
+                )
             if signal_cache.circuit_breaker_active():
                 logger.warning(
                     "Signal evaluator circuit breaker active; skipping trade evaluation this cycle."

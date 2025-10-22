@@ -36,12 +36,21 @@ except Exception:  # pragma: no cover - allow runtime without python-binance
     class BinanceAPIException(Exception):
         ...
 
-    class BinanceRequestException(Exception):
-        ...
+class BinanceRequestException(Exception):
+    ...
 
+
+# Route RTSC logs to the root logger so they appear with "__main__"
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)        # make it chatty
-logger.propagate = True              # bubble up to root logger
+logger.setLevel(logging.INFO)
+logger.propagate = True  # ensure logs bubble up
+
+# Optional: if the root has no handlers (rare in systemd), attach a basic one
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 VERSION_TAG = "RTSC-PRIME-UMER-2"
 logger.warning("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
