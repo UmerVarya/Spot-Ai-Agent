@@ -1,6 +1,3 @@
-import logging, traceback
-logging.getLogger("RTSC").warning(f"[RTSC] MODULE LOADED FROM: {__file__}")
-
 """Real-time signal evaluation cache for the trading agent.
 
 This module decouples heavy indicator computation from the synchronous
@@ -16,20 +13,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-root = logging.getLogger()
-if not root.handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-root.setLevel(logging.INFO)
-
-LOGGER = logging.getLogger("RTSC")
-LOGGER.propagate = True
-LOGGER.setLevel(logging.INFO)
 import os
 import threading
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,14 +36,29 @@ except Exception:  # pragma: no cover - allow runtime without python-binance
     class BinanceAPIException(Exception):
         ...
 
+
 class BinanceRequestException(Exception):
     ...
 
+
+root = logging.getLogger()
+if not root.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+root.setLevel(logging.INFO)
+
+LOGGER = logging.getLogger("RTSC")
+LOGGER.propagate = True
+LOGGER.setLevel(logging.INFO)
 
 # Route RTSC logs to the root logger so they appear with "__main__"
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logger.propagate = True  # ensure logs bubble up
+
+LOGGER.warning("[RTSC] MODULE LOADED FROM: %s", __file__)
 
 VERSION_TAG = "RTSC-PRIME-UMER-2"
 LOGGER.warning("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
@@ -64,6 +66,7 @@ LOGGER.warning("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
 print(
     f"RTSC INIT v2025-10-17 file={__file__} loaded at {datetime.now(timezone.utc).isoformat()}"
 )
+
 
 # Hard switch to force REST refreshes when websockets stall.
 RTSC_FORCE_REST: bool = os.getenv("RTSC_FORCE_REST", "0").strip().lower() in (
