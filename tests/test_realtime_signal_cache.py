@@ -4,6 +4,7 @@ from types import MethodType
 from typing import Awaitable, Callable, Dict, Iterable, Optional, Tuple
 
 import pandas as pd
+
 import pytest
 
 from realtime_signal_cache import CachedSignal, RealTimeSignalCache
@@ -223,14 +224,28 @@ def test_force_refresh_while_worker_running() -> None:
         cache.stop()
 
 
-def test_schedule_refresh_respects_debounce() -> None:
+def test_schedule_refresh_triggers_rest_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
     cache = _build_cache()
     cache.update_universe(["ETHUSDT"])
-    cache.schedule_refresh("ETHUSDT")
-    first_request = cache._last_priority_request.get("ETHUSDT")
-    assert first_request is not None
-    cache.schedule_refresh("ETHUSDT")
-    assert len(cache._priority_symbols) == 1
+
+    async def fake_rest(symbol: str) -> bool:
+        calls.append(symbol)
+        return True
+
+    monkeypatch.setattr(cache, "_refresh_symbol_via_rest", fake_rest)
+
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(cache.schedule_refresh("ETHUSDT"))
+        loop.run_until_complete(asyncio.sleep(0.05))
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+    assert calls == ["ETHUSDT"]
 
 
 def test_on_ws_bar_close_records_timestamp() -> None:
