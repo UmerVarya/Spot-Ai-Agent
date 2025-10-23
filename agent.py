@@ -709,7 +709,7 @@ def run_agent_loop() -> None:
             btc_trend_bias = "flat"
             try:
                 btc_df = asyncio.run(get_price_data_async("BTCUSDT"))
-                if btc_df is not None:
+                if btc_df is not None and not btc_df.empty:
                     btc_vol = atr_percentile(
                         btc_df["high"], btc_df["low"], btc_df["close"]
                     )
@@ -727,6 +727,8 @@ def run_agent_loop() -> None:
                     except Exception as trend_exc:
                         logger.debug("BTC trend estimation failed: %s", trend_exc, exc_info=True)
                         btc_trend_bias = "flat"
+                else:
+                    btc_vol = np.nan
             except Exception as e:
                 logger.warning("Could not compute BTC volatility: %s", e)
                 btc_trend_bias = "flat"
