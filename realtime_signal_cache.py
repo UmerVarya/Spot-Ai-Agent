@@ -877,10 +877,10 @@ class RealTimeSignalCache:
             )
             self._bg_thread.start()
         else:
-            # LOGGER.warning("[RTSC] bg loop already running")
+            logger.debug("[RTSC] bg loop already running")
 
         if not self._loop_ready.wait(timeout=5.0):
-            # LOGGER.warning("[RTSC] bg loop did not signal readiness within 5s")
+            logger.debug("[RTSC] bg loop did not signal readiness within 5s")
         else:
             self.flush_pending()
 
@@ -915,7 +915,7 @@ class RealTimeSignalCache:
             self._thread = threading.Thread(target=runner, daemon=True, name="rtsc-worker")
             self._thread.start()
             if not self._worker_loop_ready.wait(timeout=1.0):
-                # logger.warning("RTSC: worker loop did not signal readiness within 1s")
+                logger.debug("RTSC: worker loop did not signal readiness within 1s")
 
         t0 = time.time()
         self._warmup_started_at = t0
@@ -1127,9 +1127,9 @@ class RealTimeSignalCache:
                         # LOGGER.warning(f"[RTSC] OK refresh({sym})")
                         pass
                 except asyncio.TimeoutError:
-                    # LOGGER.warning(f"[RTSC] TIMEOUT refresh({sym})")
+                    logger.debug("[RTSC] TIMEOUT refresh(%s)", sym)
                 except Exception as exc:
-                    # LOGGER.warning(f"[RTSC] FAIL refresh({sym}): {exc}")
+                    logger.debug("[RTSC] FAIL refresh(%s): %s", sym, exc)
 
         fut = self._submit_bg(_runner(key))
         # LOGGER.warning(f"[RTSC] submitted to bg loop: {key} ({fut})")
@@ -1733,7 +1733,9 @@ class RealTimeSignalCache:
                     return df
                 # logger.warning(f"[RTSC] REST mirror EMPTY {base} for {symbol}")
             except Exception as exc:
-                # logger.warning(f"[RTSC] REST mirror ERROR {base} for {symbol}: {exc}")
+                logger.debug(
+                    "[RTSC] REST mirror ERROR %s for %s: %s", base, symbol, exc
+                )
         return None
 
     def _shape_klines_df(self, raw) -> Optional[pd.DataFrame]:
