@@ -13,6 +13,9 @@ class GlobalQuietFilter(logging.Filter):
 
     def filter(self, record):
         msg = record.getMessage()
+        # Always keep error-level logs regardless of spam patterns
+        if record.levelno >= logging.ERROR:
+            return True
         # Keep warmup/errors/trades
         if any(re.search(p, msg) for p in self.KEEP_PATTERNS):
             return True
