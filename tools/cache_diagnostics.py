@@ -1,153 +1,47 @@
-import json
-import time
+#!/usr/bin/env python3
+"""
+Extended RealTimeSignalCache diagnostic tool.
+Shows symbol freshness, live scores, and open trade info.
+"""
+
+import os, json
 from datetime import datetime
-from pathlib import Path
-from typing import Optional
 
-import realtime_signal_cache as rtsc
+from core.realtime_signal_cache import RealTimeSignalCache
+from core.trade_storage import TradeStorage
 
-if hasattr(rtsc, "cache_diagnostics_path"):
-    CACHE_PATH = Path(rtsc.cache_diagnostics_path())
-else:  # pragma: no cover - legacy compatibility
-    CACHE_PATH = Path(rtsc.cache_state_file())
+def main():
+    print(f"\n🧠  RealTimeSignalCache Status ({datetime.utcnow():%H:%M:%S UTC})\n")
 
+    # Load RTSC
+    rtsc = RealTimeSignalCache.load()
+    cache = getattr(rtsc, "cache", {})
+    print(f"Symbols tracked: {len(cache)}")
 
-def _metric_display(metric):
-    if isinstance(metric, dict):
-        value = metric.get("display")
-        if isinstance(value, (int, float)):
-            return float(value)
-        value = metric.get("raw")
-        if isinstance(value, (int, float)):
-            return float(value)
-        return None
-    if isinstance(metric, (int, float)):
-        return float(metric)
-    return None
+    # Load open trades
+    try:
+        store = TradeStorage.load()
+        open_trades = {t["symbol"]: t for t in store.open_trades.values()}
+    except Exception:
+        open_trades = {}
 
+    header = f"{'SYMBOL':10} | {'SCORE':6} | {'CONF':5} | {'DIR':6} | {'STATE':8} | {'AGE':>4}s | {'TRADE?'}"
+    print(header)
+    print("-" * len(header))
 
-def pending_diagnostics(limit: Optional[int] = None) -> Path:
-    """Trigger a diagnostics snapshot and return the resulting file path."""
+    for sym, info in sorted(cache.items()):
+        score = info.get("score", 0)
+        conf = info.get("confidence", 0)
+        direction = info.get("direction", "-")
+        age = round(info.get("age", 0), 1)
+        state = "stale" if info.get("stale_flag") else "fresh"
+        has_trade = "🟢 open" if sym in open_trades else "⚪ none"
+        print(f"{sym:10} | {score:<6.2f} | {conf:<5.1f} | {direction:<6} | {state:<8} | {age:>4} | {has_trade}")
 
-    helper = getattr(rtsc, "pending_diagnostics", None)
-    if not callable(helper):
-        raise RuntimeError(
-            "RealTimeSignalCache does not expose pending_diagnostics(); ensure the agent is running."
-        )
-
-    if limit is None:
-        result = helper()
-    else:
-        result = helper(limit=limit)
-
-    if isinstance(result, (str, Path)):
-        path = Path(result)
-    else:
-        path = CACHE_PATH
-
-    return path.expanduser()
-
-
-def load_cache():
-    if not CACHE_PATH.exists():
-        print(
-            "⚠️ No diagnostics snapshot found — attempting to trigger pending_diagnostics()."
-        )
-        snapshot_path: Optional[Path] = None
-        try:
-            snapshot_path = pending_diagnostics()
-        except Exception as exc:
-            print(f"❌ Unable to trigger pending_diagnostics automatically: {exc}")
-        else:
-            if snapshot_path.exists():
-                print(f"✅ Diagnostics snapshot written to: {snapshot_path}")
-            else:
-                print(f"⚠️ pending_diagnostics() returned {snapshot_path}, but it does not exist yet.")
-
-        if not CACHE_PATH.exists():
-            print(f"Expected at: {CACHE_PATH}")
-            return
-
-    with CACHE_PATH.open("r") as f:
-        data = json.load(f)
-
-    if isinstance(data, dict) and "pending" in data:
-        generated = data.get("generated_at")
-        timestamp = (
-            datetime.utcfromtimestamp(float(generated)).strftime("%H:%M:%S")
-            if isinstance(generated, (int, float))
-            else datetime.utcnow().strftime("%H:%M:%S")
-        )
-        ready = list(map(str, data.get("ready", [])))
-        pending = list(data.get("pending", []))
-        universe = data.get("universe")
-        tracked = (
-            len(universe)
-            if isinstance(universe, (list, tuple, set))
-            else len(set(ready)) + len(pending)
-        )
-        print(f"\n🔍 RealTimeSignalCache Status ({timestamp} UTC)")
-        print("─────────────────────────────────────────────")
-        print(f"Symbols tracked: {tracked}")
-        print(f"Ready for scoring: {len(ready)} ✅")
-        print(f"Waiting / stale: {len(pending)} 🕒\n")
-
-        def sort_key(entry):
-            waiting = _metric_display(entry.get("waiting_for"))
-            stale_age = _metric_display(entry.get("stale_age"))
-            return (
-                waiting if waiting is not None else -1.0,
-                stale_age if stale_age is not None else -1.0,
-            )
-
-        for entry in sorted(pending, key=sort_key, reverse=True):
-            symbol = str(entry.get("symbol", "?"))
-            pieces = []
-            waiting_for = _metric_display(entry.get("waiting_for"))
-            if waiting_for is not None:
-                pieces.append(f"pending={waiting_for:.1f}s")
-            stale_age = _metric_display(entry.get("stale_age"))
-            if stale_age is not None:
-                pieces.append(f"stale={stale_age:.1f}s")
-            request_wait = _metric_display(entry.get("request_wait"))
-            if request_wait is not None:
-                pieces.append(f"since-request={request_wait:.1f}s")
-            error_msg = entry.get("last_error")
-            if error_msg:
-                pieces.append(f"error={error_msg}")
-            print(f"  - {symbol:10s} {' | '.join(pieces)}")
-
-        print("─────────────────────────────────────────────")
-        return
-
-    # Legacy flat JSON mapping fallback
-    if not isinstance(data, dict):
-        print("⚠️ Unsupported diagnostics format.")
-        return
-
-    now = time.time()
-    ready, stale = [], []
-
-    for sym, meta in data.items():
-        age = now - meta.get("last_update", 0)
-        if meta.get("bars", 0) >= 20 and age < 180:
-            ready.append(sym)
-        else:
-            stale.append((sym, age))
-
-    print(
-        f"\n🔍 RealTimeSignalCache Status ({datetime.utcnow().strftime('%H:%M:%S')} UTC)"
-    )
-    print("─────────────────────────────────────────────")
-    print(f"Symbols tracked: {len(data)}")
-    print(f"Ready for scoring: {len(ready)} ✅")
-    print(f"Waiting / stale: {len(stale)} 🕒\n")
-
-    for sym, age in sorted(stale, key=lambda x: -x[1]):
-        print(f"  - {sym:10s} (age={age:.1f}s)")
-
-    print("─────────────────────────────────────────────")
-
+    print("\nSummary:")
+    print(f"  Ready for scoring: {len([i for i in cache.values() if not i.get('stale_flag')])}")
+    print(f"  Waiting/stale: {len([i for i in cache.values() if i.get('stale_flag')])}")
+    print(f"  Open trades: {len(open_trades)}")
 
 if __name__ == "__main__":
-    load_cache()
+    main()
