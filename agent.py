@@ -13,6 +13,8 @@ computed ``allowed_new`` value was being treated as a correlation threshold,
 resulting in at most two signals being selected regardless of available slots.
 """
 
+import quiet_logging  # silences Binance/RTSC spam globally
+
 from log_utils import setup_logger, LOG_FILE
 
 logger = setup_logger(__name__)
