@@ -88,7 +88,8 @@ python agent.py
 
 See [docs/realtime_timing_guidelines.md](docs/realtime_timing_guidelines.md) for live stream timing and debounce practices that keep
 signal generation aligned with Binance server time and resilient to noisy
-tick bursts.
+tick bursts. The REST vs. WebSocket responsibilities for each pipeline stage
+are documented in [docs/data_feed_pipeline.md](docs/data_feed_pipeline.md).
 
 **Dashboard only**
 
