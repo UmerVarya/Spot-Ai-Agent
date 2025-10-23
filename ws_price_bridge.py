@@ -200,8 +200,19 @@ class WSPriceBridge:
             if not tasks:
                 await asyncio.sleep(1.0)
                 continue
-            if self._heartbeat_task is None:
+            if self._heartbeat_task is None or self._heartbeat_task.done():
+                if self._heartbeat_task is not None and self._heartbeat_task.done():
+                    try:
+                        self._heartbeat_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        logger.debug(
+                            "WS bridge heartbeat watcher finished with error",
+                            exc_info=True,
+                        )
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_watch())
+                self._heartbeat_task.add_done_callback(self._on_heartbeat_done)
             try:
                 await asyncio.gather(*tasks)
             except asyncio.CancelledError:
@@ -374,6 +385,20 @@ class WSPriceBridge:
                     return
         except asyncio.CancelledError:
             raise
+
+    def _on_heartbeat_done(self, task: asyncio.Task) -> None:
+        if task is not self._heartbeat_task:
+            return
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug(
+                "WS bridge heartbeat watcher finished with error", exc_info=True
+            )
+        if task is self._heartbeat_task:
+            self._heartbeat_task = None
 
     def _notify_stale(self, gap: float) -> None:
         callback = self._on_stale
