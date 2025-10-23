@@ -68,6 +68,13 @@ print(
 )
 
 
+# Optional verbose logging for debugging REST refresh flows.
+RTSC_DEBUG: bool = os.getenv("RTSC_DEBUG", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 # Hard switch to force REST refreshes when websockets stall.
 RTSC_FORCE_REST: bool = os.getenv("RTSC_FORCE_REST", "0").strip().lower() in (
     "1",
@@ -1068,7 +1075,8 @@ class RealTimeSignalCache:
                     await asyncio.wait_for(
                         self._refresh_symbol_via_rest(sym), timeout=10
                     )
-                    LOGGER.warning(f"[RTSC] OK refresh({sym})")
+                    if RTSC_DEBUG:
+                        LOGGER.warning(f"[RTSC] OK refresh({sym})")
                 except asyncio.TimeoutError:
                     LOGGER.warning(f"[RTSC] TIMEOUT refresh({sym})")
                 except Exception as exc:
@@ -1543,7 +1551,8 @@ class RealTimeSignalCache:
                 timeout=RTSC_REST_TIMEOUT,
             )
             if df is not None and not df.empty:
-                LOGGER.warning(f"[RTSC] REST fetch OK for {key}: {len(df)} bars")
+                if RTSC_DEBUG:
+                    LOGGER.warning(f"[RTSC] REST fetch OK for {key}: {len(df)} bars")
             else:
                 LOGGER.warning(f"[RTSC] REST fetch empty for {key}")
         except Exception as exc:  # pragma: no cover - debug logging only
@@ -1619,7 +1628,8 @@ class RealTimeSignalCache:
             LOGGER.warning(f"[RTSC] REST cache update FAIL for {key}")
             return False
 
-        LOGGER.warning(f"[RTSC] REST cache update OK for {key}")
+        if RTSC_DEBUG:
+            LOGGER.warning(f"[RTSC] REST cache update OK for {key}")
         return True
 
     async def _fetch_klines_rest_df(
@@ -1642,7 +1652,8 @@ class RealTimeSignalCache:
         for base in BINANCE_MIRRORS:
             url = f"{base}/api/v3/klines"
             try:
-                logger.info(f"[RTSC] REST mirror try {url} for {symbol}")
+                if RTSC_DEBUG:
+                    logger.info(f"[RTSC] REST mirror try {url} for {symbol}")
                 response = await asyncio.wait_for(
                     loop.run_in_executor(
                         None,
@@ -1659,9 +1670,10 @@ class RealTimeSignalCache:
                 raw = response.json()
                 df = self._shape_klines_df(raw)
                 if df is not None and not df.empty:
-                    logger.info(
-                        f"[RTSC] REST mirror OK {base} for {symbol} (n={len(df)})"
-                    )
+                    if RTSC_DEBUG:
+                        logger.info(
+                            f"[RTSC] REST mirror OK {base} for {symbol} (n={len(df)})"
+                        )
                     return df
                 logger.warning(f"[RTSC] REST mirror EMPTY {base} for {symbol}")
             except Exception as exc:
