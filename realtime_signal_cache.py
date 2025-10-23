@@ -29,7 +29,8 @@ logger = logging.getLogger("realtime_signal_cache")
 
 # Only allow:
 #   - ERROR/CRITICAL (always)
-#   - WARNING lines that carry our warm-up markers
+#   - All WARNING level records (operational warnings)
+#   - Lower level lines that carry our warm-up markers
 _WARMUP_TAGS = ("[RTSC] WARMUP START", "[RTSC] WARMUP DONE")
 
 
@@ -38,7 +39,9 @@ class _WarmupOnlyFilter(logging.Filter):
         # Always show errors (and above)
         if record.levelno >= logging.ERROR:
             return True
-        # For everything below ERROR, only let warm-up markers through
+        if record.levelno >= logging.WARNING:
+            return True
+        # For everything below WARNING, only let warm-up markers through
         try:
             msg = record.getMessage()
         except Exception:
