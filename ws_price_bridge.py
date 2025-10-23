@@ -9,6 +9,7 @@ normalises symbols to upper case for downstream consumers.
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 import logging
 import random
@@ -119,7 +120,8 @@ class WSPriceBridge:
             if normalised == self._symbols:
                 return
             self._symbols = normalised
-        logger.info("WS bridge subscribing to %d symbols", len(normalised))
+        if os.getenv("WS_DEBUG", "0") == "1":
+            logger.info("WS bridge subscribing to %d symbols", len(normalised))
         self._resubscribe.set()
         self.start()
         loop = self._loop
@@ -190,7 +192,8 @@ class WSPriceBridge:
                 await asyncio.sleep(1.0)
                 continue
             url = self._build_stream_url(symbols)
-            logger.info("Connecting to Binance WS: %s", url)
+            if os.getenv("WS_DEBUG", "0") == "1":
+                logger.info("Connecting to Binance WS: %s", url)
             try:
                 async with websockets.connect(
                     url, ping_interval=15, ping_timeout=15
