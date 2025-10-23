@@ -504,11 +504,6 @@ class RealTimeSignalCache:
             else:
                 self.rest = None
 
-        if RTSC_FORCE_REST:
-            # logger.warning(
-            #     "RealTimeSignalCache: RTSC_FORCE_REST=1 → routing refreshes through REST"
-            # )
-
         # --- warmup/refill integration state ---
         self._last_eval: Dict[str, Any] = getattr(self, "_last_eval", {})
         self._last_update_ts: Dict[str, float] = getattr(self, "_last_update_ts", {})
