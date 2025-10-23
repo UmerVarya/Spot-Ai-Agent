@@ -59,7 +59,7 @@ class _RtscNoiseFilter(logging.Filter):
         return not any(s in msg for s in self._DROP_SUBSTRS)
 
 
-if _RTSCQ != "0":
+if _RTSQ != "0":
     logger.addFilter(_RtscNoiseFilter())
 
 # Optional: if "market_stream" uses its own logger name, turn it down too.
