@@ -184,16 +184,62 @@ class WSPriceBridge:
             loop.close()
 
     async def _ws_main(self) -> None:
-        backoff = 1.0
-        attempts = 0
         while not self._stop.is_set():
+            self._resubscribe.clear()
             symbols = self._current_symbols()
             if not symbols:
+                self._last_message = time.time()
                 await asyncio.sleep(1.0)
                 continue
-            url = self._build_stream_url(symbols)
+
+            chunks = self._chunk_symbols(symbols)
+            tasks = [
+                asyncio.create_task(self._run_connection(chunk, index))
+                for index, chunk in enumerate(chunks)
+            ]
+            if not tasks:
+                await asyncio.sleep(1.0)
+                continue
+            if self._heartbeat_task is None:
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_watch())
+            try:
+                await asyncio.gather(*tasks)
+            except asyncio.CancelledError:
+                for task in tasks:
+                    task.cancel()
+                raise
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                if self._heartbeat_task is not None and not self._current_symbols():
+                    self._heartbeat_task.cancel()
+                    try:
+                        await self._heartbeat_task
+                    except Exception:
+                        pass
+                    self._heartbeat_task = None
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except Exception:
+                pass
+            self._heartbeat_task = None
+
+    async def _run_connection(
+        self, chunk: Sequence[str], shard_index: int
+    ) -> None:
+        backoff = 1.0
+        attempts = 0
+        while not self._stop.is_set() and not self._resubscribe.is_set():
+            url = self._build_stream_url(chunk)
             if os.getenv("WS_DEBUG", "0") == "1":
-                logger.info("Connecting to Binance WS: %s", url)
+                logger.info(
+                    "Connecting to Binance WS shard %d: %s", shard_index, url
+                )
             try:
                 async with websockets.connect(
                     url, ping_interval=15, ping_timeout=15
@@ -201,38 +247,33 @@ class WSPriceBridge:
                     backoff = 1.0
                     attempts = 0
                     self._last_message = time.time()
-                    self._heartbeat_task = asyncio.create_task(self._heartbeat_watch())
                     await self._listen(ws)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - network dependent
-                logger.warning("WS bridge error: %s", exc)
+                logger.warning("WS bridge error on shard %d: %s", shard_index, exc)
                 attempts += 1
                 jitter = random.uniform(0.5, 1.5)
                 await asyncio.sleep(backoff * jitter)
                 backoff = min(backoff * 2.0, 60.0)
-                record_metric("ws_reconnects", 1.0, labels={"reason": "error"})
+                record_metric(
+                    "ws_reconnects",
+                    1.0,
+                    labels={"reason": "error", "shard": str(shard_index)},
+                )
                 if attempts >= self._max_retries:
                     log_event(
                         logger,
                         "ws_reconnect_cap",
                         attempts=attempts,
                         backoff=backoff,
+                        shard=shard_index,
                     )
                     attempts = 0
-            finally:
-                if self._heartbeat_task is not None:
-                    self._heartbeat_task.cancel()
-                    try:
-                        await self._heartbeat_task
-                    except Exception:
-                        pass
-                    self._heartbeat_task = None
 
     async def _listen(self, ws: websockets.WebSocketClientProtocol) -> None:
         while not self._stop.is_set():
             if self._resubscribe.is_set():
-                self._resubscribe.clear()
                 break
             try:
                 msg = await asyncio.wait_for(ws.recv(), timeout=30.0)
@@ -380,6 +421,17 @@ class WSPriceBridge:
                 streams.append(f"{sym}@bookTicker")
         params = "/".join(streams)
         return f"{BINANCE_WS}?streams={params}"
+
+    def _chunk_symbols(self, symbols: Sequence[str]) -> List[List[str]]:
+        try:
+            chunk_size = int(os.getenv("WS_MAX_SYMBOLS", "10"))
+        except ValueError:
+            chunk_size = 10
+        chunk_size = max(1, chunk_size)
+        return [
+            list(symbols[i : i + chunk_size])
+            for i in range(0, len(symbols), chunk_size)
+        ]
 
     def _current_symbols(self) -> List[str]:
         with self._symbols_lock:
