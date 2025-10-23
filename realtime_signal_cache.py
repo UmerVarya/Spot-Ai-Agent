@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 import threading
 import traceback
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 # --- RTSC quiet filter ------------------------------------------------
@@ -124,6 +126,18 @@ BINANCE_MIRRORS = [
 # Optional proxy support for REST client.
 HTTP_PROXY = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
 HTTPS_PROXY = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
+
+
+def cache_diagnostics_path() -> Path:
+    """Return the path used to persist cache diagnostics snapshots."""
+
+    return Path(os.getenv("RTSC_DIAGNOSTICS_PATH", "rtsc_diagnostics.json")).expanduser()
+
+
+def cache_state_file() -> str:
+    """Backward-compatible alias returning the diagnostics file path as ``str``."""
+
+    return str(cache_diagnostics_path())
 
 # --- BEGIN: RTSC warmup/refill core integration --------------------------------
 
@@ -1241,6 +1255,7 @@ class RealTimeSignalCache:
             last_error = dict(self._symbol_last_error)
 
         pending: List[Dict[str, object]] = []
+        ready: List[str] = []
         max_display_age = max(self._stale_after, self._refresh_interval * 3)
 
         def _metric(raw: Optional[float]) -> Optional[Dict[str, float]]:
@@ -1267,6 +1282,7 @@ class RealTimeSignalCache:
         for symbol in symbols:
             entry = cache_snapshot.get(symbol)
             if entry is not None and entry.is_fresh(self._stale_after):
+                ready.append(symbol)
                 continue
             waiting_for_metric = _metric(now - added_at[symbol]) if symbol in added_at else None
             stale_age_raw = entry.age() if entry is not None else None
@@ -1300,6 +1316,20 @@ class RealTimeSignalCache:
         )
         if limit is not None:
             pending = pending[: int(limit)]
+        snapshot = {
+            "generated_at": float(now),
+            "stale_after": float(self._stale_after),
+            "refresh_interval": float(self._refresh_interval),
+            "universe": list(symbols),
+            "ready": ready,
+            "pending": pending,
+        }
+        try:
+            path = cache_diagnostics_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(snapshot, indent=2, sort_keys=True))
+        except Exception:
+            logger.debug("Failed to persist cache diagnostics snapshot", exc_info=True)
         return pending
 
     def force_refresh(self, symbol: str, timeout: float = 15.0) -> bool:
