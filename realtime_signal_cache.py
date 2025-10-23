@@ -139,6 +139,41 @@ def cache_state_file() -> str:
 
     return str(cache_diagnostics_path())
 
+
+_ACTIVE_CACHE: Optional["RealTimeSignalCache"] = None
+
+
+def set_active_cache(cache: Optional["RealTimeSignalCache"]) -> None:
+    """Register ``cache`` as the active :class:`RealTimeSignalCache` instance."""
+
+    global _ACTIVE_CACHE
+    _ACTIVE_CACHE = cache
+
+
+def get_active_cache() -> Optional["RealTimeSignalCache"]:
+    """Return the active :class:`RealTimeSignalCache` instance if one is registered."""
+
+    return _ACTIVE_CACHE
+
+
+def pending_diagnostics(limit: Optional[int] = None) -> Path:
+    """Trigger a diagnostics snapshot using the active cache and return its path."""
+
+    cache = get_active_cache()
+    if cache is None:
+        raise RuntimeError(
+            "No active RealTimeSignalCache registered; start the agent to initialise it."
+        )
+
+    try:
+        cache.pending_diagnostics(limit=limit)
+    finally:
+        # Even if the underlying call fails to persist, return the expected location so
+        # callers can provide actionable feedback.
+        pass
+
+    return cache_diagnostics_path()
+
 # --- BEGIN: RTSC warmup/refill core integration --------------------------------
 
 # ===== Config (env tunable; safe defaults) =====
@@ -544,6 +579,8 @@ class RealTimeSignalCache:
             WARMUP_MAX_SECONDS,
             PRIME_LIMIT_MINUTES,
         )
+
+        set_active_cache(self)
 
     @property
     def stale_after(self) -> float:

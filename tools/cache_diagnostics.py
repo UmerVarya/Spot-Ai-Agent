@@ -2,6 +2,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import realtime_signal_cache as rtsc
 
@@ -25,13 +26,47 @@ def _metric_display(metric):
     return None
 
 
+def pending_diagnostics(limit: Optional[int] = None) -> Path:
+    """Trigger a diagnostics snapshot and return the resulting file path."""
+
+    helper = getattr(rtsc, "pending_diagnostics", None)
+    if not callable(helper):
+        raise RuntimeError(
+            "RealTimeSignalCache does not expose pending_diagnostics(); ensure the agent is running."
+        )
+
+    if limit is None:
+        result = helper()
+    else:
+        result = helper(limit=limit)
+
+    if isinstance(result, (str, Path)):
+        path = Path(result)
+    else:
+        path = CACHE_PATH
+
+    return path.expanduser()
+
+
 def load_cache():
     if not CACHE_PATH.exists():
         print(
-            "⚠️ No diagnostics snapshot found — start the agent or trigger pending_diagnostics()."
+            "⚠️ No diagnostics snapshot found — attempting to trigger pending_diagnostics()."
         )
-        print(f"Expected at: {CACHE_PATH}")
-        return
+        snapshot_path: Optional[Path] = None
+        try:
+            snapshot_path = pending_diagnostics()
+        except Exception as exc:
+            print(f"❌ Unable to trigger pending_diagnostics automatically: {exc}")
+        else:
+            if snapshot_path.exists():
+                print(f"✅ Diagnostics snapshot written to: {snapshot_path}")
+            else:
+                print(f"⚠️ pending_diagnostics() returned {snapshot_path}, but it does not exist yet.")
+
+        if not CACHE_PATH.exists():
+            print(f"Expected at: {CACHE_PATH}")
+            return
 
     with CACHE_PATH.open("r") as f:
         data = json.load(f)
