@@ -20,28 +20,53 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-# --- RTSC MINIMAL LOGGING (warm-up only) ------------------------------
+# --- RTSC quiet filter ------------------------------------------------
 import logging
 import time
 
 logger = logging.getLogger("realtime_signal_cache")
-logger.setLevel(logging.WARNING)
 
-# Only show warmup markers + errors
-_ALLOWED_TAGS = ("[RTSC] WARMUP START", "[RTSC] WARMUP DONE")
+# --- RTSC quiet mode (default ON) ---
+_RTSQ = os.getenv("RTSC_LOG_QUIET", "1")  # "1" to quiet, "0" to see everything
 
 
-class _RTSCFilter(logging.Filter):
-    def filter(self, record):
+class _RtscNoiseFilter(logging.Filter):
+    """Drop high-volume progress messages but keep start/finish and errors."""
+
+    _DROP_SUBSTRS = (
+        # REST chatter
+        "REST mirror try",
+        "REST mirror OK",
+        "REST fetch OK",
+        "REST cache update OK",
+        "submitted to bg loop",
+        "ENTER _refresh_symbol_via_rest",
+        "ENTER runner(",
+        "Refreshing symbol",
+        "ok refresh(",  # benign refresh bookkeeping
+        # Kline/trade queue spam
+        "market_stream: {\"event\": \"market_queue_drop\"",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno >= logging.ERROR:
+            return True  # always keep errors and above
+        msg = record.getMessage()
+        # keep just the two lifecycle lines
+        if "RTSC warm-up started" in msg or "RTSC warm-up completed" in msg:
             return True
-        msg = str(record.getMessage())
-        return any(tag in msg for tag in _ALLOWED_TAGS)
+        # drop noisy progress lines
+        return not any(s in msg for s in self._DROP_SUBSTRS)
 
 
-for f in list(logger.filters):
-    logger.removeFilter(f)
-logger.addFilter(_RTSCFilter())
+if _RTSCQ != "0":
+    logger.addFilter(_RtscNoiseFilter())
+
+# Optional: if "market_stream" uses its own logger name, turn it down too.
+try:
+    logging.getLogger("market_stream").setLevel(logging.ERROR)
+except Exception:
+    pass
 # ----------------------------------------------------------------------
 
 import pandas as pd
@@ -807,7 +832,7 @@ class RealTimeSignalCache:
                 entries = len(cache_obj)
             except Exception:
                 entries = len(getattr(self, "_cache", {}))
-            logger.warning("[RTSC] WARMUP DONE")
+            logger.info("RTSC warm-up completed")
 
     def _update_stream_symbols(self) -> None:
         if not self.use_streams:
@@ -910,7 +935,7 @@ class RealTimeSignalCache:
                 n_symbols = len(getattr(self, "_symbols", []))
         except Exception:
             n_symbols = -1
-        logger.warning("[RTSC] WARMUP START")
+        logger.info("RTSC warm-up started")
 
         if self._enable_prime:
             threading.Thread(target=self.prime, daemon=True, name="rtsc-prime").start()
