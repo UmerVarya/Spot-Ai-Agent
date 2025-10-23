@@ -12,15 +12,45 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 import os
 import threading
-import time
 import traceback
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+# --- RTSC MINIMAL LOGGING (warm-up only) ------------------------------
+import logging
+import time
+
+# Use a dedicated logger for this module
+logger = logging.getLogger("realtime_signal_cache")
+
+# Only allow:
+#   - ERROR/CRITICAL (always)
+#   - WARNING lines that carry our warm-up markers
+_WARMUP_TAGS = ("[RTSC] WARMUP START", "[RTSC] WARMUP DONE")
+
+
+class _WarmupOnlyFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Always show errors (and above)
+        if record.levelno >= logging.ERROR:
+            return True
+        # For everything below ERROR, only let warm-up markers through
+        try:
+            msg = record.getMessage()
+        except Exception:
+            msg = str(record.msg)
+        return any(tag in msg for tag in _WARMUP_TAGS)
+
+
+# Make this module quiet by default
+logger.setLevel(logging.WARNING)
+if not any(isinstance(f, _WarmupOnlyFilter) for f in logger.filters):
+    logger.addFilter(_WarmupOnlyFilter())
+# ----------------------------------------------------------------------
 
 import pandas as pd
 import requests  # used for mirror fallback (no proxies)
@@ -41,31 +71,7 @@ class BinanceRequestException(Exception):
     ...
 
 
-root = logging.getLogger()
-if not root.handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-root.setLevel(logging.INFO)
-
-LOGGER = logging.getLogger("RTSC")
-LOGGER.propagate = True
-LOGGER.setLevel(logging.INFO)
-
-# Route RTSC logs to the root logger so they appear with "__main__"
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.propagate = True  # ensure logs bubble up
-
-LOGGER.warning("[RTSC] MODULE LOADED FROM: %s", __file__)
-
-VERSION_TAG = "RTSC-PRIME-UMER-2"
-LOGGER.warning("RTSC loaded: %s file=%s", VERSION_TAG, __file__)
-
-print(
-    f"RTSC INIT v2025-10-17 file={__file__} loaded at {datetime.now(timezone.utc).isoformat()}"
-)
+LOGGER = logger
 
 
 # Optional verbose logging for debugging REST refresh flows.
@@ -490,6 +496,9 @@ class RealTimeSignalCache:
         self._last_eval: Dict[str, Any] = getattr(self, "_last_eval", {})
         self._last_update_ts: Dict[str, float] = getattr(self, "_last_update_ts", {})
         self._ready = getattr(self, "_ready", False)
+        self._warmup_started_at: Optional[float] = getattr(
+            self, "_warmup_started_at", None
+        )
 
         evaluator_ref = getattr(self, "evaluator", None)
         if evaluator_ref is not None and not callable(evaluator_ref):
@@ -794,7 +803,22 @@ class RealTimeSignalCache:
         return bool(getattr(self, "_ready", False))
 
     def mark_ready(self):
+        was_ready = bool(getattr(self, "_ready", False))
         self._ready = True
+        if not was_ready:
+            dur = time.time() - getattr(self, "_warmup_started_at", time.time())
+            cache_obj = getattr(self, "cache", None)
+            if cache_obj is None:
+                cache_obj = getattr(self, "_cache", {})
+            try:
+                entries = len(cache_obj)
+            except Exception:
+                entries = len(getattr(self, "_cache", {}))
+            logger.warning(
+                "[RTSC] WARMUP DONE: entries=%s took=%.1fs",
+                entries,
+                dur,
+            )
 
     def _update_stream_symbols(self) -> None:
         if not self.use_streams:
@@ -883,6 +907,26 @@ class RealTimeSignalCache:
             self._thread.start()
             if not self._worker_loop_ready.wait(timeout=1.0):
                 logger.warning("RTSC: worker loop did not signal readiness within 1s")
+
+        t0 = time.time()
+        self._warmup_started_at = t0
+        try:
+            symbols_attr = getattr(self, "symbols", [])
+            if callable(symbols_attr):
+                symbols_value = symbols_attr()
+            else:
+                symbols_value = symbols_attr
+            n_symbols = len(symbols_value) if symbols_value is not None else 0
+            if not n_symbols:
+                n_symbols = len(getattr(self, "_symbols", []))
+        except Exception:
+            n_symbols = -1
+        logger.warning(
+            "[RTSC] WARMUP START: symbols=%s interval=%s limit=%s",
+            n_symbols,
+            getattr(self, "interval", "?"),
+            getattr(self, "limit", "?"),
+        )
 
         if self._enable_prime:
             threading.Thread(target=self.prime, daemon=True, name="rtsc-prime").start()
@@ -1260,14 +1304,14 @@ class RealTimeSignalCache:
         This makes legacy call sites behave correctly without changing their code.
         """
 
-        import logging, traceback
-        logging.getLogger("RTSC").warning(
+        import traceback
+
+        logger.warning(
             f"[RTSC] force_refresh WRAPPER CALLED for {{symbol}}; self={{id(self)}}\n"
             + "".join(traceback.format_stack(limit=6))
         )
 
         import asyncio, threading, time
-        logger = logging.getLogger("RTSC")
 
         # Make sure the background loop exists and is running
         if getattr(self, "_loop_ready", None) is None:
