@@ -26,6 +26,28 @@ BINANCE_WS = "wss://stream.binance.com:9443/stream"
 
 logger = logging.getLogger(__name__)
 
+_HANDSHAKE_TIMEOUT_MSG = "timed out during opening handshake"
+
+
+def _ws_connect_kwargs() -> Dict[str, Any]:
+    """Return websocket client configuration derived from environment."""
+
+    return {
+        "ping_interval": float(os.getenv("WS_PING_INTERVAL", "20")),
+        "ping_timeout": float(os.getenv("WS_PING_TIMEOUT", "20")),
+        "close_timeout": 10,
+        "max_queue": 1000,
+        "open_timeout": float(os.getenv("WS_OPEN_TIMEOUT", "20")),
+    }
+
+
+def _compute_backoff_delay(attempt: int) -> float:
+    base = max(1.0, float(os.getenv("WS_BACKOFF_BASE", "2")))
+    cap = max(base, float(os.getenv("WS_BACKOFF_MAX", "60")))
+    delay = min(cap, base ** attempt)
+    jitter = 0.5 + random.random() / 2.0
+    return delay * jitter
+
 KlineCallback = Callable[[str, str, Dict[str, Any]], None]
 TickerCallback = Callable[[str, Dict[str, Any]], None]
 BookTickerCallback = Callable[[str, Dict[str, Any]], None]
@@ -243,7 +265,6 @@ class WSPriceBridge:
     async def _run_connection(
         self, chunk: Sequence[str], shard_index: int
     ) -> None:
-        backoff = 1.0
         attempts = 0
         while not self._stop.is_set() and not self._resubscribe.is_set():
             url = self._build_stream_url(chunk)
@@ -253,20 +274,28 @@ class WSPriceBridge:
                 )
             try:
                 async with websockets.connect(
-                    url, ping_interval=15, ping_timeout=15
+                    url,
+                    **_ws_connect_kwargs(),
                 ) as ws:
-                    backoff = 1.0
                     attempts = 0
                     self._last_message = time.time()
                     await self._listen(ws)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - network dependent
-                logger.warning("WS bridge error on shard %d: %s", shard_index, exc)
                 attempts += 1
-                jitter = random.uniform(0.5, 1.5)
-                await asyncio.sleep(backoff * jitter)
-                backoff = min(backoff * 2.0, 60.0)
+                delay = _compute_backoff_delay(attempts)
+                error_text = str(exc)
+                if _HANDSHAKE_TIMEOUT_MSG not in error_text:
+                    logger.warning(
+                        "WS bridge error on shard %d: %s; retrying in %.1fs",
+                        shard_index,
+                        exc,
+                        delay,
+                    )
+                if self._stop.is_set() or self._resubscribe.is_set():
+                    continue
+                await asyncio.sleep(delay)
                 record_metric(
                     "ws_reconnects",
                     1.0,
@@ -277,7 +306,7 @@ class WSPriceBridge:
                         logger,
                         "ws_reconnect_cap",
                         attempts=attempts,
-                        backoff=backoff,
+                        delay=delay,
                         shard=shard_index,
                     )
                     attempts = 0

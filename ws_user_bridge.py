@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import threading
 from typing import Any, Callable, Dict, Optional
 
@@ -13,6 +14,26 @@ import requests
 import websockets
 
 logger = logging.getLogger(__name__)
+
+_HANDSHAKE_TIMEOUT_MSG = "timed out during opening handshake"
+
+
+def _ws_connect_kwargs() -> Dict[str, Any]:
+    return {
+        "ping_interval": float(os.getenv("WS_PING_INTERVAL", "20")),
+        "ping_timeout": float(os.getenv("WS_PING_TIMEOUT", "20")),
+        "close_timeout": 10,
+        "max_queue": 1000,
+        "open_timeout": float(os.getenv("WS_OPEN_TIMEOUT", "20")),
+    }
+
+
+def _compute_backoff_delay(attempt: int) -> float:
+    base = max(1.0, float(os.getenv("WS_BACKOFF_BASE", "2")))
+    cap = max(base, float(os.getenv("WS_BACKOFF_MAX", "60")))
+    delay = min(cap, base ** attempt)
+    jitter = 0.5 + random.random() / 2.0
+    return delay * jitter
 
 BINANCE_API_BASE = os.getenv("BINANCE_API_BASE", "https://api.binance.com")
 BINANCE_WS_BASE = "wss://stream.binance.com:9443/ws"
@@ -97,26 +118,40 @@ class UserDataStreamBridge:
             loop.close()
 
     async def _stream_main(self) -> None:
-        backoff = 1.0
+        attempts = 0
         while not self._stop.is_set():
             listen_key = await asyncio.to_thread(self._ensure_listen_key)
             if not listen_key:
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, 60.0)
+                attempts += 1
+                delay = _compute_backoff_delay(attempts)
+                if self._stop.is_set():
+                    break
+                await asyncio.sleep(delay)
                 continue
             url = f"{BINANCE_WS_BASE}/{listen_key}"
             logger.info("Connecting to Binance user stream")
             keepalive_task = self._loop.create_task(self._keepalive_loop(listen_key)) if self._loop else None
             try:
-                async with websockets.connect(url, ping_interval=15, ping_timeout=15) as ws:
-                    backoff = 1.0
+                async with websockets.connect(
+                    url,
+                    **_ws_connect_kwargs(),
+                ) as ws:
+                    attempts = 0
                     await self._listen(ws)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - network dependent
-                logger.warning("User data stream error: %s", exc)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, 60.0)
+                attempts += 1
+                delay = _compute_backoff_delay(attempts)
+                error_text = str(exc)
+                if _HANDSHAKE_TIMEOUT_MSG not in error_text:
+                    logger.warning(
+                        "User data stream error: %s; retrying in %.1fs",
+                        exc,
+                        delay,
+                    )
+                if not self._stop.is_set():
+                    await asyncio.sleep(delay)
             finally:
                 if keepalive_task:
                     keepalive_task.cancel()
