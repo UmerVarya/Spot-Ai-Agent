@@ -7,23 +7,56 @@ Shows symbol freshness, live scores, and open trade info.
 import os, json
 from datetime import datetime
 
-from core.realtime_signal_cache import RealTimeSignalCache
-from core.trade_storage import TradeStorage
+# tolerant imports (repo-root modules)
+try:
+    from realtime_signal_cache import RealTimeSignalCache
+except Exception:
+    RealTimeSignalCache = None
+
+try:
+    from trade_storage import TradeStorage
+except Exception:
+    TradeStorage = None
+
+
+def load_rtsc():
+    # Preferred: use class if available
+    if RealTimeSignalCache is not None and hasattr(RealTimeSignalCache, "load"):
+        return RealTimeSignalCache.load()
+
+    # Fallback: read the diagnostics snapshot (rtsc_diagnostics.json)
+    import json, os
+    path = os.getenv("RTSC_DIAG_PATH", "rtsc_diagnostics.json")
+    with open(path, "r") as f:
+        data = json.load(f)
+
+    # emulate a minimal object with .cache
+    class _Obj:
+        pass
+
+    o = _Obj()
+    # Accept either {"symbols": {...}} or {"cache": {...}}
+    o.cache = data.get("symbols") or data.get("cache") or {}
+    return o
+
+
+def load_open_trades():
+    if TradeStorage is not None and hasattr(TradeStorage, "load"):
+        try:
+            store = TradeStorage.load()
+            return {t["symbol"]: t for t in store.open_trades.values()}
+        except Exception:
+            return {}
+    return {}
 
 def main():
     print(f"\n🧠  RealTimeSignalCache Status ({datetime.utcnow():%H:%M:%S UTC})\n")
 
     # Load RTSC
-    rtsc = RealTimeSignalCache.load()
+    rtsc = load_rtsc()
+    open_trades = load_open_trades()
     cache = getattr(rtsc, "cache", {})
     print(f"Symbols tracked: {len(cache)}")
-
-    # Load open trades
-    try:
-        store = TradeStorage.load()
-        open_trades = {t["symbol"]: t for t in store.open_trades.values()}
-    except Exception:
-        open_trades = {}
 
     header = f"{'SYMBOL':10} | {'SCORE':6} | {'CONF':5} | {'DIR':6} | {'STATE':8} | {'AGE':>4}s | {'TRADE?'}"
     print(header)
