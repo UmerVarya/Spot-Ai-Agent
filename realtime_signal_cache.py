@@ -24,35 +24,24 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Opti
 import logging
 import time
 
-# Use a dedicated logger for this module
 logger = logging.getLogger("realtime_signal_cache")
+logger.setLevel(logging.WARNING)
 
-# Only allow:
-#   - ERROR/CRITICAL (always)
-#   - All WARNING level records (operational warnings)
-#   - Lower level lines that carry our warm-up markers
-_WARMUP_TAGS = ("[RTSC] WARMUP START", "[RTSC] WARMUP DONE")
+# Only show warmup markers + errors
+_ALLOWED_TAGS = ("[RTSC] WARMUP START", "[RTSC] WARMUP DONE")
 
 
-class _WarmupOnlyFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        # Always show errors (and above)
+class _RTSCFilter(logging.Filter):
+    def filter(self, record):
         if record.levelno >= logging.ERROR:
             return True
-        if record.levelno >= logging.WARNING:
-            return True
-        # For everything below WARNING, only let warm-up markers through
-        try:
-            msg = record.getMessage()
-        except Exception:
-            msg = str(record.msg)
-        return any(tag in msg for tag in _WARMUP_TAGS)
+        msg = str(record.getMessage())
+        return any(tag in msg for tag in _ALLOWED_TAGS)
 
 
-# Make this module quiet by default
-logger.setLevel(logging.WARNING)
-if not any(isinstance(f, _WarmupOnlyFilter) for f in logger.filters):
-    logger.addFilter(_WarmupOnlyFilter())
+for f in list(logger.filters):
+    logger.removeFilter(f)
+logger.addFilter(_RTSCFilter())
 # ----------------------------------------------------------------------
 
 import pandas as pd
@@ -491,9 +480,9 @@ class RealTimeSignalCache:
                 self.rest = None
 
         if RTSC_FORCE_REST:
-            logger.warning(
-                "RealTimeSignalCache: RTSC_FORCE_REST=1 → routing refreshes through REST"
-            )
+            # logger.warning(
+            #     "RealTimeSignalCache: RTSC_FORCE_REST=1 → routing refreshes through REST"
+            # )
 
         # --- warmup/refill integration state ---
         self._last_eval: Dict[str, Any] = getattr(self, "_last_eval", {})
@@ -553,9 +542,9 @@ class RealTimeSignalCache:
         """Initialise a python-binance client for REST fallback operations."""
 
         if BinanceClient is None:
-            logger.warning(
-                "RTSC: python-binance not available; REST fallback disabled."
-            )
+            # logger.warning(
+            #     "RTSC: python-binance not available; REST fallback disabled."
+            # )
             return None
 
         api_key = (
@@ -571,12 +560,12 @@ class RealTimeSignalCache:
 
         try:
             client = BinanceClient(api_key=api_key, api_secret=api_secret)
-            if HTTP_PROXY or HTTPS_PROXY:
-                logger.info(
-                    "RTSC: REST client initialised (proxies handled by requests layer)."
-                )
-            else:
-                logger.info("RTSC: REST client initialised.")
+            # if HTTP_PROXY or HTTPS_PROXY:
+            #     logger.info(
+            #         "RTSC: REST client initialised (proxies handled by requests layer)."
+            #     )
+            # else:
+            #     logger.info("RTSC: REST client initialised.")
             return client
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.exception("RTSC: Failed to initialise REST client: %s", exc)
@@ -598,8 +587,9 @@ class RealTimeSignalCache:
             task.result()
         except asyncio.CancelledError:
             logger.debug("[RTSC] REST refresh task for %s cancelled", key)
-        except Exception as exc:
-            logger.warning("[RTSC] REST refresh task for %s raised: %s", key, exc)
+        except Exception:
+            # logger.warning("[RTSC] REST refresh task for %s raised: %s", key, exc)
+            pass
         finally:
             with self._lock:
                 existing = self._rest_refresh_tasks.get(key)
@@ -817,11 +807,7 @@ class RealTimeSignalCache:
                 entries = len(cache_obj)
             except Exception:
                 entries = len(getattr(self, "_cache", {}))
-            logger.warning(
-                "[RTSC] WARMUP DONE: entries=%s took=%.1fs",
-                entries,
-                dur,
-            )
+            logger.warning("[RTSC] WARMUP DONE")
 
     def _update_stream_symbols(self) -> None:
         if not self.use_streams:
@@ -847,14 +833,14 @@ class RealTimeSignalCache:
             self._loop = loop
             self._sem = asyncio.Semaphore(5)
             self._loop_ready.set()
-            LOGGER.warning("[RTSC] bg loop READY")
+            # LOGGER.warning("[RTSC] bg loop READY")
             try:
                 loop.run_forever()
             finally:
                 self._loop_ready.clear()
                 self._sem = None
                 self._loop = None
-                LOGGER.warning("[RTSC] bg loop STOPPED")
+                # LOGGER.warning("[RTSC] bg loop STOPPED")
                 try:
                     loop.close()
                 except Exception:
@@ -871,18 +857,18 @@ class RealTimeSignalCache:
             )
             self._bg_thread.start()
         else:
-            LOGGER.warning("[RTSC] bg loop already running")
+            # LOGGER.warning("[RTSC] bg loop already running")
 
         if not self._loop_ready.wait(timeout=5.0):
-            LOGGER.warning("[RTSC] bg loop did not signal readiness within 5s")
+            # LOGGER.warning("[RTSC] bg loop did not signal readiness within 5s")
         else:
             self.flush_pending()
 
         if getattr(self, "_bg_task", None) and not self._bg_task.done():
-            logger.info("RTSC: worker already running")
+            # logger.info("RTSC: worker already running")
             return
         if getattr(self, "_thread", None) and self._thread.is_alive():
-            logger.info("RTSC: worker already running (thread)")
+            # logger.info("RTSC: worker already running (thread)")
             return
         self._stop_event.clear()
         self._wake_event.clear()
@@ -890,10 +876,10 @@ class RealTimeSignalCache:
         self._worker_loop_ready.clear()
         try:
             loop = asyncio.get_running_loop()
-            logger.info("RTSC: starting worker on running loop")
+            # logger.info("RTSC: starting worker on running loop")
             self._bg_task = loop.create_task(self._worker())
         except RuntimeError:
-            logger.info("RTSC: no running loop; starting worker in daemon thread")
+            # logger.info("RTSC: no running loop; starting worker in daemon thread")
 
             def runner() -> None:
                 loop = asyncio.new_event_loop()
@@ -909,7 +895,7 @@ class RealTimeSignalCache:
             self._thread = threading.Thread(target=runner, daemon=True, name="rtsc-worker")
             self._thread.start()
             if not self._worker_loop_ready.wait(timeout=1.0):
-                logger.warning("RTSC: worker loop did not signal readiness within 1s")
+                # logger.warning("RTSC: worker loop did not signal readiness within 1s")
 
         t0 = time.time()
         self._warmup_started_at = t0
@@ -924,12 +910,7 @@ class RealTimeSignalCache:
                 n_symbols = len(getattr(self, "_symbols", []))
         except Exception:
             n_symbols = -1
-        logger.warning(
-            "[RTSC] WARMUP START: symbols=%s interval=%s limit=%s",
-            n_symbols,
-            getattr(self, "interval", "?"),
-            getattr(self, "limit", "?"),
-        )
+        logger.warning("[RTSC] WARMUP START")
 
         if self._enable_prime:
             threading.Thread(target=self.prime, daemon=True, name="rtsc-prime").start()
@@ -1107,30 +1088,31 @@ class RealTimeSignalCache:
         if not getattr(self, "_loop_ready", None) or not self._loop_ready.is_set() or self._loop is None:
             self._pending_syms = getattr(self, "_pending_syms", [])
             self._pending_syms.append(key)
-            LOGGER.warning(f"[RTSC] queued (loop not ready): {key}")
+            # LOGGER.warning(f"[RTSC] queued (loop not ready): {key}")
             return
 
         async def _runner(sym: str) -> None:
-            LOGGER.warning(f"[RTSC] ENTER runner({sym})")
+            # LOGGER.warning(f"[RTSC] ENTER runner({sym})")
             sem = self._sem
             if sem is None:
                 sem = asyncio.Semaphore(5)
                 self._sem = sem
             async with sem:
-                LOGGER.warning(f"[RTSC] ENTER _refresh_symbol_via_rest({sym})")
+                # LOGGER.warning(f"[RTSC] ENTER _refresh_symbol_via_rest({sym})")
                 try:
                     await asyncio.wait_for(
                         self._refresh_symbol_via_rest(sym), timeout=10
                     )
                     if RTSC_DEBUG:
-                        LOGGER.warning(f"[RTSC] OK refresh({sym})")
+                        # LOGGER.warning(f"[RTSC] OK refresh({sym})")
+                        pass
                 except asyncio.TimeoutError:
-                    LOGGER.warning(f"[RTSC] TIMEOUT refresh({sym})")
+                    # LOGGER.warning(f"[RTSC] TIMEOUT refresh({sym})")
                 except Exception as exc:
-                    LOGGER.warning(f"[RTSC] FAIL refresh({sym}): {exc}")
+                    # LOGGER.warning(f"[RTSC] FAIL refresh({sym}): {exc}")
 
         fut = self._submit_bg(_runner(key))
-        LOGGER.warning(f"[RTSC] submitted to bg loop: {key} ({fut})")
+        # LOGGER.warning(f"[RTSC] submitted to bg loop: {key} ({fut})")
 
     async def schedule_refresh(self, symbol: str) -> None:
         """Non-blocking dispatcher: always spawns a refresh task."""
@@ -1143,9 +1125,9 @@ class RealTimeSignalCache:
                 return
 
         self._signal_wake()
-        logger.info(
-            f"[RTSC] schedule_refresh({key}) FORCE_REST={os.getenv('RTSC_FORCE_REST','0')}"
-        )
+        # logger.info(
+        #     f"[RTSC] schedule_refresh({key}) FORCE_REST={os.getenv('RTSC_FORCE_REST','0')}"
+        # )
         self.enqueue_refresh(key)
 
     def flush_pending(self) -> None:
@@ -1153,9 +1135,9 @@ class RealTimeSignalCache:
 
         syms = getattr(self, "_pending_syms", [])
         if not syms:
-            LOGGER.warning("[RTSC] nothing to flush")
+            # LOGGER.warning("[RTSC] nothing to flush")
             return
-        LOGGER.warning(f"[RTSC] flushing {len(syms)} queued: {syms}")
+        # LOGGER.warning(f"[RTSC] flushing {len(syms)} queued: {syms}")
         self._pending_syms = []
         for sym in syms:
             self.enqueue_refresh(sym)
@@ -1309,10 +1291,10 @@ class RealTimeSignalCache:
 
         import traceback
 
-        logger.warning(
-            f"[RTSC] force_refresh WRAPPER CALLED for {{symbol}}; self={{id(self)}}\n"
-            + "".join(traceback.format_stack(limit=6))
-        )
+        # logger.warning(
+        #     f"[RTSC] force_refresh WRAPPER CALLED for {{symbol}}; self={{id(self)}}\n"
+        #     + "".join(traceback.format_stack(limit=6))
+        # )
 
         import asyncio, threading, time
 
@@ -1332,14 +1314,14 @@ class RealTimeSignalCache:
                     self._loop = loop
                     self._sem = asyncio.Semaphore(5)
                     self._loop_ready.set()
-                    LOGGER.warning("[RTSC] bg loop READY [force_refresh]")
+                    # LOGGER.warning("[RTSC] bg loop READY [force_refresh]")
                     try:
                         loop.run_forever()
                     finally:
                         self._loop_ready.clear()
                         self._sem = None
                         self._loop = None
-                        LOGGER.warning("[RTSC] bg loop STOPPED [force_refresh]")
+                        # LOGGER.warning("[RTSC] bg loop STOPPED [force_refresh]")
                         try:
                             loop.close()
                         except Exception:
@@ -1353,9 +1335,9 @@ class RealTimeSignalCache:
                     )
                     self._bg_thread.start()
                 except Exception as e:
-                    logger.warning(
-                        f"[RTSC] force_refresh({symbol}) could not spawn bg loop: {e}"
-                    )
+                    # logger.warning(
+                    #     f"[RTSC] force_refresh({symbol}) could not spawn bg loop: {e}"
+                    # )
                     return False
 
             # small wait for READY (avoid a race)
@@ -1366,32 +1348,34 @@ class RealTimeSignalCache:
                 time.sleep(0.01)
 
         if getattr(self, "_loop", None) is None or not self._loop.is_running():
-            logger.warning(f"[RTSC] force_refresh({symbol}) bg loop not running")
+            # logger.warning(f"[RTSC] force_refresh({symbol}) bg loop not running")
             return False
 
         async def _runner():
-            logger.warning(f"[RTSC] ENTER _refresh_symbol_via_rest({symbol}) [force_refresh]")
+            # logger.warning(f"[RTSC] ENTER _refresh_symbol_via_rest({symbol}) [force_refresh]")
             ok = await self._refresh_symbol_via_rest(symbol)
             if ok:
                 return True
-            logger.warning(
-                f"[RTSC] REST force_refresh({symbol}) failed; retrying configured fetcher"
-            )
+            # logger.warning(
+            #     f"[RTSC] REST force_refresh({symbol}) failed; retrying configured fetcher"
+            # )
             return await self._refresh_symbol(symbol, force_rest=False)
 
         try:
             fut = asyncio.run_coroutine_threadsafe(_runner(), self._loop)
             result = fut.result(timeout=timeout)  # wait for REST path to complete
             if result:
-                logger.warning(f"[RTSC] OK force_refresh({symbol})")
+                # logger.warning(f"[RTSC] OK force_refresh({symbol})")
+                pass
             else:
-                logger.warning(f"[RTSC] FAIL force_refresh({symbol}): refresh returned False")
+                # logger.warning(f"[RTSC] FAIL force_refresh({symbol}): refresh returned False")
+                pass
             return bool(result)
         except asyncio.TimeoutError:
-            logger.warning(f"[RTSC] TIMEOUT force_refresh({symbol}) after {timeout:.1f}s")
+            # logger.warning(f"[RTSC] TIMEOUT force_refresh({symbol}) after {timeout:.1f}s")
             return False
         except Exception as e:
-            logger.warning(f"[RTSC] FAIL force_refresh({symbol}): {e}")
+            # logger.warning(f"[RTSC] FAIL force_refresh({symbol}): {e}")
             return False
 
     async def _worker(self) -> None:
@@ -1402,12 +1386,12 @@ class RealTimeSignalCache:
         self._worker_loop_ready.set()
         async_wake = asyncio.Event()
         self._async_wake = async_wake
-        logger.info(
-            "RTSC: worker started (interval=%.2fs, stale_after=%.2fs, max_concurrency=%d)",
-            self._refresh_interval,
-            self._stale_after,
-            self._max_concurrency,
-        )
+        # logger.info(
+        #     "RTSC: worker started (interval=%.2fs, stale_after=%.2fs, max_concurrency=%d)",
+        #     self._refresh_interval,
+        #     self._stale_after,
+        #     self._max_concurrency,
+        # )
         sem = asyncio.Semaphore(self._max_concurrency)
         first = True
         try:
@@ -1429,12 +1413,12 @@ class RealTimeSignalCache:
                     if sym not in seen:
                         due.append(sym)
                         seen.add(sym)
-                logger.info(
-                    "RTSC: due this cycle = %d / %d (priority=%d)",
-                    len(due),
-                    len(syms),
-                    len(priority),
-                )
+                # logger.info(
+                #     "RTSC: due this cycle = %d / %d (priority=%d)",
+                #     len(due),
+                #     len(syms),
+                #     len(priority),
+                # )
                 first = False
 
                 async def run_one(sym: str) -> None:
@@ -1467,14 +1451,14 @@ class RealTimeSignalCache:
                     pass
                 async_wake.clear()
         except asyncio.CancelledError:
-            logger.info("RTSC worker cancellation received")
+            # logger.info("RTSC worker cancellation received")
             raise
         finally:
             self._async_wake = None
             self._worker_loop = None
             self._bg_task = None
             self._worker_loop_ready.clear()
-            logger.info("RTSC worker stopped")
+            # logger.info("RTSC worker stopped")
 
     def _symbols_due(self, symbols: Sequence[str], *, first_run: bool) -> List[str]:
         """Return the subset of ``symbols`` requiring refresh this cycle."""
@@ -1510,12 +1494,12 @@ class RealTimeSignalCache:
         with self._lock:
             entry = self._cache.get(key)
         prev_age = entry.age() if entry is not None else None
-        logger.info(
-            "Refreshing symbol %s (age=%s, stale_after=%.1fs)",
-            key,
-            f"{prev_age:.1f}s" if prev_age is not None else "None",
-            self._stale_after,
-        )
+        # logger.info(
+        #     "Refreshing symbol %s (age=%s, stale_after=%.1fs)",
+        #     key,
+        #     f"{prev_age:.1f}s" if prev_age is not None else "None",
+        #     self._stale_after,
+        # )
         if self._is_circuit_open(attempt_ts):
             log_event(
                 logger,
@@ -1545,10 +1529,10 @@ class RealTimeSignalCache:
             rest_success = await rest_task
             if rest_success or rest_forced:
                 return rest_success
-            logger.info(
-                "RTSC: REST refresh for %s failed; retrying configured fetcher",
-                key,
-            )
+            # logger.info(
+            #     "RTSC: REST refresh for %s failed; retrying configured fetcher",
+            #     key,
+            # )
 
         prepared = self._prepare_refresh(symbol)
         if prepared is None:
@@ -1578,11 +1562,11 @@ class RealTimeSignalCache:
         """Fetch small recent klines via REST mirrors and update the cache."""
 
         key = self._key(symbol)
-        LOGGER.warning(f"[RTSC] ENTER _refresh_symbol_via_rest({key})")
+        # LOGGER.warning(f"[RTSC] ENTER _refresh_symbol_via_rest({key})")
 
         prepared = self._prepare_refresh(symbol)
         if prepared is None:
-            LOGGER.warning(f"[RTSC] REST refresh aborted for {key} (circuit open)")
+            # LOGGER.warning(f"[RTSC] REST refresh aborted for {key} (circuit open)")
             return False
 
         key, _prev_age, attempt_ts = prepared
@@ -1599,22 +1583,24 @@ class RealTimeSignalCache:
             )
             if df is not None and not df.empty:
                 if RTSC_DEBUG:
-                    LOGGER.warning(f"[RTSC] REST fetch OK for {key}: {len(df)} bars")
+                    # LOGGER.warning(f"[RTSC] REST fetch OK for {key}: {len(df)} bars")
+                    pass
             else:
-                LOGGER.warning(f"[RTSC] REST fetch empty for {key}")
+                # LOGGER.warning(f"[RTSC] REST fetch empty for {key}")
+                pass
         except Exception as exc:  # pragma: no cover - debug logging only
             fetch_exc = exc
-            LOGGER.warning(f"[RTSC] FAIL refresh({key}): {exc}")
+            # LOGGER.warning(f"[RTSC] FAIL refresh({key}): {exc}")
 
         if fetch_exc is not None:
-            LOGGER.warning(f"[RTSC] REST fetch exception for {key}: {fetch_exc}")
+            # LOGGER.warning(f"[RTSC] REST fetch exception for {key}: {fetch_exc}")
             self._record_refresh_error(
                 key, f"REST fetch exception: {fetch_exc}", attempt_ts=attempt_ts
             )
             return False
 
         if df is None or df.empty:
-            LOGGER.warning(f"[RTSC] REST fetch produced no data for {key}")
+            # LOGGER.warning(f"[RTSC] REST fetch produced no data for {key}")
             self._record_refresh_error(
                 key, "REST fetch produced no data", attempt_ts=attempt_ts
             )
@@ -1668,15 +1654,16 @@ class RealTimeSignalCache:
                 self._symbol_last_error.pop(key, None)
                 self._primed_symbols.add(key)
         except Exception as exc:
-            LOGGER.warning(f"[RTSC] cache update failed for {key}: {exc}")
+            # LOGGER.warning(f"[RTSC] cache update failed for {key}: {exc}")
             self._record_refresh_error(
                 key, f"REST cache update failed: {exc}", attempt_ts=attempt_ts
             )
-            LOGGER.warning(f"[RTSC] REST cache update FAIL for {key}")
+            # LOGGER.warning(f"[RTSC] REST cache update FAIL for {key}")
             return False
 
         if RTSC_DEBUG:
-            LOGGER.warning(f"[RTSC] REST cache update OK for {key}")
+            # LOGGER.warning(f"[RTSC] REST cache update OK for {key}")
+            pass
         return True
 
     async def _fetch_klines_rest_df(
@@ -1700,7 +1687,8 @@ class RealTimeSignalCache:
             url = f"{base}/api/v3/klines"
             try:
                 if RTSC_DEBUG:
-                    logger.info(f"[RTSC] REST mirror try {url} for {symbol}")
+                    # logger.info(f"[RTSC] REST mirror try {url} for {symbol}")
+                    pass
                 response = await asyncio.wait_for(
                     loop.run_in_executor(
                         None,
@@ -1718,13 +1706,14 @@ class RealTimeSignalCache:
                 df = self._shape_klines_df(raw)
                 if df is not None and not df.empty:
                     if RTSC_DEBUG:
-                        logger.info(
-                            f"[RTSC] REST mirror OK {base} for {symbol} (n={len(df)})"
-                        )
+                        # logger.info(
+                        #     f"[RTSC] REST mirror OK {base} for {symbol} (n={len(df)})"
+                        # )
+                        pass
                     return df
-                logger.warning(f"[RTSC] REST mirror EMPTY {base} for {symbol}")
+                # logger.warning(f"[RTSC] REST mirror EMPTY {base} for {symbol}")
             except Exception as exc:
-                logger.warning(f"[RTSC] REST mirror ERROR {base} for {symbol}: {exc}")
+                # logger.warning(f"[RTSC] REST mirror ERROR {base} for {symbol}: {exc}")
         return None
 
     def _shape_klines_df(self, raw) -> Optional[pd.DataFrame]:
@@ -1805,11 +1794,11 @@ class RealTimeSignalCache:
             self._primed_symbols.add(key)
             self._last_eval[key] = cached
             self._last_update_ts[key] = cached.updated_at
-        logger.info(
-            "RTSC: refreshed %s (prev_age=%s)",
-            key,
-            f"{prev_age:.1f}s" if prev_age is not None else "None",
-        )
+        # logger.info(
+        #     "RTSC: refreshed %s (prev_age=%s)",
+        #     key,
+        #     f"{prev_age:.1f}s" if prev_age is not None else "None",
+        # )
         with self._lock:
             request_time = self._last_priority_request.get(key)
         wake_latency = (attempt_ts - request_time) if request_time else 0.0
