@@ -74,6 +74,8 @@ except Exception:
 import pandas as pd
 import requests  # used for mirror fallback (no proxies)
 
+import rest_prices
+
 # python-binance (a.k.a binance-connector legacy) exceptions can vary by version.
 # Import defensively so minor packaging changes do not break the cache module.
 try:  # pragma: no cover - import guard for optional dependency
@@ -184,6 +186,8 @@ FRESHNESS_SECONDS   = int(os.getenv("FRESHNESS_SECONDS", "120"))        # what i
 USE_WS_PRICES       = os.getenv("USE_WS_PRICES", "1").lower() in ("1","true","yes")
 ENABLE_PRIME        = os.getenv("ENABLE_RTSCC_PRIME", "1").lower() in ("1","true","yes")
 ENABLE_REFRESH      = os.getenv("ENABLE_RTSCC_REFRESH", "1").lower() in ("1","true","yes")
+REST_REQUIRED_MIN_BARS = rest_prices.REQUIRED_MIN_BARS
+REST_WARMUP_BARS = rest_prices.WARMUP_BARS
 
 # ===== Optional python-binance fallback =====
 def _binance_client_from_env():
@@ -736,57 +740,84 @@ class RealTimeSignalCache:
 
     # ---------- Public API you’re adding ----------
 
+    def _prime_symbol(self, symbol: str) -> bool:
+        """Backfill ``symbol`` via REST and seed the cache."""
+
+        key = self._key(symbol)
+        attempt_ts = time.time()
+        df: Optional[pd.DataFrame] = None
+        rest_client = getattr(self, "rest", None)
+
+        if rest_client is not None:
+            try:
+                raw_df = rest_prices.rest_backfill_klines(
+                    rest_client,
+                    key,
+                    interval=RTSC_REST_INTERVAL,
+                    bars=REST_WARMUP_BARS,
+                )
+                df = self._standardize_price_df(raw_df)
+            except Exception:
+                logger.debug("RTSC: rest_backfill_klines failed for %s", key, exc_info=True)
+
+        if df is None:
+            try:
+                df = _run_async_allow_nested(
+                    self._fetch_klines_any(
+                        key,
+                        interval=RTSC_REST_INTERVAL,
+                        limit=max(REST_WARMUP_BARS, RTSC_REST_LIMIT),
+                        timeout=RTSC_REST_TIMEOUT,
+                    )
+                )
+            except Exception:
+                df = None
+
+        df = self._standardize_price_df(df)
+        rows = 0 if df is None else len(df)
+        if df is None or rows < REST_REQUIRED_MIN_BARS:
+            _log(
+                self,
+                "warning",
+                "prime(): insufficient candles for %s (got %s).",
+                key,
+                rows,
+            )
+            return False
+
+        success = self._update_cache(
+            key,
+            df,
+            attempt_ts=attempt_ts,
+            prev_age=None,
+        )
+        if success:
+            with self._lock:
+                self._primed_symbols.add(key)
+        return success
+
     def prime(self):
-        """One-shot initial prime across symbols using REST (with project-first, then fallback)."""
+        """Prime the cache by backfilling symbols via REST."""
 
         if not self._enable_prime:
             _log(self, "info", "prime(): disabled by config.")
             return
 
-        rest = _get_rest(self)
-        if rest is None:
-            _log(self, "error", "prime(): no REST/price_fetcher found; skipping.")
-            return
-
-        for _ in range(60):  # up to 30s
-            evaluator = getattr(self, "_evaluator", None)
-            if evaluator is None:
-                time.sleep(0.5)
-                continue
-            if hasattr(evaluator, "evaluate_from_klines") or callable(evaluator):
-                break
-            time.sleep(0.5)
-
         evaluator = getattr(self, "_evaluator", None)
         if evaluator is None:
-            _log(self, "error", "prime(): evaluator not ready after 30s; skipping prime.")
+            _log(self, "error", "prime(): evaluator missing; skipping prime.")
             return
 
-        for s in _iter_symbols(self):
-            try:
-                candles = _fetch_candles(rest, s, PRIME_LIMIT_MINUTES)
-                if not candles or len(candles) < 50:
-                    _log(
-                        self,
-                        "warning",
-                        "prime(): insufficient candles for %s (got %s).",
-                        s,
-                        len(candles) if candles else 0,
-                    )
-                    continue
+        symbols = _iter_symbols(self)
+        if not symbols:
+            return
 
-                if hasattr(evaluator, "evaluate_from_klines"):
-                    ev = evaluator.evaluate_from_klines(s, candles)  # type: ignore[attr-defined]
-                    with self._lock:
-                        self._last_eval[s] = ev
-                        self._last_update_ts[s] = time.time()
-                else:
-                    if not self._evaluate_candles_sync(s, candles):
-                        continue
-                time.sleep(0.02)
-            except Exception as e:  # pragma: no cover - defensive logging
-                _log(self, "warning", "prime(): error for %s: %s", s, e)
-                time.sleep(0.02)
+        for symbol in symbols:
+            try:
+                self._prime_symbol(symbol)
+            except Exception:
+                logger.debug("RTSC: error priming %s", symbol, exc_info=True)
+            time.sleep(0.02)
 
         _log(self, "info", "prime(): completed. Fresh=%.0f%%", _fresh_fraction(self) * 100)
 
@@ -1661,23 +1692,37 @@ class RealTimeSignalCache:
         df: Optional[pd.DataFrame] = None
         fetch_exc: Optional[Exception] = None
 
-        try:
-            df = await self._fetch_klines_rest_df(
-                key,
-                interval=RTSC_REST_INTERVAL,
-                limit=RTSC_REST_LIMIT,
-                timeout=RTSC_REST_TIMEOUT,
-            )
-            if df is not None and not df.empty:
-                if RTSC_DEBUG:
-                    # LOGGER.warning(f"[RTSC] REST fetch OK for {key}: {len(df)} bars")
+        rest_client = getattr(self, "rest", None)
+        if rest_client is not None:
+            try:
+                raw_df = await asyncio.to_thread(
+                    rest_prices.rest_fetch_latest_closed,
+                    rest_client,
+                    key,
+                    RTSC_REST_INTERVAL,
+                )
+                df = self._standardize_price_df(raw_df)
+            except Exception:
+                logger.debug("RTSC: rest_fetch_latest_closed failed for %s", key, exc_info=True)
+
+        if df is None:
+            try:
+                df = await self._fetch_klines_rest_df(
+                    key,
+                    interval=RTSC_REST_INTERVAL,
+                    limit=RTSC_REST_LIMIT,
+                    timeout=RTSC_REST_TIMEOUT,
+                )
+                if df is not None and not df.empty:
+                    if RTSC_DEBUG:
+                        # LOGGER.warning(f"[RTSC] REST fetch OK for {key}: {len(df)} bars")
+                        pass
+                else:
+                    # LOGGER.warning(f"[RTSC] REST fetch empty for {key}")
                     pass
-            else:
-                # LOGGER.warning(f"[RTSC] REST fetch empty for {key}")
-                pass
-        except Exception as exc:  # pragma: no cover - debug logging only
-            fetch_exc = exc
-            # LOGGER.warning(f"[RTSC] FAIL refresh({key}): {exc}")
+            except Exception as exc:  # pragma: no cover - debug logging only
+                fetch_exc = exc
+                # LOGGER.warning(f"[RTSC] FAIL refresh({key}): {exc}")
 
         if fetch_exc is not None:
             # LOGGER.warning(f"[RTSC] REST fetch exception for {key}: {fetch_exc}")
@@ -1832,6 +1877,41 @@ class RealTimeSignalCache:
         df["close_dt"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
         df = df.set_index("close_dt").sort_index()
         return df[["open", "high", "low", "close", "volume"]]
+
+    def _standardize_price_df(
+        self, data: Optional[pd.DataFrame]
+    ) -> Optional[pd.DataFrame]:
+        """Ensure DataFrames from helpers match the evaluator schema."""
+
+        if data is None or getattr(data, "empty", True):
+            return None
+
+        df = data.copy()
+        if "close_time" in df.columns:
+            df = df.sort_values("close_time")
+            df["close_time"] = pd.to_datetime(df["close_time"], utc=True)
+            df = df.set_index("close_time")
+        elif "close_dt" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+            df = df.sort_values("close_dt")
+            df["close_dt"] = pd.to_datetime(df["close_dt"], utc=True)
+            df = df.set_index("close_dt")
+
+        if not isinstance(df.index, pd.DatetimeIndex):
+            return None
+
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
+        else:
+            df.index = df.index.tz_convert("UTC")
+
+        required_cols = ["open", "high", "low", "close", "volume"]
+        missing = [col for col in required_cols if col not in df.columns]
+        if missing:
+            return None
+
+        df = df[required_cols].apply(pd.to_numeric, errors="coerce")
+        df = df.dropna(subset=["open", "high", "low", "close"])
+        return df.sort_index()
 
     def _quick_score(self, symbol: str, df: pd.DataFrame) -> Optional[float]:
         try:
