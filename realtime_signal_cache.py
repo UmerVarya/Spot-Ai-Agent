@@ -114,6 +114,37 @@ RTSC_REST_TIMEOUT: float = float(os.getenv("RTSC_REST_TIMEOUT", "8"))
 RTSC_REST_LIMIT: int = int(os.getenv("RTSC_REST_LIMIT", "2"))
 # Interval for REST klines (should align with trading horizon).
 RTSC_REST_INTERVAL: str = os.getenv("RTSC_REST_INTERVAL", "1m")
+# Derive an expected bar duration (seconds) from the configured REST interval.
+
+
+def _interval_to_seconds(value: str) -> Optional[int]:
+    """Return ``value`` expressed in seconds if it resembles a kline interval."""
+
+    if not value:
+        return None
+    raw = str(value).strip().lower()
+    if not raw:
+        return None
+    if raw.isdigit():
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return None
+    unit = raw[-1]
+    amount = raw[:-1]
+    factors = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    try:
+        base = float(amount)
+    except ValueError:
+        return None
+    factor = factors.get(unit)
+    if factor is None:
+        return None
+    seconds = int(base * factor)
+    return seconds if seconds > 0 else None
+
+
+REST_INTERVAL_SECONDS: Optional[int] = _interval_to_seconds(RTSC_REST_INTERVAL)
 # Minimum candles required for the evaluator to produce a trade signal.
 RTSC_EVALUATOR_MIN_BARS: int = int(os.getenv("RTSC_MIN_EVAL_BARS", "40"))
 # Seconds after which WS is considered stale and REST is triggered.
@@ -1370,6 +1401,10 @@ class RealTimeSignalCache:
             df = _klines_to_dataframe(candles)
         if df.empty:
             return False
+
+        df = self._standardize_price_df(df)
+        if df is None or df.empty:
+            return False
         key = self._key(symbol)
         with self._lock:
             existing = self._cache.get(key)
@@ -2035,14 +2070,22 @@ class RealTimeSignalCache:
         if data is None or getattr(data, "empty", True):
             return None
 
+        attrs = dict(getattr(data, "attrs", {}))
         df = data.copy()
-        if "close_time" in df.columns:
+        if "timestamp" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+            df = df.sort_values("timestamp")
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            df = df.dropna(subset=["timestamp"])
+            df = df.set_index("timestamp")
+        elif "close_time" in df.columns:
             df = df.sort_values("close_time")
-            df["close_time"] = pd.to_datetime(df["close_time"], utc=True)
+            df["close_time"] = pd.to_datetime(df["close_time"], utc=True, errors="coerce")
+            df = df.dropna(subset=["close_time"])
             df = df.set_index("close_time")
         elif "close_dt" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
             df = df.sort_values("close_dt")
-            df["close_dt"] = pd.to_datetime(df["close_dt"], utc=True)
+            df["close_dt"] = pd.to_datetime(df["close_dt"], utc=True, errors="coerce")
+            df = df.dropna(subset=["close_dt"])
             df = df.set_index("close_dt")
 
         if not isinstance(df.index, pd.DatetimeIndex):
@@ -2052,6 +2095,33 @@ class RealTimeSignalCache:
             df.index = df.index.tz_localize("UTC")
         else:
             df.index = df.index.tz_convert("UTC")
+
+        df = df[~df.index.isna()]
+        if df.empty:
+            return None
+
+        df = df.sort_index()
+        if not df.index.is_monotonic_increasing:
+            df = df.sort_index()
+        if df.empty:
+            return None
+
+        df = df.loc[~df.index.duplicated(keep="last")]
+
+        if REST_INTERVAL_SECONDS:
+            deltas = df.index.to_series().diff().dt.total_seconds()
+            if not deltas.empty:
+                deltas = deltas.fillna(REST_INTERVAL_SECONDS)
+                df = df[deltas >= REST_INTERVAL_SECONDS]
+
+        if REST_INTERVAL_SECONDS and not df.empty:
+            last_close = df.index[-1]
+            now = datetime.now(timezone.utc)
+            if (now - last_close).total_seconds() < REST_INTERVAL_SECONDS:
+                df = df.iloc[:-1]
+
+        if df.empty:
+            return None
 
         required_cols = ["open", "high", "low", "close", "volume"]
         missing = [col for col in required_cols if col not in df.columns]
@@ -2116,7 +2186,10 @@ class RealTimeSignalCache:
             "number_of_trades",
         ]
         available = [col for col in desired_order if col in df.columns]
-        return df[available].sort_index()
+        standardized = df[available].sort_index()
+        if attrs:
+            standardized.attrs.update(attrs)
+        return standardized
 
     def _quick_score(self, symbol: str, df: pd.DataFrame) -> Optional[float]:
         try:
@@ -2134,6 +2207,9 @@ class RealTimeSignalCache:
         attempt_ts: float,
         prev_age: Optional[float],
     ) -> bool:
+        if price_data is None or getattr(price_data, "empty", True):
+            _log(self, "warning", "_update_cache(): rejecting empty frame for %s", key)
+            return False
         try:
             with self._lock:
                 context = dict(self._context)
