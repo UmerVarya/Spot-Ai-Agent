@@ -136,11 +136,50 @@ def handle_exception(exc_type, exc_value, exc_traceback):
 
 sys.excepthook = handle_exception
 
+
+def _auto_tune_signal_cache_params(
+    symbol_target: int,
+    refresh_interval: float,
+    stale_multiplier: float,
+    max_concurrency: int,
+    scan_interval: float,
+) -> tuple[float, int, float, float]:
+    """Return adjusted stale multiplier, concurrency and scan interval.
+
+    The tunings ensure the refresh workers can cycle through the tracked
+    symbols without signals expiring prematurely. They also gently throttle the
+    scan cadence when the cache would otherwise still be updating.
+    """
+
+    safe_refresh = max(0.5, float(refresh_interval))
+    base_stale = max(1.0, safe_refresh * max(1.0, float(stale_multiplier)))
+    configured_conc = max(1, int(max_concurrency))
+    symbol_target = max(0, int(symbol_target))
+
+    if symbol_target <= 1:
+        tuned_scan = max(scan_interval, safe_refresh)
+        return base_stale / safe_refresh, configured_conc, tuned_scan, safe_refresh
+
+    desired_conc = max(4, math.ceil(symbol_target / 4))
+    desired_conc = min(32, desired_conc)
+    tuned_conc = max(configured_conc, desired_conc)
+
+    estimated_cycle = safe_refresh * max(1, math.ceil(symbol_target / tuned_conc))
+    min_stale_window = estimated_cycle * 2.5
+    tuned_stale = max(base_stale, min_stale_window)
+
+    tuned_scan = float(scan_interval)
+    if tuned_scan < estimated_cycle * 0.75:
+        tuned_scan = min(15.0, max(tuned_scan, estimated_cycle * 0.9))
+    tuned_scan = max(tuned_scan, safe_refresh)
+
+    return tuned_stale / safe_refresh, tuned_conc, tuned_scan, estimated_cycle
+
+
 # Maximum concurrent open trades (strictly limited to one active position)
+# (re-)declare constants for static type-checkers after helper definition
 MAX_ACTIVE_TRADES = 1
-# Interval between scans (in seconds).  Default lowered to tighten reaction time.
 SCAN_INTERVAL = float(os.getenv("SCAN_INTERVAL", "3"))
-# Background refresh cadence for the real-time signal cache.
 SIGNAL_REFRESH_INTERVAL = runtime_settings.refresh_interval
 SIGNAL_STALE_MULT = float(os.getenv("SIGNAL_STALE_AFTER", "3"))
 SIGNAL_STALE_AFTER = SIGNAL_REFRESH_INTERVAL * SIGNAL_STALE_MULT
@@ -340,6 +379,19 @@ def run_agent_loop() -> None:
     refresh_interval = float(os.getenv("SIGNAL_REFRESH_INTERVAL", str(SIGNAL_REFRESH_INTERVAL)))
     stale_mult = float(os.getenv("SIGNAL_STALE_AFTER", str(SIGNAL_STALE_MULT)))
     max_conc = int(os.getenv("MAX_CONCURRENT_FETCHES", str(MAX_CONCURRENT_FETCHES)))
+    scan_interval = float(os.getenv("SCAN_INTERVAL", str(SCAN_INTERVAL)))
+    tuned_stale_mult, tuned_max_conc, tuned_scan_interval, estimated_cycle = (
+        _auto_tune_signal_cache_params(
+            runtime_settings.max_symbols,
+            refresh_interval,
+            stale_mult,
+            max_conc,
+            scan_interval,
+        )
+    )
+    stale_mult = tuned_stale_mult
+    max_conc = tuned_max_conc
+    scan_interval = tuned_scan_interval
 
     signal_cache = RealTimeSignalCache(
         price_fetcher=get_price_data_async,
@@ -368,10 +420,12 @@ def run_agent_loop() -> None:
         circuit_breaker_window=runtime_settings.circuit_breaker_window,
     )
     logger.info(
-        "Signal cache params: interval=%.2fs, stale_after=%.2fs, max_concurrency=%d",
+        "Signal cache params: interval=%.2fs, stale_after=%.2fs, max_concurrency=%d, scan_interval=%.2fs (cycle≈%.2fs)",
         refresh_interval,
         refresh_interval * stale_mult,
         max_conc,
+        scan_interval,
+        estimated_cycle,
     )
     boot_syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
     try:
@@ -658,7 +712,7 @@ def run_agent_loop() -> None:
         if not triggered:
             continue
         now = time.time()
-        remaining = (last_scan_time + SCAN_INTERVAL) - now
+        remaining = (last_scan_time + scan_interval) - now
         if remaining > 0:
             # Ensure we don't trigger scans more frequently than configured
             time.sleep(remaining)
@@ -668,7 +722,7 @@ def run_agent_loop() -> None:
             continue
         try:
             now = time.time()
-            if (now - last_scan_time) < SCAN_INTERVAL:
+            if (now - last_scan_time) < scan_interval:
                 # Another thread completed a scan recently while we were waiting
                 continue
             scan_trigger.clear()
