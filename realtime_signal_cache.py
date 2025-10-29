@@ -788,7 +788,52 @@ class RealTimeSignalCache:
     def _prime_symbol(self, symbol: str) -> bool:
         if self.bars_len(symbol) >= REST_REQUIRED_MIN_BARS:
             return True
-        return self.force_rest_backfill(symbol)
+
+        if self.force_rest_backfill(symbol):
+            return True
+
+        fetcher = getattr(self, "_price_fetcher", None)
+        if fetcher is None:
+            return False
+
+        key = self._key(symbol)
+        try:
+            maybe_df = fetcher(key)
+        except Exception:
+            logger.debug("RTSC: price fetcher raised while priming %s", key, exc_info=True)
+            return False
+
+        try:
+            if inspect.isawaitable(maybe_df):
+                df = _run_async_allow_nested(maybe_df)
+            else:
+                df = maybe_df
+        except Exception:
+            logger.debug("RTSC: async price fetch failed while priming %s", key, exc_info=True)
+            return False
+
+        standardized = self._standardize_price_df(df)
+        rows = 0 if standardized is None else len(standardized)
+        if standardized is None or rows < REST_REQUIRED_MIN_BARS:
+            logger.debug(
+                "RTSC: price fetcher returned insufficient candles for %s during prime (%d/%d)",
+                key,
+                rows,
+                REST_REQUIRED_MIN_BARS,
+            )
+            return False
+
+        attempt_ts = time.time()
+        success = self._update_cache(key, standardized, attempt_ts=attempt_ts, prev_age=None)
+        if success:
+            _log(
+                self,
+                "info",
+                "prime(): %s primed via price fetcher with %d bars",
+                key,
+                rows,
+            )
+        return success
 
     def _tick_symbol(self, symbol: str) -> bool:
         if self.bars_len(symbol) < REST_REQUIRED_MIN_BARS:
