@@ -1,7 +1,11 @@
 import os
 import pandas as pd
 
-WARMUP_BARS = int(os.getenv("RTSC_REST_WARMUP_BARS", "300"))
+_EVAL_MIN_BARS = int(os.getenv("RTSC_MIN_EVAL_BARS", "40"))
+_REQUIRED_MIN_BARS = max(int(os.getenv("RTSC_REQUIRED_MIN_BARS", "220")), _EVAL_MIN_BARS)
+# Fetch one extra bar above the minimum to safely drop an in-flight candle
+# without regressing below the evaluator threshold.
+WARMUP_BARS = max(int(os.getenv("RTSC_REST_WARMUP_BARS", "300")), _REQUIRED_MIN_BARS + 1)
 
 
 def _to_df(raw):
