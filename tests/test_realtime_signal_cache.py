@@ -3,6 +3,7 @@ import time
 from types import MethodType
 from typing import Awaitable, Callable, Dict, Iterable, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 import pytest
@@ -10,8 +11,30 @@ import pytest
 from realtime_signal_cache import CachedSignal, RealTimeSignalCache
 
 
+def _make_price_df(rows: int = 60) -> pd.DataFrame:
+    index = pd.date_range(
+        end=pd.Timestamp.utcnow().floor("T"), periods=rows, freq="T", tz="UTC"
+    )
+    base = np.linspace(1.0, 1.0 + rows * 0.01, rows)
+    data = {
+        "open": base,
+        "high": base + 0.05,
+        "low": base - 0.05,
+        "close": base + 0.01,
+        "volume": np.full(rows, 10.0),
+    }
+    df = pd.DataFrame(data, index=index)
+    df["quote_volume"] = df["volume"]
+    df["taker_buy_base"] = df["volume"] * 0.5
+    df["taker_buy_quote"] = df["quote_volume"] * 0.5
+    df["taker_sell_base"] = df["volume"] - df["taker_buy_base"]
+    df["taker_sell_quote"] = df["quote_volume"] - df["taker_buy_quote"]
+    df["number_of_trades"] = np.full(rows, 12.0)
+    return df
+
+
 async def _dummy_fetcher(symbol: str) -> Optional[pd.DataFrame]:
-    return pd.DataFrame({"close": [1.0]}, index=[pd.Timestamp.utcnow()])
+    return _make_price_df()
 
 
 def _dummy_evaluator(*args, **kwargs) -> Tuple[float, Optional[str], float, Optional[str]]:
@@ -165,7 +188,7 @@ def test_force_refresh_without_worker_primes_cache() -> None:
     async def fetcher(symbol: str) -> Optional[pd.DataFrame]:
         calls.append(symbol)
         await asyncio.sleep(0)
-        return pd.DataFrame({"close": [1.0]}, index=[pd.Timestamp.utcnow()])
+        return _make_price_df()
 
     cache = _build_cache(fetcher=fetcher)
     cache.update_universe(["BTCUSDT"])
@@ -187,7 +210,7 @@ def test_refresh_symbol_force_rest_false_bypasses_global(monkeypatch: pytest.Mon
     async def fetcher(symbol: str) -> Optional[pd.DataFrame]:
         fetch_calls.append(symbol)
         await asyncio.sleep(0)
-        return pd.DataFrame({"close": [1.0]}, index=[pd.Timestamp.utcnow()])
+        return _make_price_df()
 
     async def rest_fetch(self: RealTimeSignalCache, symbol: str) -> bool:
         rest_calls.append(symbol)
@@ -210,7 +233,7 @@ def test_force_refresh_while_worker_running() -> None:
     async def fetcher(symbol: str) -> Optional[pd.DataFrame]:
         calls.append(symbol)
         await asyncio.sleep(0.01)
-        return pd.DataFrame({"close": [1.0]}, index=[pd.Timestamp.utcnow()])
+        return _make_price_df()
 
     cache = _build_cache(fetcher=fetcher)
     cache.update_universe(["ETHUSDT"])
