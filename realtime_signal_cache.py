@@ -27,6 +27,7 @@ import logging
 import time
 
 logger = logging.getLogger("realtime_signal_cache")
+_CIRCUIT_BENIGN_SUBSTRINGS = ("insufficient candles",)
 
 # --- RTSC quiet mode (default ON) ---
 _RTSQ = os.getenv("RTSC_LOG_QUIET", "1")  # "1" to quiet, "0" to see everything
@@ -227,6 +228,13 @@ ENABLE_PRIME        = os.getenv("ENABLE_RTSCC_PRIME", "1").lower() in ("1","true
 ENABLE_REFRESH      = os.getenv("ENABLE_RTSCC_REFRESH", "1").lower() in ("1","true","yes")
 _RAW_REQUIRED_MIN_BARS = int(os.getenv("RTSC_REQUIRED_MIN_BARS", "220"))
 REST_REQUIRED_MIN_BARS = max(_RAW_REQUIRED_MIN_BARS, RTSC_EVALUATOR_MIN_BARS)
+_RAW_RELAXED_MIN_BARS = int(
+    os.getenv("RTSC_RELAXED_MIN_BARS", str(RTSC_EVALUATOR_MIN_BARS))
+)
+RELAXED_REQUIRED_MIN_BARS = max(
+    RTSC_EVALUATOR_MIN_BARS,
+    min(REST_REQUIRED_MIN_BARS, _RAW_RELAXED_MIN_BARS),
+)
 _RAW_WARMUP_BARS = int(os.getenv("RTSC_REST_WARMUP_BARS", "300"))
 # Always fetch at least one more bar than required so the most recent candle can
 # be discarded when it is still forming without falling below the evaluator
@@ -338,6 +346,9 @@ def _sufficient_fraction(obj, *, min_bars: int = REST_REQUIRED_MIN_BARS) -> floa
     key_fn = getattr(obj, "_key", None)
 
     sufficient = 0
+    relaxed_min = getattr(obj, "_relaxed_min_bars", min_bars)
+    relaxed_min = max(RTSC_EVALUATOR_MIN_BARS, min(relaxed_min, min_bars))
+
     for sym in syms:
         key = sym
         if callable(key_fn):
@@ -355,6 +366,8 @@ def _sufficient_fraction(obj, *, min_bars: int = REST_REQUIRED_MIN_BARS) -> floa
                 except Exception:
                     rows = 0
         if rows >= min_bars:
+            sufficient += 1
+        elif rows >= relaxed_min:
             sufficient += 1
 
     return sufficient / max(1, len(syms))
@@ -620,6 +633,7 @@ class RealTimeSignalCache:
         self._symbol_debounce: Dict[str, float] = {}
         self._symbol_refresh_overrides: Dict[str, float] = {}
         self._last_priority_request: Dict[str, float] = {}
+        self._relaxed_min_bars = RELAXED_REQUIRED_MIN_BARS
         self._cb_threshold = 5
         self._cb_window = 30.0
         self._cb_error_times: "deque[float]" = deque()
@@ -855,16 +869,36 @@ class RealTimeSignalCache:
 
         df = self._standardize_price_df(raw)
         rows = 0 if df is None else len(df)
-        if df is None or rows < REST_REQUIRED_MIN_BARS:
+        relaxed_min = self._relaxed_min_bars
+        if df is None or rows < relaxed_min:
             _log(
                 self,
                 "warning",
                 "force_rest_backfill(): insufficient candles for %s (%d/%d)",
                 key,
                 rows,
-                REST_REQUIRED_MIN_BARS,
+                relaxed_min,
             )
             return False
+
+        if rows < REST_REQUIRED_MIN_BARS:
+            _log(
+                self,
+                "info",
+                "force_rest_backfill(): accepting partial snapshot for %s (%d/%d)",
+                key,
+                rows,
+                REST_REQUIRED_MIN_BARS,
+            )
+            log_event(
+                logger,
+                "cache_rest_partial",
+                symbol=key,
+                rows=rows,
+                required=REST_REQUIRED_MIN_BARS,
+                relaxed=relaxed_min,
+                method="force_rest_backfill",
+            )
 
         attempt_ts = time.time()
         success = self._update_cache(key, df, attempt_ts=attempt_ts, prev_age=None)
@@ -901,14 +935,32 @@ class RealTimeSignalCache:
 
         standardized = self._standardize_price_df(df)
         rows = 0 if standardized is None else len(standardized)
-        if standardized is None or rows < REST_REQUIRED_MIN_BARS:
+        relaxed_min = self._relaxed_min_bars
+        if standardized is None or rows < relaxed_min:
             logger.debug(
                 "RTSC: price fetcher returned insufficient candles for %s during prime (%d/%d)",
                 key,
                 rows,
-                REST_REQUIRED_MIN_BARS,
+                relaxed_min,
             )
             return False
+
+        if rows < REST_REQUIRED_MIN_BARS:
+            logger.debug(
+                "RTSC: accepting partial prime snapshot for %s (%d/%d)",
+                key,
+                rows,
+                REST_REQUIRED_MIN_BARS,
+            )
+            log_event(
+                logger,
+                "cache_rest_partial",
+                symbol=key,
+                rows=rows,
+                required=REST_REQUIRED_MIN_BARS,
+                relaxed=relaxed_min,
+                method="prime_price_fetcher",
+            )
 
         attempt_ts = time.time()
         success = self._update_cache(key, standardized, attempt_ts=attempt_ts, prev_age=None)
@@ -2025,16 +2077,29 @@ class RealTimeSignalCache:
         except Exception:
             rows = 0
 
+        relaxed_min = self._relaxed_min_bars
         if rows < REST_REQUIRED_MIN_BARS:
-            primed = await asyncio.to_thread(self._prime_symbol, symbol)
-            if primed:
-                return True
-            self._record_refresh_error(
-                key,
-                f"REST refresh returned insufficient candles ({rows}/{REST_REQUIRED_MIN_BARS})",
-                attempt_ts=attempt_ts,
+            if rows < relaxed_min:
+                primed = await asyncio.to_thread(self._prime_symbol, symbol)
+                if primed:
+                    return True
+                self._record_refresh_error(
+                    key,
+                    f"REST refresh returned insufficient candles ({rows}/{REST_REQUIRED_MIN_BARS})",
+                    attempt_ts=attempt_ts,
+                    count_toward_breaker=False,
+                )
+                return False
+
+            log_event(
+                logger,
+                "cache_rest_partial",
+                symbol=key,
+                rows=rows,
+                required=REST_REQUIRED_MIN_BARS,
+                relaxed=relaxed_min,
+                method="rest_refresh",
             )
-            return False
 
         score = self._quick_score(key, df)
         payload = {
@@ -2436,7 +2501,12 @@ class RealTimeSignalCache:
         return due
 
     def _record_refresh_error(
-        self, symbol: str, message: str, *, attempt_ts: Optional[float] = None
+        self,
+        symbol: str,
+        message: str,
+        *,
+        attempt_ts: Optional[float] = None,
+        count_toward_breaker: Optional[bool] = None,
     ) -> None:
         """Record the most recent refresh error for a symbol."""
 
@@ -2454,7 +2524,11 @@ class RealTimeSignalCache:
             symbol=self._key(symbol),
             message=normalized_message,
         )
-        self._register_error(ts)
+        lower_msg = normalized_message.lower()
+        benign = any(substr in lower_msg for substr in _CIRCUIT_BENIGN_SUBSTRINGS)
+        should_count = count_toward_breaker if count_toward_breaker is not None else not benign
+        if should_count:
+            self._register_error(ts)
 
     def _register_error(self, timestamp: float) -> None:
         with self._cb_lock:

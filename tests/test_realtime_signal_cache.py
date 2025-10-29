@@ -193,13 +193,17 @@ def test_force_refresh_without_worker_primes_cache() -> None:
 
     cache = _build_cache(fetcher=fetcher)
     cache.update_universe(["BTCUSDT"])
-    assert cache.get("BTCUSDT") is None
+    cached_before = cache.get("BTCUSDT")
+    before_calls = len(calls)
 
     success = cache.force_refresh("BTCUSDT", timeout=2.0)
     assert success
-    cached = cache.get("BTCUSDT")
-    assert cached is not None
-    assert calls and set(calls) == {"BTCUSDT"}
+    cached_after = cache.get("BTCUSDT")
+    assert cached_after is not None
+    assert len(calls) > before_calls
+    if cached_before is not None:
+        assert cached_after.updated_at >= cached_before.updated_at
+    assert set(calls) == {"BTCUSDT"}
 
 
 def test_prime_symbol_falls_back_to_price_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,6 +211,8 @@ def test_prime_symbol_falls_back_to_price_fetcher(monkeypatch: pytest.MonkeyPatc
     cache.rest = None
     cache._rest_client = None
     cache.update_universe(["BTCUSDT"])
+    cache._cache.clear()
+    cache._primed_symbols.clear()
     monkeypatch.setattr(rtsc, "REST_REQUIRED_MIN_BARS", 10)
     monkeypatch.setattr(cache, "force_rest_backfill", lambda symbol: False)
 
@@ -314,6 +320,27 @@ def test_circuit_breaker_trips_after_errors() -> None:
     cache.update_universe(["BTCUSDT"])
     now = time.time()
     cache._record_refresh_error("BTCUSDT", "boom", attempt_ts=now)
+    cache._record_refresh_error("BTCUSDT", "boom", attempt_ts=now + 1)
+    assert cache.circuit_breaker_active()
+
+
+def test_circuit_breaker_ignores_benign_insufficient_errors() -> None:
+    cache = _build_cache()
+    cache.configure_runtime(
+        default_debounce_ms=500,
+        debounce_overrides={},
+        refresh_overrides={},
+        circuit_breaker_threshold=1,
+        circuit_breaker_window=60.0,
+    )
+    cache.update_universe(["BTCUSDT"])
+    now = time.time()
+    cache._record_refresh_error(
+        "BTCUSDT",
+        "REST refresh returned insufficient candles (10/220)",
+        attempt_ts=now,
+    )
+    assert not cache.circuit_breaker_active()
     cache._record_refresh_error("BTCUSDT", "boom", attempt_ts=now + 1)
     assert cache.circuit_breaker_active()
 
