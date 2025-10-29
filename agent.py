@@ -374,6 +374,33 @@ def run_agent_loop() -> None:
         max_conc,
     )
     boot_syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+    try:
+        symbols = get_top_symbols(limit=runtime_settings.max_symbols)
+    except Exception as warmup_exc:
+        logger.error("Initial symbol fetch failed for warm-up: %s", warmup_exc, exc_info=True)
+        symbols = []
+    symbols = [sym for sym in symbols if isinstance(sym, str) and sym]
+    warmup_symbols = sorted({sym.upper() for sym in [*symbols, *boot_syms]})
+    REQUIRED_MIN_BARS = int(os.getenv("RTSC_REQUIRED_MIN_BARS", "220"))
+    WARMUP_TIMEOUT_SEC = int(os.getenv("RTSC_WARMUP_TIMEOUT_SEC", "120"))
+    for s in warmup_symbols:
+        try:
+            signal_cache.force_rest_backfill(s)
+        except Exception as exc:
+            logger.error("Warmup backfill failed for %s: %s", s, exc)
+    deadline = time.time() + WARMUP_TIMEOUT_SEC
+    while True:
+        missing = [s for s in warmup_symbols if signal_cache.bars_len(s) < REQUIRED_MIN_BARS]
+        if not missing:
+            logger.info("RTSC warm-up complete for %d symbols", len(warmup_symbols))
+            break
+        if time.time() > deadline:
+            logger.warning(
+                "RTSC warm-up timed out; missing=%s",
+                ",".join(missing[:10]),
+            )
+            break
+        time.sleep(1.0)
     for sym in boot_syms:
         dispatch_schedule_refresh(signal_cache, sym)
 
