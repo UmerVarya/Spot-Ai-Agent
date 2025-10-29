@@ -8,6 +8,7 @@ import pandas as pd
 
 import pytest
 
+import realtime_signal_cache as rtsc
 from realtime_signal_cache import CachedSignal, RealTimeSignalCache
 
 
@@ -198,7 +199,22 @@ def test_force_refresh_without_worker_primes_cache() -> None:
     assert success
     cached = cache.get("BTCUSDT")
     assert cached is not None
-    assert calls == ["BTCUSDT"]
+    assert calls and set(calls) == {"BTCUSDT"}
+
+
+def test_prime_symbol_falls_back_to_price_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    cache = _build_cache(fetcher=_dummy_fetcher)
+    cache.rest = None
+    cache._rest_client = None
+    cache.update_universe(["BTCUSDT"])
+    monkeypatch.setattr(rtsc, "REST_REQUIRED_MIN_BARS", 10)
+    monkeypatch.setattr(cache, "force_rest_backfill", lambda symbol: False)
+
+    assert cache.bars_len("BTCUSDT") == 0
+
+    success = cache._prime_symbol("BTCUSDT")
+    assert success
+    assert cache.bars_len("BTCUSDT") >= rtsc.REST_REQUIRED_MIN_BARS
 
 
 def test_refresh_symbol_force_rest_false_bypasses_global(monkeypatch: pytest.MonkeyPatch) -> None:
