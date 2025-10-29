@@ -6,15 +6,23 @@ WARMUP_BARS = int(os.getenv("RTSC_REST_WARMUP_BARS", "300"))
 
 def _to_df(raw):
     if not raw:
-        return pd.DataFrame(columns=[
-            "open_time",
-            "close_time",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-        ])
+        return pd.DataFrame(
+            columns=[
+                "open_time",
+                "close_time",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "quote_asset_volume",
+                "number_of_trades",
+                "taker_buy_base",
+                "taker_buy_quote",
+                "taker_sell_base",
+                "taker_sell_quote",
+            ]
+        )
     df = pd.DataFrame(
         raw,
         columns=[
@@ -36,6 +44,20 @@ def _to_df(raw):
     df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
     for column in ["open", "high", "low", "close", "volume"]:
         df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    for column in [
+        "quote_asset_volume",
+        "number_of_trades",
+        "taker_buy_base",
+        "taker_buy_quote",
+    ]:
+        df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0.0)
+
+    df["taker_sell_base"] = (df["volume"].fillna(0.0) - df["taker_buy_base"]).clip(lower=0.0)
+    df["taker_sell_quote"] = (
+        df["quote_asset_volume"] - df["taker_buy_quote"]
+    ).clip(lower=0.0)
+
     return df[
         [
             "open_time",
@@ -45,6 +67,12 @@ def _to_df(raw):
             "low",
             "close",
             "volume",
+            "quote_asset_volume",
+            "number_of_trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "taker_sell_base",
+            "taker_sell_quote",
         ]
     ].dropna()
 
