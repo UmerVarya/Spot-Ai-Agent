@@ -1861,10 +1861,10 @@ class RealTimeSignalCache:
             "close",
             "volume",
             "close_time",
-            "qav",
-            "num_trades",
-            "taker_base_vol",
-            "taker_quote_vol",
+            "quote_asset_volume",
+            "number_of_trades",
+            "taker_buy_base",
+            "taker_buy_quote",
             "ignore",
         ]
         try:
@@ -1872,11 +1872,46 @@ class RealTimeSignalCache:
         except Exception:
             df = pd.DataFrame(raw)
             df.columns = cols[: len(df.columns)]
-        for col in ("open", "high", "low", "close", "volume"):
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        numeric_cols = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_asset_volume",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "number_of_trades",
+        ]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
         df["close_dt"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
         df = df.set_index("close_dt").sort_index()
-        return df[["open", "high", "low", "close", "volume"]]
+
+        df["quote_volume"] = df.get("quote_asset_volume", 0.0).fillna(0.0)
+        df["taker_buy_base"] = df.get("taker_buy_base", 0.0).fillna(0.0)
+        df["taker_buy_quote"] = df.get("taker_buy_quote", 0.0).fillna(0.0)
+        df["taker_sell_base"] = (df["volume"].fillna(0.0) - df["taker_buy_base"]).clip(lower=0.0)
+        df["taker_sell_quote"] = (
+            df["quote_volume"].fillna(0.0) - df["taker_buy_quote"]
+        ).clip(lower=0.0)
+
+        return df[[
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "taker_sell_base",
+            "taker_sell_quote",
+            "number_of_trades",
+        ]]
 
     def _standardize_price_df(
         self, data: Optional[pd.DataFrame]
@@ -1909,9 +1944,65 @@ class RealTimeSignalCache:
         if missing:
             return None
 
-        df = df[required_cols].apply(pd.to_numeric, errors="coerce")
+        df[required_cols] = df[required_cols].apply(pd.to_numeric, errors="coerce")
         df = df.dropna(subset=["open", "high", "low", "close"])
-        return df.sort_index()
+
+        alias_map = {
+            "quote_volume": ["quote_volume", "quote_asset_volume", "qav"],
+            "taker_buy_base": ["taker_buy_base", "taker_base_vol"],
+            "taker_buy_quote": ["taker_buy_quote", "taker_quote_vol"],
+            "number_of_trades": ["number_of_trades", "num_trades"],
+        }
+
+        for target, aliases in alias_map.items():
+            if target in df.columns:
+                df[target] = pd.to_numeric(df[target], errors="coerce")
+                continue
+            for alias in aliases:
+                if alias in df.columns:
+                    df[target] = pd.to_numeric(df[alias], errors="coerce")
+                    break
+            else:
+                df[target] = 0.0
+
+        df["quote_volume"] = df["quote_volume"].fillna(0.0)
+        df["taker_buy_base"] = df["taker_buy_base"].fillna(0.0)
+        df["taker_buy_quote"] = df["taker_buy_quote"].fillna(0.0)
+        df["number_of_trades"] = df["number_of_trades"].fillna(0.0)
+
+        if "taker_sell_base" not in df.columns:
+            df["taker_sell_base"] = (
+                df["volume"].fillna(0.0) - df["taker_buy_base"]
+            ).clip(lower=0.0)
+        else:
+            df["taker_sell_base"] = pd.to_numeric(
+                df["taker_sell_base"], errors="coerce"
+            ).fillna(0.0)
+
+        if "taker_sell_quote" not in df.columns:
+            df["taker_sell_quote"] = (
+                df["quote_volume"].fillna(0.0) - df["taker_buy_quote"]
+            ).clip(lower=0.0)
+        else:
+            df["taker_sell_quote"] = pd.to_numeric(
+                df["taker_sell_quote"], errors="coerce"
+            ).fillna(0.0)
+
+        desired_order = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "taker_sell_base",
+            "taker_sell_quote",
+            "number_of_trades",
+        ]
+        available = [col for col in desired_order if col in df.columns]
+        return df[available].sort_index()
 
     def _quick_score(self, symbol: str, df: pd.DataFrame) -> Optional[float]:
         try:

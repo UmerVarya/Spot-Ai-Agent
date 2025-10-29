@@ -50,12 +50,47 @@ def _as_dataframe(raw: Iterable[Sequence[object]]) -> pd.DataFrame:
 
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
-    numeric_cols = ["open", "high", "low", "close", "volume"]
-    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+    numeric_cols = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_asset_volume",
+        "number_of_trades",
+        "taker_buy_base",
+        "taker_buy_quote",
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     df = df.sort_values("close_time").reset_index(drop=True)
     df = df.set_index("close_time")
     df.index.name = "close_time"
-    return df[numeric_cols]
+
+    df["quote_volume"] = df.get("quote_asset_volume", 0.0).fillna(0.0)
+    df["taker_buy_base"] = df.get("taker_buy_base", 0.0).fillna(0.0)
+    df["taker_buy_quote"] = df.get("taker_buy_quote", 0.0).fillna(0.0)
+    df["taker_sell_base"] = (df["volume"].fillna(0.0) - df["taker_buy_base"]).clip(lower=0.0)
+    df["taker_sell_quote"] = (
+        df["quote_volume"].fillna(0.0) - df["taker_buy_quote"]
+    ).clip(lower=0.0)
+    df["number_of_trades"] = df.get("number_of_trades", 0).fillna(0.0)
+
+    return df[[
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_volume",
+        "taker_buy_base",
+        "taker_buy_quote",
+        "taker_sell_base",
+        "taker_sell_quote",
+        "number_of_trades",
+    ]]
 
 
 def rest_backfill_klines(
