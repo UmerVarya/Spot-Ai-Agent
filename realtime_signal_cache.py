@@ -114,6 +114,8 @@ RTSC_REST_TIMEOUT: float = float(os.getenv("RTSC_REST_TIMEOUT", "8"))
 RTSC_REST_LIMIT: int = int(os.getenv("RTSC_REST_LIMIT", "2"))
 # Interval for REST klines (should align with trading horizon).
 RTSC_REST_INTERVAL: str = os.getenv("RTSC_REST_INTERVAL", "1m")
+# Minimum candles required for the evaluator to produce a trade signal.
+RTSC_EVALUATOR_MIN_BARS: int = int(os.getenv("RTSC_MIN_EVAL_BARS", "40"))
 # Seconds after which WS is considered stale and REST is triggered.
 RTSC_WS_STALE_AFTER_SEC: float = float(os.getenv("RTSC_WS_STALE_AFTER", "12"))
 
@@ -1701,14 +1703,40 @@ class RealTimeSignalCache:
             logger.debug("Price fetch failed for %s: %s", key, exc)
             return False
 
-        if price_data is None or getattr(price_data, "empty", False):
-            self._record_refresh_error(key, "no price data returned", attempt_ts=attempt_ts)
-            logger.debug("No price data available for %s", key)
+        standardized = self._standardize_price_df(price_data)
+        if standardized is None or getattr(standardized, "empty", False):
+            logger.debug("Price data for %s could not be standardised; attempting REST backfill.", key)
+            primed = await asyncio.to_thread(self._prime_symbol, symbol)
+            if primed:
+                return True
+            self._record_refresh_error(key, "no usable price data returned", attempt_ts=attempt_ts)
+            return False
+
+        try:
+            rows = int(len(standardized))
+        except Exception:
+            rows = 0
+
+        if rows < RTSC_EVALUATOR_MIN_BARS:
+            logger.debug(
+                "Price data for %s has only %d rows (<%d); forcing REST backfill.",
+                key,
+                rows,
+                RTSC_EVALUATOR_MIN_BARS,
+            )
+            primed = await asyncio.to_thread(self._prime_symbol, symbol)
+            if primed:
+                return True
+            self._record_refresh_error(
+                key,
+                f"insufficient candles ({rows}/{RTSC_EVALUATOR_MIN_BARS})",
+                attempt_ts=attempt_ts,
+            )
             return False
 
         return self._update_cache(
             key,
-            price_data,
+            standardized,
             attempt_ts=attempt_ts,
             prev_age=prev_age,
         )
