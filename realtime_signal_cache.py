@@ -213,6 +213,12 @@ def pending_diagnostics(limit: Optional[int] = None) -> Path:
 
 # ===== Config (env tunable; safe defaults) =====
 READY_MIN_FRACTION  = float(os.getenv("READY_MIN_FRACTION", "0.80"))   # % of symbols with fresh data
+REQUIRE_FULL_WARMUP = os.getenv("RTSC_REQUIRE_FULL_WARMUP", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+WARMUP_REQUIRED_FRACTION = 1.0 if REQUIRE_FULL_WARMUP else READY_MIN_FRACTION
 WARMUP_MAX_SECONDS  = int(os.getenv("WARMUP_MAX_SECONDS", "90"))        # watchdog ceiling
 PRIME_LIMIT_MINUTES = int(os.getenv("PRIME_LIMIT_MINUTES", "300"))      # bars for initial prime
 FRESHNESS_SECONDS   = int(os.getenv("FRESHNESS_SECONDS", "120"))        # what is considered "fresh"
@@ -657,11 +663,12 @@ class RealTimeSignalCache:
         _log(
             self,
             "info",
-            "RTSC core warmup enabled (prime=%s, refresh=%s, ws=%s | ready>=%.0f%%, ceil=%ss, bars=%dm)",
+            "RTSC core warmup enabled (prime=%s, refresh=%s, ws=%s | ready>=%.0f%%, bars>=%.0f%%, ceil=%ss, bars=%dm)",
             self._enable_prime,
             self._enable_refresh,
             USE_WS_PRICES,
             READY_MIN_FRACTION * 100,
+            WARMUP_REQUIRED_FRACTION * 100,
             WARMUP_MAX_SECONDS,
             PRIME_LIMIT_MINUTES,
         )
@@ -869,7 +876,7 @@ class RealTimeSignalCache:
         if self.bars_len(symbol) >= REST_REQUIRED_MIN_BARS:
             return True
 
-        if self.force_rest_backfill(symbol):
+        if _get_rest(self) is not None and self.force_rest_backfill(symbol):
             return True
 
         fetcher = getattr(self, "_price_fetcher", None)
@@ -1021,7 +1028,7 @@ class RealTimeSignalCache:
 
             fraction = _fresh_fraction(self)
             sufficient_fraction = _sufficient_fraction(self)
-            if fraction >= READY_MIN_FRACTION and sufficient_fraction >= READY_MIN_FRACTION:
+            if fraction >= READY_MIN_FRACTION and sufficient_fraction >= WARMUP_REQUIRED_FRACTION:
                 self.mark_ready()
                 _log(
                     self,
@@ -1042,7 +1049,7 @@ class RealTimeSignalCache:
             frac = _fresh_fraction(self)
             bars_frac = _sufficient_fraction(self)
             elapsed = time.time() - start
-            if frac >= READY_MIN_FRACTION and bars_frac >= READY_MIN_FRACTION:
+            if frac >= READY_MIN_FRACTION and bars_frac >= WARMUP_REQUIRED_FRACTION:
                 _log(
                     self,
                     "info",
@@ -1071,10 +1078,11 @@ class RealTimeSignalCache:
     def is_ready(self) -> bool:
         return bool(getattr(self, "_ready", False))
 
-    def mark_ready(self):
+    def mark_ready(self, value: bool = True):
+        value_bool = bool(value)
         was_ready = bool(getattr(self, "_ready", False))
-        self._ready = True
-        if not was_ready:
+        self._ready = value_bool
+        if value_bool and not was_ready:
             dur = time.time() - getattr(self, "_warmup_started_at", time.time())
             cache_obj = getattr(self, "cache", None)
             if cache_obj is None:
@@ -1256,8 +1264,33 @@ class RealTimeSignalCache:
                 self._symbol_last_attempt.pop(key, None)
                 self._symbol_last_error.pop(key, None)
                 self._primed_symbols.discard(key)
+        added_symbols = sorted(added)
         self._signal_wake()
         self._update_stream_symbols()
+
+        if added_symbols:
+            missing: list[str] = []
+            for sym in added_symbols:
+                try:
+                    success = self._prime_symbol(sym)
+                except Exception:
+                    logger.debug(
+                        "RTSC: error during prime for %s", sym, exc_info=True
+                    )
+                    success = False
+                if not success:
+                    missing.append(sym)
+            if missing:
+                self.mark_ready(False)
+                for sym in missing:
+                    try:
+                        self.enqueue_refresh(sym)
+                    except Exception:
+                        logger.debug(
+                            "RTSC: failed to enqueue refresh for %s after backfill miss",
+                            sym,
+                            exc_info=True,
+                        )
 
     def configure_runtime(
         self,

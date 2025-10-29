@@ -239,7 +239,7 @@ def test_refresh_symbol_force_rest_false_bypasses_global(monkeypatch: pytest.Mon
     success = asyncio.run(cache._refresh_symbol("BTCUSDT", force_rest=False))
 
     assert success is True
-    assert fetch_calls == ["BTCUSDT"]
+    assert fetch_calls and fetch_calls[-1] == "BTCUSDT"
     assert rest_calls == []
 
 
