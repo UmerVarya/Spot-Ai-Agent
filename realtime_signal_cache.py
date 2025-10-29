@@ -2064,7 +2064,7 @@ class RealTimeSignalCache:
                     combined_rows = len(combined)
                 except Exception:
                     combined_rows = 0
-                if combined_rows < max(existing_rows, REST_REQUIRED_MIN_BARS):
+                if combined_rows < existing_rows:
                     combined = existing_df
 
                 df = combined
