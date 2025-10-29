@@ -219,8 +219,14 @@ FRESHNESS_SECONDS   = int(os.getenv("FRESHNESS_SECONDS", "120"))        # what i
 USE_WS_PRICES       = os.getenv("USE_WS_PRICES", "1").lower() in ("1","true","yes")
 ENABLE_PRIME        = os.getenv("ENABLE_RTSCC_PRIME", "1").lower() in ("1","true","yes")
 ENABLE_REFRESH      = os.getenv("ENABLE_RTSCC_REFRESH", "1").lower() in ("1","true","yes")
-REST_REQUIRED_MIN_BARS = int(os.getenv("RTSC_REQUIRED_MIN_BARS", "220"))
-REST_WARMUP_BARS = int(os.getenv("RTSC_REST_WARMUP_BARS", "300"))
+_RAW_REQUIRED_MIN_BARS = int(os.getenv("RTSC_REQUIRED_MIN_BARS", "220"))
+REST_REQUIRED_MIN_BARS = max(_RAW_REQUIRED_MIN_BARS, RTSC_EVALUATOR_MIN_BARS)
+_RAW_WARMUP_BARS = int(os.getenv("RTSC_REST_WARMUP_BARS", "300"))
+# Always fetch at least one more bar than required so the most recent candle can
+# be discarded when it is still forming without falling below the evaluator
+# threshold. This guards against overly aggressive overrides (e.g. setting the
+# env var to "3") that previously left the cache with too-few rows.
+REST_WARMUP_BARS = max(_RAW_WARMUP_BARS, REST_REQUIRED_MIN_BARS + 1)
 
 # ===== Optional python-binance fallback =====
 def _binance_client_from_env():
