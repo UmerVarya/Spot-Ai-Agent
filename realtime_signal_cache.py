@@ -311,6 +311,49 @@ def _fresh_fraction(obj) -> float:
     return fresh / max(1, len(syms))
 
 
+def _sufficient_fraction(obj, *, min_bars: int = REST_REQUIRED_MIN_BARS) -> float:
+    """Return the fraction of symbols whose cached data meets ``min_bars``."""
+
+    syms = _iter_symbols(obj)
+    if not syms:
+        return 1.0
+
+    lock = getattr(obj, "_lock", None)
+    cache_snapshot: Dict[str, CachedSignal]
+    if lock is not None:
+        try:
+            with lock:  # type: ignore[attr-defined]
+                cache_snapshot = dict(getattr(obj, "_cache", {}))
+        except Exception:
+            cache_snapshot = dict(getattr(obj, "_cache", {}))
+    else:
+        cache_snapshot = dict(getattr(obj, "_cache", {}))
+
+    key_fn = getattr(obj, "_key", None)
+
+    sufficient = 0
+    for sym in syms:
+        key = sym
+        if callable(key_fn):
+            try:
+                key = key_fn(sym)
+            except Exception:
+                key = str(sym).upper()
+        cached = cache_snapshot.get(key)
+        rows = 0
+        if cached is not None:
+            price_df = getattr(cached, "price_data", None)
+            if price_df is not None:
+                try:
+                    rows = len(price_df)
+                except Exception:
+                    rows = 0
+        if rows >= min_bars:
+            sufficient += 1
+
+    return sufficient / max(1, len(syms))
+
+
 def _run_async_allow_nested(coro):
     """
     Run a coroutine even if there is already a running loop.
@@ -977,13 +1020,15 @@ class RealTimeSignalCache:
                 time.sleep(0.01)
 
             fraction = _fresh_fraction(self)
-            if fraction >= READY_MIN_FRACTION:
+            sufficient_fraction = _sufficient_fraction(self)
+            if fraction >= READY_MIN_FRACTION and sufficient_fraction >= READY_MIN_FRACTION:
                 self.mark_ready()
                 _log(
                     self,
                     "info",
-                    "refresh(): threshold met (%.0f%% fresh).",
+                    "refresh(): threshold met (fresh=%.0f%%, bars=%.0f%%).",
                     fraction * 100,
+                    sufficient_fraction * 100,
                 )
                 break
 
@@ -995,18 +1040,26 @@ class RealTimeSignalCache:
         start = time.time()
         while not self.is_ready():
             frac = _fresh_fraction(self)
+            bars_frac = _sufficient_fraction(self)
             elapsed = time.time() - start
-            if frac >= READY_MIN_FRACTION:
-                _log(self, "info", "watchdog: threshold met (%.0f%% fresh).", frac * 100)
+            if frac >= READY_MIN_FRACTION and bars_frac >= READY_MIN_FRACTION:
+                _log(
+                    self,
+                    "info",
+                    "watchdog: threshold met (fresh=%.0f%%, bars=%.0f%%).",
+                    frac * 100,
+                    bars_frac * 100,
+                )
                 self.mark_ready()
                 break
             if elapsed >= WARMUP_MAX_SECONDS:
                 _log(
                     self,
                     "warning",
-                    "watchdog: ceiling reached (%ds). Proceeding with %.0f%% fresh.",
+                    "watchdog: ceiling reached (%ds). Proceeding with fresh=%.0f%%, bars=%.0f%%.",
                     WARMUP_MAX_SECONDS,
                     frac * 100,
+                    bars_frac * 100,
                 )
                 self.mark_ready()
                 break
@@ -1844,6 +1897,19 @@ class RealTimeSignalCache:
 
         key, _prev_age, attempt_ts = prepared
 
+        existing_rows = 0
+        existing_df: Optional[pd.DataFrame] = None
+        with self._lock:
+            cached_existing = self._cache.get(key)
+            if cached_existing is not None:
+                price_df = getattr(cached_existing, "price_data", None)
+                if price_df is not None and not getattr(price_df, "empty", False):
+                    existing_df = price_df.copy()
+                    try:
+                        existing_rows = len(existing_df)
+                    except Exception:
+                        existing_rows = 0
+
         df: Optional[pd.DataFrame] = None
         fetch_exc: Optional[Exception] = None
 
@@ -1861,11 +1927,14 @@ class RealTimeSignalCache:
                 logger.debug("RTSC: rest_fetch_latest_closed failed for %s", key, exc_info=True)
 
         if df is None:
+            fetch_limit = RTSC_REST_LIMIT
+            if existing_rows < REST_REQUIRED_MIN_BARS:
+                fetch_limit = max(REST_WARMUP_BARS, RTSC_REST_LIMIT)
             try:
                 df = await self._fetch_klines_rest_df(
                     key,
                     interval=RTSC_REST_INTERVAL,
-                    limit=RTSC_REST_LIMIT,
+                    limit=fetch_limit,
                     timeout=RTSC_REST_TIMEOUT,
                 )
                 if df is not None and not df.empty:
@@ -1890,6 +1959,33 @@ class RealTimeSignalCache:
             # LOGGER.warning(f"[RTSC] REST fetch produced no data for {key}")
             self._record_refresh_error(
                 key, "REST fetch produced no data", attempt_ts=attempt_ts
+            )
+            return False
+
+        if existing_df is not None and not existing_df.empty:
+            try:
+                combined = pd.concat([existing_df, df]).sort_index()
+                combined = combined.loc[~combined.index.duplicated(keep="last")]
+                if len(combined) > REST_WARMUP_BARS:
+                    combined = combined.iloc[-REST_WARMUP_BARS:]
+                df = combined
+            except Exception:
+                logger.debug("RTSC: failed to merge REST snapshot for %s", key, exc_info=True)
+
+        rows = 0
+        try:
+            rows = len(df)
+        except Exception:
+            rows = 0
+
+        if rows < REST_REQUIRED_MIN_BARS:
+            primed = await asyncio.to_thread(self._prime_symbol, symbol)
+            if primed:
+                return True
+            self._record_refresh_error(
+                key,
+                f"REST refresh returned insufficient candles ({rows}/{REST_REQUIRED_MIN_BARS})",
+                attempt_ts=attempt_ts,
             )
             return False
 
