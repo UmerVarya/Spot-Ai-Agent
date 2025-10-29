@@ -74,7 +74,7 @@ except Exception:
 import pandas as pd
 import requests  # used for mirror fallback (no proxies)
 
-import rest_prices
+from rest_prices import rest_backfill_klines, rest_fetch_latest_closed
 
 # python-binance (a.k.a binance-connector legacy) exceptions can vary by version.
 # Import defensively so minor packaging changes do not break the cache module.
@@ -186,8 +186,8 @@ FRESHNESS_SECONDS   = int(os.getenv("FRESHNESS_SECONDS", "120"))        # what i
 USE_WS_PRICES       = os.getenv("USE_WS_PRICES", "1").lower() in ("1","true","yes")
 ENABLE_PRIME        = os.getenv("ENABLE_RTSCC_PRIME", "1").lower() in ("1","true","yes")
 ENABLE_REFRESH      = os.getenv("ENABLE_RTSCC_REFRESH", "1").lower() in ("1","true","yes")
-REST_REQUIRED_MIN_BARS = rest_prices.REQUIRED_MIN_BARS
-REST_WARMUP_BARS = rest_prices.WARMUP_BARS
+REST_REQUIRED_MIN_BARS = int(os.getenv("RTSC_REQUIRED_MIN_BARS", "220"))
+REST_WARMUP_BARS = int(os.getenv("RTSC_REST_WARMUP_BARS", "300"))
 
 # ===== Optional python-binance fallback =====
 def _binance_client_from_env():
@@ -738,63 +738,100 @@ class RealTimeSignalCache:
                         "RTSC: failed to unregister WS callback", exc_info=True
                     )
 
-    # ---------- Public API you’re adding ----------
+    def bars_len(self, symbol: str) -> int:
+        key = self._key(symbol)
+        with self._lock:
+            cached = self._cache.get(key)
+        if cached is None or cached.price_data is None:
+            return 0
+        try:
+            return int(len(cached.price_data))
+        except Exception:
+            return 0
 
-    def _prime_symbol(self, symbol: str) -> bool:
-        """Backfill ``symbol`` via REST and seed the cache."""
+    def force_rest_backfill(self, symbol: str) -> bool:
+        """Hard backfill ``symbol`` via REST and commit to cache."""
 
         key = self._key(symbol)
-        attempt_ts = time.time()
-        df: Optional[pd.DataFrame] = None
-        rest_client = getattr(self, "rest", None)
+        client = _get_rest(self)
+        if client is None:
+            _log(self, "warning", "force_rest_backfill(): no REST client for %s", symbol)
+            return False
 
-        if rest_client is not None:
-            try:
-                raw_df = rest_prices.rest_backfill_klines(
-                    rest_client,
-                    key,
-                    interval=RTSC_REST_INTERVAL,
-                    bars=REST_WARMUP_BARS,
-                )
-                df = self._standardize_price_df(raw_df)
-            except Exception:
-                logger.debug("RTSC: rest_backfill_klines failed for %s", key, exc_info=True)
+        try:
+            raw = rest_backfill_klines(client, key, RTSC_REST_INTERVAL, REST_WARMUP_BARS)
+        except Exception as exc:
+            _log(self, "warning", "force_rest_backfill(): REST error for %s: %s", key, exc)
+            return False
 
-        if df is None:
-            try:
-                df = _run_async_allow_nested(
-                    self._fetch_klines_any(
-                        key,
-                        interval=RTSC_REST_INTERVAL,
-                        limit=max(REST_WARMUP_BARS, RTSC_REST_LIMIT),
-                        timeout=RTSC_REST_TIMEOUT,
-                    )
-                )
-            except Exception:
-                df = None
-
-        df = self._standardize_price_df(df)
+        df = self._standardize_price_df(raw)
         rows = 0 if df is None else len(df)
         if df is None or rows < REST_REQUIRED_MIN_BARS:
             _log(
                 self,
                 "warning",
-                "prime(): insufficient candles for %s (got %s).",
+                "force_rest_backfill(): insufficient candles for %s (%d/%d)",
                 key,
                 rows,
+                REST_REQUIRED_MIN_BARS,
             )
             return False
 
-        success = self._update_cache(
-            key,
-            df,
-            attempt_ts=attempt_ts,
-            prev_age=None,
-        )
+        attempt_ts = time.time()
+        success = self._update_cache(key, df, attempt_ts=attempt_ts, prev_age=None)
         if success:
-            with self._lock:
-                self._primed_symbols.add(key)
+            _log(self, "info", "force_rest_backfill(): %s committed with %d bars", key, rows)
         return success
+
+    def _prime_symbol(self, symbol: str) -> bool:
+        if self.bars_len(symbol) >= REST_REQUIRED_MIN_BARS:
+            return True
+        return self.force_rest_backfill(symbol)
+
+    def _tick_symbol(self, symbol: str) -> bool:
+        if self.bars_len(symbol) < REST_REQUIRED_MIN_BARS:
+            return self._prime_symbol(symbol)
+
+        client = _get_rest(self)
+        if client is None:
+            return False
+
+        try:
+            latest = rest_fetch_latest_closed(client, self._key(symbol), RTSC_REST_INTERVAL)
+        except Exception as exc:
+            _log(self, "warning", "tick(): REST error for %s: %s", symbol, exc)
+            return False
+
+        latest_df = self._standardize_price_df(latest)
+        if latest_df is None or latest_df.empty:
+            return False
+
+        key = self._key(symbol)
+        with self._lock:
+            cached = self._cache.get(key)
+
+        if cached is None or cached.price_data is None or cached.price_data.empty:
+            return self._prime_symbol(symbol)
+
+        base_df = cached.price_data
+        try:
+            last_idx = base_df.index[-1]
+        except Exception:
+            return self._prime_symbol(symbol)
+
+        add = latest_df[latest_df.index > last_idx]
+        if add.empty:
+            return True
+
+        combined = pd.concat([base_df, add]).sort_index()
+        combined = combined.loc[~combined.index.duplicated(keep="last")]
+        attempt_ts = time.time()
+        prev_age = None
+        try:
+            prev_age = attempt_ts - float(cached.updated_at)
+        except Exception:
+            prev_age = None
+        return self._update_cache(key, combined, attempt_ts=attempt_ts, prev_age=prev_age)
 
     def prime(self):
         """Prime the cache by backfilling symbols via REST."""
@@ -1679,6 +1716,10 @@ class RealTimeSignalCache:
     async def _refresh_symbol_via_rest(self, symbol: str) -> bool:
         """Fetch small recent klines via REST mirrors and update the cache."""
 
+        tick_result = await asyncio.to_thread(self._tick_symbol, symbol)
+        if tick_result:
+            return True
+
         key = self._key(symbol)
         # LOGGER.warning(f"[RTSC] ENTER _refresh_symbol_via_rest({key})")
 
@@ -1696,7 +1737,7 @@ class RealTimeSignalCache:
         if rest_client is not None:
             try:
                 raw_df = await asyncio.to_thread(
-                    rest_prices.rest_fetch_latest_closed,
+                    rest_fetch_latest_closed,
                     rest_client,
                     key,
                     RTSC_REST_INTERVAL,
