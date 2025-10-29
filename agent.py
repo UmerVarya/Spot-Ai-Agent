@@ -383,24 +383,36 @@ def run_agent_loop() -> None:
     warmup_symbols = sorted({sym.upper() for sym in [*symbols, *boot_syms]})
     REQUIRED_MIN_BARS = int(os.getenv("RTSC_REQUIRED_MIN_BARS", "220"))
     WARMUP_TIMEOUT_SEC = int(os.getenv("RTSC_WARMUP_TIMEOUT_SEC", "120"))
-    for s in warmup_symbols:
-        try:
-            signal_cache.force_rest_backfill(s)
-        except Exception as exc:
-            logger.error("Warmup backfill failed for %s: %s", s, exc)
     deadline = time.time() + WARMUP_TIMEOUT_SEC
+    pending_backfill: set[str] = set(warmup_symbols)
     while True:
-        missing = [s for s in warmup_symbols if signal_cache.bars_len(s) < REQUIRED_MIN_BARS]
+        if pending_backfill:
+            for symbol in list(pending_backfill):
+                try:
+                    success = signal_cache.force_rest_backfill(symbol)
+                except Exception as exc:
+                    logger.error("Warmup backfill failed for %s: %s", symbol, exc)
+                    success = False
+                if success:
+                    pending_backfill.discard(symbol)
+                else:
+                    # retry again on the next loop after a short pause
+                    time.sleep(0.05)
+        missing = {
+            s for s in warmup_symbols if signal_cache.bars_len(s) < REQUIRED_MIN_BARS
+        }
         if not missing:
             logger.info("RTSC warm-up complete for %d symbols", len(warmup_symbols))
             break
+        pending_backfill |= missing
         if time.time() > deadline:
-            logger.warning(
-                "RTSC warm-up timed out; missing=%s",
-                ",".join(missing[:10]),
-            )
+            preview = ",".join(sorted(missing)[:10])
+            logger.error("RTSC warm-up timed out; missing=%s", preview or "<all>")
+            signal_cache.mark_ready(False)
+            for symbol in sorted(missing):
+                dispatch_schedule_refresh(signal_cache, symbol)
             break
-        time.sleep(1.0)
+        time.sleep(0.5)
     for sym in boot_syms:
         dispatch_schedule_refresh(signal_cache, sym)
 
