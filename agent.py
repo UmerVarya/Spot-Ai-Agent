@@ -170,7 +170,7 @@ def _auto_tune_signal_cache_params(
 
     tuned_scan = float(scan_interval)
     if tuned_scan < estimated_cycle * 0.75:
-        tuned_scan = min(15.0, max(tuned_scan, estimated_cycle * 0.9))
+        tuned_scan = max(tuned_scan, estimated_cycle * 0.9)
     tuned_scan = max(tuned_scan, safe_refresh)
 
     return tuned_stale / safe_refresh, tuned_conc, tuned_scan, estimated_cycle
