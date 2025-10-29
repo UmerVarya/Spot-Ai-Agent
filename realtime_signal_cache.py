@@ -1968,6 +1968,20 @@ class RealTimeSignalCache:
                 combined = combined.loc[~combined.index.duplicated(keep="last")]
                 if len(combined) > REST_WARMUP_BARS:
                     combined = combined.iloc[-REST_WARMUP_BARS:]
+
+                # Guard against scenarios where the REST payload would shrink the
+                # cached history (e.g. when only 1-2 candles are returned).  If the
+                # existing cache already satisfied our minimum history requirement,
+                # prefer that over a truncated snapshot so the evaluator always has
+                # adequate context.
+                combined_rows = 0
+                try:
+                    combined_rows = len(combined)
+                except Exception:
+                    combined_rows = 0
+                if combined_rows < max(existing_rows, REST_REQUIRED_MIN_BARS):
+                    combined = existing_df
+
                 df = combined
             except Exception:
                 logger.debug("RTSC: failed to merge REST snapshot for %s", key, exc_info=True)
