@@ -719,6 +719,7 @@ def run_agent_loop() -> None:
     worker_pools.submit_io(refresh_macro_state)
     worker_pools.submit_io(refresh_news_state)
     last_scan_time = 0.0
+    btc_bars_len_last: Optional[int] = None
     while True:
         triggered = scan_trigger.wait(timeout=guard_interval)
         if not triggered:
@@ -740,6 +741,24 @@ def run_agent_loop() -> None:
             scan_trigger.clear()
             last_scan_time = now
             logger.info("=== Scan @ %s ===", time.strftime('%Y-%m-%d %H:%M:%S'))
+            try:
+                btc_bars_len = signal_cache.bars_len("BTCUSDT")
+            except Exception as cache_exc:
+                logger.warning(
+                    "Failed to read BTCUSDT cached bars length: %s",
+                    cache_exc,
+                )
+            else:
+                if btc_bars_len_last is None:
+                    logger.info("BTCUSDT cached bars: %d", btc_bars_len)
+                else:
+                    delta = btc_bars_len - btc_bars_len_last
+                    logger.info(
+                        "BTCUSDT cached bars: %d (Δ %+d)",
+                        btc_bars_len,
+                        delta,
+                    )
+                btc_bars_len_last = btc_bars_len
             # Check drawdown guard
             if is_trading_blocked():
                 logger.warning("Drawdown limit reached. Skipping trading for today.")
