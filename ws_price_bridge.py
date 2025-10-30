@@ -26,12 +26,17 @@ PING_I = int(os.getenv("WS_PING_INTERVAL", 15))
 PING_TO = int(os.getenv("WS_PING_TIMEOUT", 30))
 RQ_MIN = int(os.getenv("WS_RECONNECT_MIN_SECONDS", 2))
 RQ_MAX = int(os.getenv("WS_RECONNECT_MAX_SECONDS", 60))
-_max_queue_env = os.getenv("WS_MAX_QUEUE", "0")
-try:
-    _max_queue_value = int(_max_queue_env)
-except ValueError:
-    _max_queue_value = 0
-MAX_Q = None if _max_queue_value <= 0 else _max_queue_value
+_max_queue_env = os.getenv("WS_MAX_QUEUE")
+DEFAULT_MAX_QUEUE = 1000
+if _max_queue_env is None or not _max_queue_env.strip():
+    MAX_Q = DEFAULT_MAX_QUEUE
+else:
+    try:
+        _max_queue_value = int(_max_queue_env)
+    except ValueError:
+        MAX_Q = DEFAULT_MAX_QUEUE
+    else:
+        MAX_Q = None if _max_queue_value <= 0 else _max_queue_value
 try:
     _batch_env = int(os.getenv("WS_SUBSCRIBE_BATCH", 20))
 except ValueError:
