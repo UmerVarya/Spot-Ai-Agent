@@ -2101,12 +2101,12 @@ def main() -> None:
     import os  # local import to mirror legacy bootstrap expectations
     from ws_price_bridge import WSPriceBridge
 
-    # --- ENSURE GLOBAL CACHE EXISTS ---
-    from realtime_signal_cache import RealTimeSignalCache, set_active_cache, get_active_cache
+    # --- RTSC bootstrap (in-process singleton) ---
+    from realtime_signal_cache import RealTimeSignalCache, get_active_cache, set_active_cache
 
     sc = get_active_cache()
     if not sc:
-        logger.info("RTSC bootstrap: no existing cache, creating one.")
+        logger.info("RTSC bootstrap: creating RealTimeSignalCache()")
         (
             refresh_interval,
             stale_mult,
@@ -2124,30 +2124,83 @@ def main() -> None:
         )
         set_active_cache(sc)
     else:
-        logger.info("RTSC bootstrap: cache already exists.")
+        logger.info("RTSC bootstrap: reusing existing cache")
 
-    signal_cache = sc  # for local reference
-    # --- END CACHE BOOTSTRAP ---
+    if not hasattr(sc, "on_kline") and hasattr(sc, "handle_ws_update"):
+        def _cache_on_kline(symbol: str, interval: str, payload: Dict[str, Any]) -> None:
+            try:
+                sc.handle_ws_update(symbol, "kline", payload)
+            except Exception:
+                logger.debug("RTSC on_kline adapter failed for %s", symbol, exc_info=True)
+
+        setattr(sc, "on_kline", _cache_on_kline)
+
+    signal_cache = sc
 
     ws_bridge: Optional[WSPriceBridge] = None
     try:
-        if os.getenv("USE_WS_PRICES", "false").lower() in ("1", "true", "yes"):
-            logger.warning("WS bootstrap: forcing combined-stream enable on startup.")
-            ws_symbols = ["BTCUSDT", "ETHUSDT"]
-            _ws_bridge = WSPriceBridge(symbols=ws_symbols, logger=logger)
-            ws_bridge = _ws_bridge
-            if hasattr(ws_bridge, "enable_streams"):
-                ws_bridge.enable_streams()
-            else:
-                ws_bridge.start()
+        if runtime_settings.use_ws_prices:
+            ws_symbols: list[str] = []
             try:
-                signal_cache.enable_streams(ws_bridge)
-                logger.info("RTSC: enable_streams(ws_bridge) wired successfully.")
-            except Exception as e:
-                logger.exception(f"RTSC wiring failed: {e}")
-    except Exception as e:
-        logger.exception(f"WS bootstrap failed early: {e}")
+                if hasattr(signal_cache, "symbols"):
+                    candidates = signal_cache.symbols()
+                    ws_symbols = sorted(
+                        {str(sym).upper() for sym in candidates if isinstance(sym, str)}
+                    )
+            except Exception:
+                ws_symbols = []
+            if not ws_symbols:
+                ws_symbols = ["BTCUSDT", "ETHUSDT"]
 
+            if _ws_bridge is not None:
+                ws_bridge = _ws_bridge
+                if hasattr(ws_bridge, "update_symbols"):
+                    try:
+                        ws_bridge.update_symbols(ws_symbols)
+                    except Exception:
+                        logger.debug("WS bootstrap: failed to update symbols", exc_info=True)
+            else:
+                try:
+                    ws_bridge = WSPriceBridge(
+                        symbols=ws_symbols,
+                        on_kline=getattr(sc, "on_kline", None),
+                        on_ticker=getattr(sc, "on_ticker", None),
+                        on_book_ticker=getattr(sc, "on_book_ticker", None),
+                    )
+                except TypeError:
+                    ws_bridge = WSPriceBridge(symbols=ws_symbols)
+                _ws_bridge = ws_bridge
+
+            if ws_bridge is not None:
+                if getattr(ws_bridge, "on_kline", None) is None and hasattr(sc, "on_kline"):
+                    try:
+                        ws_bridge.on_kline = sc.on_kline  # type: ignore[attr-defined]
+                    except Exception:
+                        logger.debug("WS bootstrap: unable to set on_kline", exc_info=True)
+                if getattr(ws_bridge, "on_ticker", None) is None and hasattr(sc, "on_ticker"):
+                    try:
+                        ws_bridge.on_ticker = getattr(sc, "on_ticker")  # type: ignore[attr-defined]
+                    except Exception:
+                        logger.debug("WS bootstrap: unable to set on_ticker", exc_info=True)
+                if getattr(ws_bridge, "on_book_ticker", None) is None and hasattr(sc, "on_book_ticker"):
+                    try:
+                        ws_bridge.on_book_ticker = getattr(sc, "on_book_ticker")  # type: ignore[attr-defined]
+                    except Exception:
+                        logger.debug("WS bootstrap: unable to set on_book_ticker", exc_info=True)
+
+                if hasattr(ws_bridge, "start"):
+                    ws_bridge.start()
+                elif hasattr(ws_bridge, "enable_streams"):
+                    ws_bridge.enable_streams()
+
+                try:
+                    signal_cache.enable_streams(ws_bridge)
+                    logger.info("RTSC: enable_streams(ws_bridge) wired successfully.")
+                except Exception as e:
+                    logger.exception("RTSC wiring failed: %s", e)
+    except Exception as e:
+        logger.exception("WS bootstrap failed: %s", e)
+    
     logger.info("Starting Spot AI Super Agent loop...")
     run_agent_loop()
 
