@@ -23,7 +23,7 @@ import requests
 from observability import log_event, record_metric
 
 BINANCE_WS = "wss://stream.binance.com:9443/stream"
-MAX_STREAMS_PER_COMBINED = int(os.getenv("BINANCE_MAX_STREAMS", "200"))
+MAX_STREAMS_PER_COMBINED = max(1, int(os.getenv("BINANCE_MAX_STREAMS", "200")))
 COMBINED_BASE = os.getenv(
     "WS_COMBINED_BASE",
     "wss://stream.binance.com:9443/stream?streams=",
