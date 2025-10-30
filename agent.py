@@ -29,10 +29,78 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional, Set
 
+from ws_price_bridge import WSPriceBridge
+
 # Centralized configuration loader
 import config
 
 runtime_settings = config.load_runtime_settings()
+use_ws_prices = runtime_settings.use_ws_prices
+
+# --- WS bootstrap (force start when USE_WS_PRICES=true) ---
+_ws_bridge: Optional[WSPriceBridge] = None
+try:
+    if use_ws_prices:
+        ws_symbols: list[str] = []
+        for cand in (
+            locals().get("top_symbols"),
+            locals().get("tracked_symbols"),
+            locals().get("scan_symbols"),
+            locals().get("symbols"),
+        ):
+            if cand:
+                ws_symbols = sorted({str(sym).upper() for sym in cand if sym})
+                break
+
+        if not ws_symbols:
+            ws_symbols = ["BTCUSDT", "ETHUSDT"]
+
+        if "_ws_bridge" not in globals() or _ws_bridge is None:
+            _ws_bridge = WSPriceBridge(symbols=ws_symbols)
+            try:
+                from realtime_signal_cache import get_active_cache
+
+                sc = get_active_cache()
+
+                def _on_kline(msg: dict[str, Any]) -> None:
+                    try:
+                        symbol = str(msg.get("s") or msg.get("symbol") or "").upper()
+                        if sc and hasattr(sc, "schedule_refresh"):
+                            sc.schedule_refresh(symbol)
+                    except Exception:
+                        pass
+
+                if hasattr(_ws_bridge, "register_kline_handler"):
+                    _ws_bridge.register_kline_handler(_on_kline)
+                elif hasattr(_ws_bridge, "register_callback"):
+
+                    def _bridge_callback(symbol: str, event_type: str, payload: dict[str, Any]) -> None:
+                        if event_type != "kline":
+                            return
+                        enriched = dict(payload)
+                        if "s" not in enriched:
+                            enriched["s"] = symbol
+                        _on_kline(enriched)
+
+                    _ws_bridge.register_callback(_bridge_callback)
+            except Exception:
+                pass
+
+            starter = getattr(_ws_bridge, "enable_streams", None)
+            if callable(starter):
+                starter()
+            else:
+                start_method = getattr(_ws_bridge, "start", None)
+                if callable(start_method):
+                    start_method()
+            logger.warning(
+                "WS bootstrap: enabled combined stream for %d symbols.", len(ws_symbols)
+            )
+        else:
+            logger.info("WS bootstrap: bridge already exists; skipping.")
+except Exception as e:
+    logger.exception("WS bootstrap failed: %s", e)
+# --- end WS bootstrap ---
 import json
 import threading
 from fetch_news import (
@@ -98,7 +166,6 @@ from microstructure import plan_execution
 from volatility_regime import atr_percentile
 from cache_evaluator_adapter import evaluator_for_cache
 from realtime_signal_cache import RealTimeSignalCache
-from ws_price_bridge import WSPriceBridge
 from ws_user_bridge import UserDataStreamBridge
 from auction_state import get_auction_state
 from alternative_data import get_alternative_data
@@ -502,6 +569,7 @@ def run_agent_loop() -> None:
             last_closed_bars[symbol] = close_time
         return True
 
+    global _ws_bridge
     ws_bridge: Optional[WSPriceBridge]
 
     if ENABLE_WS_BRIDGE:
@@ -543,6 +611,13 @@ def run_agent_loop() -> None:
                 logger.debug("WS book ticker handler error for %s", symbol, exc_info=True)
 
         try:
+            existing_bridge = _ws_bridge if isinstance(_ws_bridge, WSPriceBridge) else None
+            if existing_bridge is not None:
+                try:
+                    existing_bridge.stop()
+                except Exception:
+                    logger.debug("WS bootstrap bridge stop failed", exc_info=True)
+                _ws_bridge = None
             book_callback = _handle_book_ticker if runtime_settings.use_ws_book_ticker else None
             ws_bridge = WSPriceBridge(
                 symbols=[],
@@ -554,6 +629,7 @@ def run_agent_loop() -> None:
                 heartbeat_timeout=runtime_settings.max_ws_gap_before_rest,
                 server_time_sync_interval=runtime_settings.server_time_sync_interval,
             )
+            _ws_bridge = ws_bridge
             ws_bridge.start()
             signal_cache.enable_streams(ws_bridge)
         except Exception:
