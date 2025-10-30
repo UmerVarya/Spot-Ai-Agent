@@ -289,9 +289,16 @@ class WSPriceBridge:
 
         # Build combined stream URLs in batches (large lists split across a few sockets)
         urls = []
+        interval = (self._kline_interval or "1m").strip().lower() or "1m"
         for chunk in _chunks(syms, BATCH):
-            streams = "/".join(f"{s}@kline_1m" for s in chunk)
-            urls.append(BASE + streams)
+            stream_parts: List[str] = []
+            for s in chunk:
+                stream_parts.append(f"{s}@kline_{interval}")
+                if self._on_ticker is not None:
+                    stream_parts.append(f"{s}@miniTicker")
+                if self._on_book_ticker is not None:
+                    stream_parts.append(f"{s}@bookTicker")
+            urls.append(BASE + "/".join(stream_parts))
 
         async def _reader(url):
             backoff = min_backoff
