@@ -8,26 +8,66 @@ normalises symbols to upper case for downstream consumers.
 """
 from __future__ import annotations
 
-import os, asyncio, time, websockets
+import asyncio
 import json
 import logging
+import os
 import threading
-from typing import Any, Callable, Dict, Iterable, List, Optional, Mapping, Sequence
+import time
+from typing import Any, Callable, Dict, Iterable, List, Optional, Mapping
+
+import websockets
 
 import requests
 
 from observability import log_event, record_metric
 
 BINANCE_WS = "wss://stream.binance.com:9443/stream"
+MAX_STREAMS_PER_COMBINED = int(os.getenv("BINANCE_MAX_STREAMS", "200"))
 COMBINED_BASE = os.getenv(
-    "WS_COMBINED_BASE", "wss://stream.binance.com:9443/stream?streams="
+    "WS_COMBINED_BASE",
+    "wss://stream.binance.com:9443/stream?streams=",
 )
 
 logger = logging.getLogger(__name__)
 
-def _chunks(seq, n):
-    for i in range(0, len(seq), n):
-        yield seq[i:i+n]
+def _chunks(seq: Iterable[str], n: int) -> List[List[str]]:
+    buf, out = [], []
+    for s in seq:
+        buf.append(s)
+        if len(buf) >= n:
+            out.append(buf)
+            buf = []
+    if buf:
+        out.append(buf)
+    return out
+
+
+def _stream_names(
+    symbols: Iterable[str],
+    want_kline_1m: bool = True,
+    want_ticker: bool = False,
+    want_book: bool = False,
+) -> List[str]:
+    names = []
+    for sym in symbols:
+        s = sym.lower()
+        if want_kline_1m:
+            names.append(f"{s}@kline_1m")
+        if want_ticker:
+            names.append(f"{s}@ticker")
+        if want_book:
+            names.append(f"{s}@bookTicker")
+    return names
+
+
+def _combined_urls(symbols: Iterable[str], **flags) -> List[str]:
+    names = _stream_names(symbols, **flags)
+    # hard-limit to max 200 streams per combined URL
+    return [
+        COMBINED_BASE + "/".join(chunk)
+        for chunk in _chunks(names, MAX_STREAMS_PER_COMBINED)
+    ]
 
 KlineCallback = Callable[[str, str, Dict[str, Any]], None]
 TickerCallback = Callable[[str, Dict[str, Any]], None]
@@ -74,7 +114,8 @@ class WSPriceBridge:
         self._extra_callbacks: List[
             Callable[[str, str, Dict[str, Any]], None]
         ] = []
-        self._ws_task: Optional[asyncio.Task] = None
+        self._tasks: List[asyncio.Task] = []
+        self._urls: List[str] = []
         self.logger = logger
 
     # ------------------------------------------------------------------
@@ -104,7 +145,7 @@ class WSPriceBridge:
 
         self._stop.set()
         self._resubscribe.set()
-        self._cancel_ws_task()
+        self._cancel_ws_tasks()
         loop = self._loop
         if loop and loop.is_running():
             loop.call_soon_threadsafe(loop.stop)
@@ -129,7 +170,7 @@ class WSPriceBridge:
         if os.getenv("WS_DEBUG", "0") == "1":
             logger.info("WS bridge subscribing to %d symbols", len(normalised))
         self._resubscribe.set()
-        self._cancel_ws_task()
+        self._cancel_ws_tasks()
         self.start()
         loop = self._loop
         if loop and loop.is_running():
@@ -169,20 +210,25 @@ class WSPriceBridge:
             except Exception:
                 logger.debug("WS bridge external callback failed", exc_info=True)
 
-    def _cancel_ws_task(self) -> None:
-        task = self._ws_task
-        if task is None or task.done():
+    def _cancel_ws_tasks(self) -> None:
+        if not self._tasks:
             return
+        tasks = list(self._tasks)
         loop = self._loop
         if loop and loop.is_running():
+
             def _cancel() -> None:
-                current = self._ws_task
-                if current is not None and not current.done():
-                    current.cancel()
+                tasks = list(self._tasks)
+                for task in tasks:
+                    if task is not None and not task.done():
+                        task.cancel()
+                self._tasks = []
 
             loop.call_soon_threadsafe(_cancel)
         else:
-            task.cancel()
+            for task in tasks:
+                task.cancel()
+            self._tasks = []
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -228,16 +274,39 @@ class WSPriceBridge:
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_watch())
                 self._heartbeat_task.add_done_callback(self._on_heartbeat_done)
 
-            try:
-                await self._run_connection(symbols)
-            except asyncio.CancelledError:
-                if self._stop.is_set():
-                    break
-            except Exception:
-                logger.warning("WS bridge connection encountered an error", exc_info=True)
+            flags = {
+                "want_kline_1m": self._on_kline is not None
+                and (self._kline_interval or "1m").strip().lower() == "1m",
+                "want_ticker": self._on_ticker is not None,
+                "want_book": self._on_book_ticker is not None,
+            }
+
+            urls = self._build_combined_urls(symbols, flags)
+            if not urls:
+                self.logger.info(
+                    "WSPriceBridge: no streams to subscribe; skipping connect."
+                )
                 await asyncio.sleep(1.0)
-            finally:
-                self._ws_task = None
+                continue
+
+            total_batches = len(urls)
+            self._initialise_batch_heartbeats(total_batches)
+            self._tasks = []
+            self._urls = urls
+
+            for index, url in enumerate(urls, start=1):
+                self.logger.info(
+                    "WSPriceBridge: connecting combined stream URL: %s", url
+                )
+                self._tasks.append(
+                    asyncio.create_task(self._run_connection(url, index, total_batches))
+                )
+
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+
+            self._tasks = []
+            self._urls = []
+            self._last_messages.clear()
 
             if self._stop.is_set():
                 break
@@ -252,68 +321,79 @@ class WSPriceBridge:
                 pass
             self._heartbeat_task = None
 
-    def _build_streams(self, symbols: Iterable[str]) -> List[str]:
+    def _build_combined_urls(
+        self, symbols: Iterable[str], flags: Mapping[str, bool]
+    ) -> List[str]:
         interval = (self._kline_interval or "1m").strip().lower() or "1m"
-        streams: List[str] = []
+        want_kline = self._on_kline is not None
+        want_ticker = bool(flags.get("want_ticker"))
+        want_book = bool(flags.get("want_book"))
+        if interval == "1m" and flags.get("want_kline_1m", False):
+            return _combined_urls(
+                symbols,
+                want_kline_1m=want_kline,
+                want_ticker=want_ticker,
+                want_book=want_book,
+            )
+
+        names: List[str] = []
         for symbol in symbols:
             token = str(symbol or "").strip().lower()
             if not token:
                 continue
-            streams.append(f"{token}@kline_{interval}")
-            if self._on_ticker is not None:
-                streams.append(f"{token}@miniTicker")
-            if self._on_book_ticker is not None:
-                streams.append(f"{token}@bookTicker")
-        return streams
+            if want_kline:
+                names.append(f"{token}@kline_{interval}")
+            if want_ticker:
+                names.append(f"{token}@miniTicker")
+            if want_book:
+                names.append(f"{token}@bookTicker")
+        if not names:
+            return []
+        return [
+            COMBINED_BASE + "/".join(chunk)
+            for chunk in _chunks(names, MAX_STREAMS_PER_COMBINED)
+        ]
 
-    async def _run_connection(self, symbols: Iterable[str]) -> None:
-        self._ws_task = asyncio.current_task()
-        try:
-            streams = self._build_streams(symbols)
-            if not streams:
-                self.logger.info("WSPriceBridge: no streams to subscribe; skipping connect.")
-                return
-
-            batches: List[List[str]] = list(_chunks(streams, 200))
-            total_batches = len(batches)
-            self._initialise_batch_heartbeats(total_batches)
-            if total_batches == 1:
-                await self._consume_stream_batch(batches[0], 1, 1)
-                return
-
-            await asyncio.gather(
-                *(
-                    self._consume_stream_batch(batch, index + 1, total_batches)
-                    for index, batch in enumerate(batches)
+    async def _run_connection(self, url: str, batch_index: int, total: int) -> None:
+        backoff = 1.0
+        while not self._stop.is_set() and not self._resubscribe.is_set():
+            try:
+                async with websockets.connect(
+                    url,
+                    ping_interval=None,  # do NOT send client pings (Binance closes on policy/pong timeouts)
+                    ping_timeout=None,
+                    max_queue=None,  # don’t drop messages under load
+                    close_timeout=1,  # quick close so sockets don’t pile up
+                    open_timeout=15,
+                ) as ws:
+                    self.logger.info(
+                        "WSPriceBridge: connected combined stream batch %d/%d",
+                        batch_index,
+                        total,
+                    )
+                    backoff = 1.0
+                    self._last_messages[batch_index] = time.time()
+                    async for raw in ws:
+                        self._on_message(raw, batch_index)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.warning(
+                    "WSPriceBridge: connection error on batch %d/%d; reconnecting",
+                    batch_index,
+                    total,
+                    exc_info=True,
                 )
-            )
-        finally:
-            self._ws_task = None
-            self._last_messages.clear()
-
-    async def _consume_stream_batch(
-        self, batch: Sequence[str], index: int, total: int
-    ) -> None:
-        url = COMBINED_BASE + "/".join(batch)
-        self.logger.info(
-            "WSPriceBridge: connecting combined stream batch %d/%d (%d streams)",
-            index,
-            total,
-            len(batch),
-        )
-        async with websockets.connect(
-            url,
-            ping_interval=None,   # do NOT send client pings (Binance closes on policy/pong timeouts)
-            ping_timeout=None,
-            max_queue=None,       # don’t drop messages under load
-            close_timeout=1,      # quick close so sockets don’t pile up
-            open_timeout=15,
-        ) as ws:
-            self.logger.info(
-                "WSPriceBridge: connected combined stream batch %d/%d", index, total
-            )
-            async for raw in ws:
-                self._on_message(raw, index)
+            else:
+                if self._stop.is_set() or self._resubscribe.is_set():
+                    break
+                self.logger.info(
+                    "WSPriceBridge: connection closed for batch %d/%d; reconnecting",
+                    batch_index,
+                    total,
+                )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
 
     def _initialise_batch_heartbeats(self, total_batches: int) -> None:
         if total_batches <= 0:
@@ -429,7 +509,7 @@ class WSPriceBridge:
                 )
                 self._notify_stale(worst_gap)
                 self._resubscribe.set()
-                self._cancel_ws_task()
+                self._cancel_ws_tasks()
                 return
         except asyncio.CancelledError:
             raise
@@ -508,4 +588,4 @@ class WSPriceBridge:
         return normalised
 
 
-__all__ = ["WSPriceBridge", "BINANCE_WS", "COMBINED_BASE"]
+__all__ = ["WSPriceBridge", "BINANCE_WS", "COMBINED_BASE", "MAX_STREAMS_PER_COMBINED"]
