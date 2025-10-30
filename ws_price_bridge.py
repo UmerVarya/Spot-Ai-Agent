@@ -382,7 +382,13 @@ class WSPriceBridge:
                 want_ticker=want_ticker,
                 want_book=want_book,
             )
-            return list(self._combined_urls(streams, MAX_STREAMS_PER_COMBINED))
+            self.logger.warning(
+                "WS BRIDGE MARK v3 | streams=%d | chunk=200", len(streams)
+            )
+            urls = list(self._combined_urls(streams, chunk=200))
+            for _ in urls:
+                self.logger.warning("WS BRIDGE MARK v3 | combined url built")
+            return urls
 
         names: List[str] = []
         for symbol in symbols:
@@ -397,11 +403,22 @@ class WSPriceBridge:
                 names.append(f"{token}@bookTicker")
         if not names:
             return []
-        return list(self._combined_urls(names, MAX_STREAMS_PER_COMBINED))
+        self.logger.warning(
+            "WS BRIDGE MARK v3 | streams=%d | chunk=200", len(names)
+        )
+        urls = list(self._combined_urls(names, chunk=200))
+        for _ in urls:
+            self.logger.warning("WS BRIDGE MARK v3 | combined url built")
+        return urls
 
     def _combined_urls(self, streams: List[str], chunk: int = 200) -> Iterable[str]:
         if not streams:
             return
+        try:
+            chunk = int(chunk)
+        except (TypeError, ValueError):
+            chunk = 200
+        chunk = max(1, min(200, chunk))
         base = (
             self._combined_base.rstrip("?") + "?streams="
             if "?" not in self._combined_base
