@@ -237,6 +237,8 @@ class WSPriceBridge:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
+        # Ensure the connection lock is bound to the lifetime of this loop.
+        self._conn_lock = asyncio.Lock()
         loop.create_task(self._ws_main())
         try:
             loop.run_forever()
@@ -250,6 +252,8 @@ class WSPriceBridge:
                 except Exception:  # pragma: no cover - defensive cleanup
                     pass
             loop.close()
+            # Avoid holding a lock tied to a closed loop across restarts.
+            self._conn_lock = None
 
     async def _ws_main(self) -> None:
         while not self._stop.is_set():
