@@ -9,6 +9,7 @@ normalises symbols to upper case for downstream consumers.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -103,6 +104,13 @@ class WSPriceBridge:
         server_time_sync_interval: float = 120.0,
         max_retries: int = 10,
     ) -> None:
+        self.logger = logger
+        self.logger.warning(
+            "WS BRIDGE MARK v3 | file=%s | websockets=%s | connect=%s",
+            __file__,
+            inspect.getfile(websockets),
+            websockets.connect.__module__ + ".connect",
+        )
         self._symbols: List[str] = self._normalise_symbols(symbols)
         self._kline_interval = str(kline_interval or "1m").strip()
         if not self._kline_interval:
@@ -132,7 +140,6 @@ class WSPriceBridge:
         self._combined_base = COMBINED_BASE
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._conn_lock: Optional[asyncio.Lock] = None
-        self.logger = logger
 
     # ------------------------------------------------------------------
     # Public API
@@ -414,14 +421,15 @@ class WSPriceBridge:
         backoff = 1.0
         while not self._stop.is_set() and not self._resubscribe.is_set():
             connect_kwargs = dict(
-                ping_interval=None,  # client never sends pings
-                ping_timeout=None,  # we won’t wait on client pings
-                close_timeout=1,  # fast close
-                max_queue=None,  # no backpressure limit
-                open_timeout=15,  # keep handshake timeout reasonable
+                ping_interval=None,
+                ping_timeout=None,
+                close_timeout=1,
+                max_queue=None,
             )
-            self.logger.info(
-                f"WSPriceBridge: connecting combined stream URL: {url} kwargs={connect_kwargs}"
+            self.logger.warning(
+                "WS BRIDGE MARK v3 | connecting url=%s kwargs=%r",
+                url,
+                connect_kwargs,
             )
             try:
                 async with websockets.connect(url, **connect_kwargs) as ws:
