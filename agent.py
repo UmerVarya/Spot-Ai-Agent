@@ -165,7 +165,7 @@ from trade_utils import get_rl_state
 from microstructure import plan_execution
 from volatility_regime import atr_percentile
 from cache_evaluator_adapter import evaluator_for_cache
-from realtime_signal_cache import RealTimeSignalCache
+from realtime_signal_cache import RealTimeSignalCache, set_active_cache, get_active_cache
 from ws_user_bridge import UserDataStreamBridge
 from auction_state import get_auction_state
 from alternative_data import get_alternative_data
@@ -486,6 +486,8 @@ def run_agent_loop() -> None:
         circuit_breaker_threshold=runtime_settings.circuit_breaker_threshold,
         circuit_breaker_window=runtime_settings.circuit_breaker_window,
     )
+    if get_active_cache() is not signal_cache:
+        set_active_cache(signal_cache)
     logger.info(
         "Signal cache params: interval=%.2fs, stale_after=%.2fs, max_concurrency=%d, scan_interval=%.2fs (cycle≈%.2fs)",
         refresh_interval,
@@ -631,13 +633,31 @@ def run_agent_loop() -> None:
             )
             _ws_bridge = ws_bridge
             ws_bridge.start()
-            signal_cache.enable_streams(ws_bridge)
         except Exception:
             logger.warning("Failed to initialise WebSocket price bridge", exc_info=True)
             ws_bridge = None
             signal_cache.disable_streams()
     else:
         ws_bridge = None
+
+    # --- BOOTSTRAP REALTIME CACHE ---
+    from realtime_signal_cache import RealTimeSignalCache, set_active_cache, get_active_cache
+
+    # Create/remember the cache if it doesn't already exist
+    signal_cache = get_active_cache() or RealTimeSignalCache(logger=logger)
+    set_active_cache(signal_cache)
+
+    # If the websocket bridge is running, hand it to the cache
+    try:
+        if ws_bridge:
+            # enable_streams should subscribe klines/tickers into the cache
+            signal_cache.enable_streams(ws_bridge)
+            logger.info("RTSC: enable_streams(ws_bridge) wired.")
+        else:
+            logger.warning("RTSC: ws_bridge is None; skipping enable_streams.")
+    except Exception as e:
+        logger.exception(f"RTSC wiring failed: {e}")
+    # --- END BOOTSTRAP REALTIME CACHE ---
     user_stream_bridge: Optional[UserDataStreamBridge]
     if ENABLE_USER_STREAM:
         def _handle_user_stream(payload: Dict[str, Any]) -> None:
