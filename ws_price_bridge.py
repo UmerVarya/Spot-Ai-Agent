@@ -19,7 +19,7 @@ import requests
 from observability import log_event, record_metric
 
 BINANCE_WS = "wss://stream.binance.com:9443/stream"
-WS_BASE = os.getenv(
+COMBINED_BASE = os.getenv(
     "WS_COMBINED_BASE", "wss://stream.binance.com:9443/stream?streams="
 )
 
@@ -229,7 +229,7 @@ class WSPriceBridge:
                 self._heartbeat_task.add_done_callback(self._on_heartbeat_done)
 
             try:
-                await self._run_connection()
+                await self._run_connection(symbols)
             except asyncio.CancelledError:
                 if self._stop.is_set():
                     break
@@ -252,128 +252,44 @@ class WSPriceBridge:
                 pass
             self._heartbeat_task = None
 
-# --- inside class WSPriceBridge ---  (replace your existing _run_connection)
-    async def _run_connection(self):
-        """
-        Opens ONE combined-stream websocket to Binance and fans out messages.
-        Reconnects with bounded backoff. Reads tuning from environment.
-        """
-        # Read tuning from env (with sensible defaults)
-        BASE   = os.getenv("WS_COMBINED_BASE", "wss://stream.binance.com:9443/stream?streams=")
-        # Maximum Binance allows per combined stream URL is 200 STREAMS. Each
-        # symbol may map to multiple streams (kline + optional tickers), so we
-        # must respect the total stream count rather than the raw symbol count.
-        BATCH  = int(os.getenv("WS_SUBSCRIBE_BATCH", "200"))   # how many streams per combined URL
-        if BATCH <= 0:
-            self.logger.warning("WSPriceBridge: invalid WS_SUBSCRIBE_BATCH=%s; defaulting to 200 streams.", BATCH)
-            BATCH = 200
-        DELAY  = int(os.getenv("WS_SUBSCRIBE_DELAY_MS", "400")) / 1000.0
-
-        # allow disabling client pings (avoids strict Pong deadlines on noisy hosts)
-        raw_pi = os.getenv("WS_PING_INTERVAL", "none").lower()
-        raw_pt = os.getenv("WS_PING_TIMEOUT", "none").lower()
-        PING_INTERVAL = None if raw_pi == "none" else int(raw_pi)
-        PING_TIMEOUT  = None if raw_pt == "none" else int(raw_pt)
-
-        raw_mq = os.getenv("WS_MAX_QUEUE", "0")
-        MAX_QUEUE = None if raw_mq == "0" else int(raw_mq)
-
-        min_backoff = int(os.getenv("WS_RECONNECT_MIN_SECONDS", "2"))
-        max_backoff = int(os.getenv("WS_RECONNECT_MAX_SECONDS", "60"))
-
-        # Prevent multiple concurrent sockets from this bridge
-        if getattr(self, "_ws_task", None) and not self._ws_task.done():
-            self.logger.info("WSPriceBridge: connection already running; skip duplicate.")
-            return
-
-        # Snapshot the current symbol list (lowercase)
-        syms = [s.lower() for s in sorted(set(self.symbols))]
-        if not syms:
-            self.logger.warning("WSPriceBridge: no symbols to subscribe; delaying 5s.")
-            await asyncio.sleep(5)
-            return
-
-        # Build combined stream URLs in batches (large lists split across a few sockets)
-        urls = []
+    def _build_streams(self, symbols: Iterable[str]) -> List[str]:
         interval = (self._kline_interval or "1m").strip().lower() or "1m"
-        stream_parts: List[str] = []
-        stream_count = 0
-        for s in syms:
-            per_symbol_streams = [f"{s}@kline_{interval}"]
+        streams: List[str] = []
+        for symbol in symbols:
+            token = str(symbol or "").strip().lower()
+            if not token:
+                continue
+            streams.append(f"{token}@kline_{interval}")
             if self._on_ticker is not None:
-                per_symbol_streams.append(f"{s}@miniTicker")
+                streams.append(f"{token}@miniTicker")
             if self._on_book_ticker is not None:
-                per_symbol_streams.append(f"{s}@bookTicker")
+                streams.append(f"{token}@bookTicker")
+        return streams
 
-            if len(per_symbol_streams) > BATCH:
-                self.logger.warning(
-                    "WSPriceBridge: WS_SUBSCRIBE_BATCH=%s too small for %s streams; raising limit to %s.",
-                    BATCH,
-                    len(per_symbol_streams),
-                    len(per_symbol_streams),
-                )
-                BATCH = len(per_symbol_streams)
-
-            # Binance rejects URLs containing more than 200 streams. Flush the
-            # current batch before adding the new symbol if it would exceed the
-            # limit.
-            if stream_parts and stream_count + len(per_symbol_streams) > BATCH:
-                urls.append(BASE + "/".join(stream_parts))
-                stream_parts = []
-                stream_count = 0
-
-            stream_parts.extend(per_symbol_streams)
-            stream_count += len(per_symbol_streams)
-
-        if stream_parts:
-            urls.append(BASE + "/".join(stream_parts))
-
-        async def _reader(url):
-            backoff = min_backoff
-            while True:
-                try:
-                    self.logger.info(
-                        f"WSPriceBridge: connecting combined stream URL (len={len(url)}): {url[:200]}..."
-                    )
-                    ws = await websockets.connect(
-                        url,
-                        ping_interval=PING_INTERVAL,   # None => no client pings
-                        ping_timeout=PING_TIMEOUT,     # None => don’t enforce pong
-                        max_queue=MAX_QUEUE,           # None => unbounded
-                        close_timeout=1,
-                    )
-                    self.logger.info("WSPriceBridge: connected.")
-                    backoff = min_backoff  # reset backoff after a successful connect
-                    async for msg in ws:
-                        # hand off immediately; NEVER block this loop with heavy work
-                        try:
-                            self._on_message(msg)
-                        except Exception as e:
-                            self.logger.exception(f"WSPriceBridge: handler error: {e}")
-                except asyncio.CancelledError:
-                    self.logger.info("WSPriceBridge: reader cancelled; closing.")
-                    break
-                except Exception as e:
-                    self.logger.warning(f"WSPriceBridge: connection error: {e}; reconnecting in {backoff}s")
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, max_backoff)
-
-        # Start one reader per URL (usually this is ONE socket; a few if many symbols)
-        tasks = []
-        for i, u in enumerate(urls):
-            # small stagger to avoid bursty subscribe
-            if i:
-                await asyncio.sleep(DELAY)
-            tasks.append(asyncio.create_task(_reader(u)))
-
-        # Keep a handle so we can avoid duplicate starts later
-        self._ws_task = asyncio.create_task(asyncio.gather(*tasks))
+    async def _run_connection(self, symbols: Iterable[str]) -> None:
+        self._ws_task = asyncio.current_task()
         try:
-            await self._ws_task
+            streams = self._build_streams(symbols)
+            if not streams:
+                self.logger.info("WSPriceBridge: no streams to subscribe; skipping connect.")
+                return
+            url = COMBINED_BASE + "/".join(streams)
+            self.logger.info(
+                f"WSPriceBridge: connecting combined stream URL: {url}"
+            )
+            ws = await websockets.connect(
+                url,
+                ping_interval=None,   # do NOT send client pings (Binance closes on policy/pong timeouts)
+                ping_timeout=None,
+                max_queue=None,       # don’t drop messages under load
+                close_timeout=1,      # quick close so sockets don’t pile up
+                open_timeout=15,
+            )
+            self.logger.info("WSPriceBridge: connected combined stream.")
+            async for raw in ws:
+                self._on_message(raw)
         finally:
-            for t in tasks:
-                if not t.done():
-                    t.cancel()
+            self._ws_task = None
 
     def _on_message(self, raw: str) -> None:
         self._handle_msg(raw)
@@ -539,4 +455,4 @@ class WSPriceBridge:
         return normalised
 
 
-__all__ = ["WSPriceBridge", "BINANCE_WS", "WS_BASE"]
+__all__ = ["WSPriceBridge", "BINANCE_WS", "COMBINED_BASE"]
