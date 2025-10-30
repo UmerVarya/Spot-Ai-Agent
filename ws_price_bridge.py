@@ -260,7 +260,13 @@ class WSPriceBridge:
         """
         # Read tuning from env (with sensible defaults)
         BASE   = os.getenv("WS_COMBINED_BASE", "wss://stream.binance.com:9443/stream?streams=")
-        BATCH  = int(os.getenv("WS_SUBSCRIBE_BATCH", "200"))   # how many symbols per combined URL
+        # Maximum Binance allows per combined stream URL is 200 STREAMS. Each
+        # symbol may map to multiple streams (kline + optional tickers), so we
+        # must respect the total stream count rather than the raw symbol count.
+        BATCH  = int(os.getenv("WS_SUBSCRIBE_BATCH", "200"))   # how many streams per combined URL
+        if BATCH <= 0:
+            self.logger.warning("WSPriceBridge: invalid WS_SUBSCRIBE_BATCH=%s; defaulting to 200 streams.", BATCH)
+            BATCH = 200
         DELAY  = int(os.getenv("WS_SUBSCRIBE_DELAY_MS", "400")) / 1000.0
 
         # allow disabling client pings (avoids strict Pong deadlines on noisy hosts)
@@ -290,14 +296,36 @@ class WSPriceBridge:
         # Build combined stream URLs in batches (large lists split across a few sockets)
         urls = []
         interval = (self._kline_interval or "1m").strip().lower() or "1m"
-        for chunk in _chunks(syms, BATCH):
-            stream_parts: List[str] = []
-            for s in chunk:
-                stream_parts.append(f"{s}@kline_{interval}")
-                if self._on_ticker is not None:
-                    stream_parts.append(f"{s}@miniTicker")
-                if self._on_book_ticker is not None:
-                    stream_parts.append(f"{s}@bookTicker")
+        stream_parts: List[str] = []
+        stream_count = 0
+        for s in syms:
+            per_symbol_streams = [f"{s}@kline_{interval}"]
+            if self._on_ticker is not None:
+                per_symbol_streams.append(f"{s}@miniTicker")
+            if self._on_book_ticker is not None:
+                per_symbol_streams.append(f"{s}@bookTicker")
+
+            if len(per_symbol_streams) > BATCH:
+                self.logger.warning(
+                    "WSPriceBridge: WS_SUBSCRIBE_BATCH=%s too small for %s streams; raising limit to %s.",
+                    BATCH,
+                    len(per_symbol_streams),
+                    len(per_symbol_streams),
+                )
+                BATCH = len(per_symbol_streams)
+
+            # Binance rejects URLs containing more than 200 streams. Flush the
+            # current batch before adding the new symbol if it would exceed the
+            # limit.
+            if stream_parts and stream_count + len(per_symbol_streams) > BATCH:
+                urls.append(BASE + "/".join(stream_parts))
+                stream_parts = []
+                stream_count = 0
+
+            stream_parts.extend(per_symbol_streams)
+            stream_count += len(per_symbol_streams)
+
+        if stream_parts:
             urls.append(BASE + "/".join(stream_parts))
 
         async def _reader(url):
