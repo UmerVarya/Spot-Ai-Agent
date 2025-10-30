@@ -12,7 +12,7 @@ import os, asyncio, time, websockets
 import json
 import logging
 import threading
-from typing import Any, Callable, Dict, Iterable, List, Optional, Mapping
+from typing import Any, Callable, Dict, Iterable, List, Optional, Mapping, Sequence
 
 import requests
 
@@ -273,23 +273,45 @@ class WSPriceBridge:
             if not streams:
                 self.logger.info("WSPriceBridge: no streams to subscribe; skipping connect.")
                 return
-            url = COMBINED_BASE + "/".join(streams)
-            self.logger.info(
-                f"WSPriceBridge: connecting combined stream URL: {url}"
+
+            batches: List[List[str]] = list(_chunks(streams, 200))
+            total_batches = len(batches)
+            if total_batches == 1:
+                await self._consume_stream_batch(batches[0], 1, 1)
+                return
+
+            await asyncio.gather(
+                *(
+                    self._consume_stream_batch(batch, index + 1, total_batches)
+                    for index, batch in enumerate(batches)
+                )
             )
-            ws = await websockets.connect(
-                url,
-                ping_interval=None,   # do NOT send client pings (Binance closes on policy/pong timeouts)
-                ping_timeout=None,
-                max_queue=None,       # don’t drop messages under load
-                close_timeout=1,      # quick close so sockets don’t pile up
-                open_timeout=15,
-            )
-            self.logger.info("WSPriceBridge: connected combined stream.")
-            async for raw in ws:
-                self._on_message(raw)
         finally:
             self._ws_task = None
+
+    async def _consume_stream_batch(
+        self, batch: Sequence[str], index: int, total: int
+    ) -> None:
+        url = COMBINED_BASE + "/".join(batch)
+        self.logger.info(
+            "WSPriceBridge: connecting combined stream batch %d/%d (%d streams)",
+            index,
+            total,
+            len(batch),
+        )
+        async with websockets.connect(
+            url,
+            ping_interval=None,   # do NOT send client pings (Binance closes on policy/pong timeouts)
+            ping_timeout=None,
+            max_queue=None,       # don’t drop messages under load
+            close_timeout=1,      # quick close so sockets don’t pile up
+            open_timeout=15,
+        ) as ws:
+            self.logger.info(
+                "WSPriceBridge: connected combined stream batch %d/%d", index, total
+            )
+            async for raw in ws:
+                self._on_message(raw)
 
     def _on_message(self, raw: str) -> None:
         self._handle_msg(raw)
