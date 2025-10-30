@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+
 import ws_price_bridge as bridge
 
 
@@ -31,3 +33,14 @@ def test_combined_urls_multiple_batches_over_limit(monkeypatch):
     batch_sizes = [len(_parse_streams(url)) for url in urls]
     assert all(size <= bridge.MAX_STREAMS_PER_COMBINED for size in batch_sizes)
     assert sum(batch_sizes) == len(symbols)
+
+
+def test_max_streams_per_combined_is_clamped(monkeypatch):
+    monkeypatch.setenv("BINANCE_MAX_STREAMS", "500")
+    reloaded = importlib.reload(bridge)
+
+    try:
+        assert reloaded.MAX_STREAMS_PER_COMBINED == 200
+    finally:
+        monkeypatch.delenv("BINANCE_MAX_STREAMS", raising=False)
+        importlib.reload(bridge)
