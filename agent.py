@@ -37,6 +37,95 @@ import config
 runtime_settings = config.load_runtime_settings()
 use_ws_prices = runtime_settings.use_ws_prices
 
+
+async def _rtsc_diag_task(sc: Any) -> None:
+    """Periodically log lightweight diagnostics for the RTSC instance."""
+
+    interval = max(1, int(os.getenv("RTSC_DIAG_INTERVAL", "60")))
+    while True:
+        try:
+            bars_len = None
+            try:
+                bars_len = sc.bars_len("BTCUSDT")
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.debug("RTSC_DIAG: bars_len failed: %s", exc, exc_info=True)
+
+            symbols_attr = getattr(sc, "symbols", None)
+            if callable(symbols_attr):
+                try:
+                    symbols_value = symbols_attr()
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    logger.debug("RTSC_DIAG: symbols() failed: %s", exc, exc_info=True)
+                    symbols_value = None
+            else:
+                symbols_value = symbols_attr
+
+            if symbols_value is None:
+                symbols_value = getattr(sc, "_symbols", [])
+
+            try:
+                sym_count = len(symbols_value)
+            except Exception:
+                sym_count = -1
+
+            logger.info(
+                "RTSC_DIAG: BTCUSDT bars_len=%s symbols=%s",
+                bars_len,
+                sym_count,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("RTSC_DIAG error: %s", exc)
+        await asyncio.sleep(interval)
+
+
+def _schedule_rtsc_diag(sc: Any) -> None:
+    """Schedule the RTSC diagnostic task on an available asyncio loop."""
+
+    if not sc or getattr(sc, "_rtsc_diag_started", False):
+        return
+
+    setattr(sc, "_rtsc_diag_started", True)
+
+    def _submit(loop: asyncio.AbstractEventLoop) -> None:
+        try:
+            loop.create_task(_rtsc_diag_task(sc))
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug("RTSC_DIAG: failed to create task: %s", exc, exc_info=True)
+
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop and running_loop.is_running():
+        _submit(running_loop)
+        return
+
+    worker_loop = getattr(sc, "_worker_loop", None)
+    if worker_loop and worker_loop.is_running():
+        worker_loop.call_soon_threadsafe(lambda: asyncio.create_task(_rtsc_diag_task(sc)))
+        return
+
+    bg_loop = getattr(sc, "_loop", None)
+    if bg_loop and bg_loop.is_running():
+        bg_loop.call_soon_threadsafe(lambda: asyncio.create_task(_rtsc_diag_task(sc)))
+        return
+
+    ready_event = getattr(sc, "_worker_loop_ready", None)
+    if ready_event and hasattr(ready_event, "wait"):
+        def _wait_and_schedule() -> None:
+            if ready_event.wait(timeout=5.0):
+                loop = getattr(sc, "_worker_loop", None)
+                if loop and loop.is_running():
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(_rtsc_diag_task(sc))
+                    )
+
+        threading.Thread(target=_wait_and_schedule, daemon=True, name="rtsc-diag").start()
+        return
+
+    logger.debug("RTSC_DIAG: no available event loop to schedule diagnostic task")
+
 # --- WS bootstrap (force start when USE_WS_PRICES=true) ---
 _ws_bridge: Optional[WSPriceBridge] = None
 try:
@@ -2125,6 +2214,11 @@ def main() -> None:
         set_active_cache(sc)
     else:
         logger.info("RTSC bootstrap: reusing existing cache")
+
+    try:
+        _schedule_rtsc_diag(sc)
+    except Exception:
+        logger.debug("RTSC_DIAG: scheduling failed", exc_info=True)
 
     if not hasattr(sc, "on_kline") and hasattr(sc, "handle_ws_update"):
         def _cache_on_kline(symbol: str, interval: str, payload: Dict[str, Any]) -> None:
