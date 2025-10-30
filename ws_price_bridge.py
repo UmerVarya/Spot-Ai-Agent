@@ -186,7 +186,10 @@ class WSPriceBridge:
         with self._callback_lock:
             if callback in self._extra_callbacks:
                 return
+            had_callbacks = bool(self._extra_callbacks)
             self._extra_callbacks.append(callback)
+        if not had_callbacks and self._on_kline is None:
+            self._trigger_resubscribe()
 
     def unregister_callback(
         self, callback: Callable[[str, str, Dict[str, Any]], None]
@@ -194,8 +197,11 @@ class WSPriceBridge:
         with self._callback_lock:
             try:
                 self._extra_callbacks.remove(callback)
+                has_callbacks = bool(self._extra_callbacks)
             except ValueError:
                 return
+        if not has_callbacks and self._on_kline is None:
+            self._trigger_resubscribe()
 
     def _emit_callbacks(
         self, symbol: str, event_type: str, payload: Mapping[str, Any]
@@ -209,6 +215,17 @@ class WSPriceBridge:
                 callback(symbol, event_type, dict(payload))
             except Exception:
                 logger.debug("WS bridge external callback failed", exc_info=True)
+
+    def _has_external_callbacks(self) -> bool:
+        with self._callback_lock:
+            return bool(self._extra_callbacks)
+
+    def _trigger_resubscribe(self) -> None:
+        self._resubscribe.set()
+        self._cancel_ws_tasks()
+        loop = self._loop
+        if loop and loop.is_running():
+            loop.call_soon_threadsafe(lambda: None)
 
     def _cancel_ws_tasks(self) -> None:
         if not self._tasks:
@@ -274,8 +291,11 @@ class WSPriceBridge:
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_watch())
                 self._heartbeat_task.add_done_callback(self._on_heartbeat_done)
 
+            has_external_callbacks = self._has_external_callbacks()
             flags = {
-                "want_kline_1m": self._on_kline is not None
+                "want_kline_1m": (
+                    self._on_kline is not None or has_external_callbacks
+                )
                 and (self._kline_interval or "1m").strip().lower() == "1m",
                 "want_ticker": self._on_ticker is not None,
                 "want_book": self._on_book_ticker is not None,
@@ -325,7 +345,8 @@ class WSPriceBridge:
         self, symbols: Iterable[str], flags: Mapping[str, bool]
     ) -> List[str]:
         interval = (self._kline_interval or "1m").strip().lower() or "1m"
-        want_kline = self._on_kline is not None
+        has_external_callbacks = self._has_external_callbacks()
+        want_kline = self._on_kline is not None or has_external_callbacks
         want_ticker = bool(flags.get("want_ticker"))
         want_book = bool(flags.get("want_book"))
         if interval == "1m" and flags.get("want_kline_1m", False):
