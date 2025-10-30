@@ -22,7 +22,29 @@ import requests
 
 from observability import log_event, record_metric
 
+PING_I = int(os.getenv("WS_PING_INTERVAL", 15))
+PING_TO = int(os.getenv("WS_PING_TIMEOUT", 30))
+RQ_MIN = int(os.getenv("WS_RECONNECT_MIN_SECONDS", 2))
+RQ_MAX = int(os.getenv("WS_RECONNECT_MAX_SECONDS", 60))
+_max_queue_env = os.getenv("WS_MAX_QUEUE", "0")
+try:
+    _max_queue_value = int(_max_queue_env)
+except ValueError:
+    _max_queue_value = 0
+MAX_Q = None if _max_queue_value <= 0 else _max_queue_value
+try:
+    _batch_env = int(os.getenv("WS_SUBSCRIBE_BATCH", 20))
+except ValueError:
+    _batch_env = 20
+BATCH = max(1, _batch_env)
+try:
+    _delay_env = int(os.getenv("WS_SUBSCRIBE_DELAY_MS", 400))
+except ValueError:
+    _delay_env = 400
+DELAYMS = max(0, _delay_env)
+
 BINANCE_WS = "wss://stream.binance.com:9443/stream"
+WS_BASE = "wss://stream.binance.com:9443/stream?streams="
 
 logger = logging.getLogger(__name__)
 
@@ -32,21 +54,29 @@ _HANDSHAKE_TIMEOUT_MSG = "timed out during opening handshake"
 def _ws_connect_kwargs() -> Dict[str, Any]:
     """Return websocket client configuration derived from environment."""
 
-    return {
-        "ping_interval": float(os.getenv("WS_PING_INTERVAL", "20")),
-        "ping_timeout": float(os.getenv("WS_PING_TIMEOUT", "20")),
+    kwargs: Dict[str, Any] = {
+        "ping_interval": float(PING_I),
+        "ping_timeout": float(PING_TO),
         "close_timeout": 10,
-        "max_queue": 1000,
         "open_timeout": float(os.getenv("WS_OPEN_TIMEOUT", "20")),
     }
+    if MAX_Q is not None:
+        kwargs["max_queue"] = MAX_Q
+    return kwargs
 
 
 def _compute_backoff_delay(attempt: int) -> float:
-    base = max(1.0, float(os.getenv("WS_BACKOFF_BASE", "2")))
-    cap = max(base, float(os.getenv("WS_BACKOFF_MAX", "60")))
-    delay = min(cap, base ** attempt)
+    base = max(1.0, float(RQ_MIN))
+    cap = max(base, float(RQ_MAX))
+    delay = min(cap, base * (2 ** max(0, attempt - 1)))
     jitter = 0.5 + random.random() / 2.0
-    return delay * jitter
+    return max(base, min(cap, delay * jitter))
+
+
+def _chunks(seq: Sequence[str], size: int) -> Iterable[Sequence[str]]:
+    size = max(1, size)
+    for index in range(0, len(seq), size):
+        yield seq[index : index + size]
 
 KlineCallback = Callable[[str, str, Dict[str, Any]], None]
 TickerCallback = Callable[[str, Dict[str, Any]], None]
@@ -215,10 +245,13 @@ class WSPriceBridge:
                 continue
 
             chunks = self._chunk_symbols(symbols)
-            tasks = [
-                asyncio.create_task(self._run_connection(chunk, index))
-                for index, chunk in enumerate(chunks)
-            ]
+            tasks: List[asyncio.Task] = []
+            for index, chunk in enumerate(chunks):
+                if index > 0 and DELAYMS:
+                    await asyncio.sleep(DELAYMS / 1000.0)
+                tasks.append(
+                    asyncio.create_task(self._run_connection(chunk, index))
+                )
             if not tasks:
                 await asyncio.sleep(1.0)
                 continue
@@ -474,18 +507,10 @@ class WSPriceBridge:
             if self._on_book_ticker is not None:
                 streams.append(f"{sym}@bookTicker")
         params = "/".join(streams)
-        return f"{BINANCE_WS}?streams={params}"
+        return WS_BASE + params
 
     def _chunk_symbols(self, symbols: Sequence[str]) -> List[List[str]]:
-        try:
-            chunk_size = int(os.getenv("WS_MAX_SYMBOLS", "10"))
-        except ValueError:
-            chunk_size = 10
-        chunk_size = max(1, chunk_size)
-        return [
-            list(symbols[i : i + chunk_size])
-            for i in range(0, len(symbols), chunk_size)
-        ]
+        return [list(chunk) for chunk in _chunks(symbols, BATCH)]
 
     def _current_symbols(self) -> List[str]:
         with self._symbols_lock:
@@ -506,4 +531,4 @@ class WSPriceBridge:
         return normalised
 
 
-__all__ = ["WSPriceBridge", "BINANCE_WS"]
+__all__ = ["WSPriceBridge", "BINANCE_WS", "WS_BASE"]
