@@ -257,6 +257,37 @@ REST_BACKFILL_ENABLED = runtime_settings.rest_backfill_enabled
 SIGNAL_CACHE_PRIME_AFTER = float(os.getenv("SIGNAL_CACHE_PRIME_AFTER", "120"))
 SIGNAL_CACHE_PRIME_COOLDOWN = float(os.getenv("SIGNAL_CACHE_PRIME_COOLDOWN", "300"))
 SIGNAL_CACHE_PRIME_TIMEOUT = float(os.getenv("SIGNAL_CACHE_PRIME_TIMEOUT", "15"))
+
+
+def _prepare_signal_cache_params() -> tuple[float, float, int, float, float]:
+    """Resolve environment-tunable parameters for the signal cache."""
+
+    refresh_interval = float(
+        os.getenv("SIGNAL_REFRESH_INTERVAL", str(SIGNAL_REFRESH_INTERVAL))
+    )
+    stale_mult = float(os.getenv("SIGNAL_STALE_AFTER", str(SIGNAL_STALE_MULT)))
+    max_conc = int(os.getenv("MAX_CONCURRENT_FETCHES", str(MAX_CONCURRENT_FETCHES)))
+    scan_interval = float(os.getenv("SCAN_INTERVAL", str(SCAN_INTERVAL)))
+
+    tuned_stale_mult, tuned_max_conc, tuned_scan_interval, estimated_cycle = (
+        _auto_tune_signal_cache_params(
+            runtime_settings.max_symbols,
+            refresh_interval,
+            stale_mult,
+            max_conc,
+            scan_interval,
+        )
+    )
+
+    return (
+        refresh_interval,
+        tuned_stale_mult,
+        tuned_max_conc,
+        tuned_scan_interval,
+        estimated_cycle,
+    )
+
+
 # Interval between news fetches (in seconds)
 NEWS_INTERVAL = 3600
 NEWS_MONITOR_INTERVAL = float(os.getenv("NEWS_MONITOR_INTERVAL", "3600"))
@@ -443,31 +474,30 @@ def run_agent_loop() -> None:
         with open("symbol_scores.json", "w") as f:
             json.dump({}, f)
         logger.info("Initialized empty symbol_scores.json")
-    refresh_interval = float(os.getenv("SIGNAL_REFRESH_INTERVAL", str(SIGNAL_REFRESH_INTERVAL)))
-    stale_mult = float(os.getenv("SIGNAL_STALE_AFTER", str(SIGNAL_STALE_MULT)))
-    max_conc = int(os.getenv("MAX_CONCURRENT_FETCHES", str(MAX_CONCURRENT_FETCHES)))
-    scan_interval = float(os.getenv("SCAN_INTERVAL", str(SCAN_INTERVAL)))
-    tuned_stale_mult, tuned_max_conc, tuned_scan_interval, estimated_cycle = (
-        _auto_tune_signal_cache_params(
-            runtime_settings.max_symbols,
-            refresh_interval,
-            stale_mult,
-            max_conc,
-            scan_interval,
-        )
-    )
-    stale_mult = tuned_stale_mult
-    max_conc = tuned_max_conc
-    scan_interval = tuned_scan_interval
+    (
+        refresh_interval,
+        stale_mult,
+        max_conc,
+        scan_interval,
+        estimated_cycle,
+    ) = _prepare_signal_cache_params()
 
-    signal_cache = RealTimeSignalCache(
-        price_fetcher=get_price_data_async,
-        evaluator=evaluator_for_cache,
-        refresh_interval=refresh_interval,
-        stale_after=refresh_interval * stale_mult,
-        max_concurrency=max_conc,
-        use_streams=ENABLE_WS_BRIDGE,
-    )
+    signal_cache = get_active_cache()
+    if signal_cache is None:
+        signal_cache = RealTimeSignalCache(
+            price_fetcher=get_price_data_async,
+            evaluator=evaluator_for_cache,
+            refresh_interval=refresh_interval,
+            stale_after=refresh_interval * stale_mult,
+            max_concurrency=max_conc,
+            use_streams=ENABLE_WS_BRIDGE,
+        )
+        set_active_cache(signal_cache)
+        logger.info("RTSC bootstrap: created new global cache instance.")
+    else:
+        logger.info("RTSC bootstrap: reusing existing global cache instance.")
+        signal_cache.use_streams = ENABLE_WS_BRIDGE
+
     signal_cache.start()
     debounce_overrides = {
         symbol: override.debounce_ms
@@ -633,28 +663,17 @@ def run_agent_loop() -> None:
             )
             _ws_bridge = ws_bridge
             ws_bridge.start()
+            try:
+                signal_cache.enable_streams(ws_bridge)
+                logger.info("RTSC: enable_streams(ws_bridge) wired successfully.")
+            except Exception as e:
+                logger.exception(f"RTSC wiring failed: {e}")
         except Exception:
             logger.warning("Failed to initialise WebSocket price bridge", exc_info=True)
             ws_bridge = None
             signal_cache.disable_streams()
     else:
         ws_bridge = None
-
-    # --- BOOTSTRAP REALTIME CACHE (must run once at startup) ---
-    from realtime_signal_cache import RealTimeSignalCache, set_active_cache, get_active_cache
-
-    signal_cache = get_active_cache() or RealTimeSignalCache(logger=logger)
-    set_active_cache(signal_cache)
-
-    try:
-        if ws_bridge:
-            signal_cache.enable_streams(ws_bridge)
-            logger.info("RTSC: enable_streams(ws_bridge) wired.")
-        else:
-            logger.warning("RTSC: ws_bridge is None; skipping enable_streams.")
-    except Exception as e:
-        logger.exception(f"RTSC wiring failed: {e}")
-    # --- END BOOTSTRAP REALTIME CACHE ---
     user_stream_bridge: Optional[UserDataStreamBridge]
     if ENABLE_USER_STREAM:
         def _handle_user_stream(payload: Dict[str, Any]) -> None:
@@ -2074,29 +2093,64 @@ def run_agent_loop() -> None:
         finally:
             scan_lock.release()
 
+def main() -> None:
+    """Program entry point with WebSocket/bootstrap wiring."""
 
-if __name__ == "__main__":
-    # === FORCE WEBSOCKET BRIDGE STARTUP (runs at program entry) ===
+    global _ws_bridge
+
+    import os  # local import to mirror legacy bootstrap expectations
+    from ws_price_bridge import WSPriceBridge
+
+    # --- ENSURE GLOBAL CACHE EXISTS ---
+    from realtime_signal_cache import RealTimeSignalCache, set_active_cache, get_active_cache
+
+    sc = get_active_cache()
+    if not sc:
+        logger.info("RTSC bootstrap: no existing cache, creating one.")
+        (
+            refresh_interval,
+            stale_mult,
+            max_conc,
+            _scan_interval,
+            _estimated_cycle,
+        ) = _prepare_signal_cache_params()
+        sc = RealTimeSignalCache(
+            price_fetcher=get_price_data_async,
+            evaluator=evaluator_for_cache,
+            refresh_interval=refresh_interval,
+            stale_after=refresh_interval * stale_mult,
+            max_concurrency=max_conc,
+            use_streams=ENABLE_WS_BRIDGE,
+        )
+        set_active_cache(sc)
+    else:
+        logger.info("RTSC bootstrap: cache already exists.")
+
+    signal_cache = sc  # for local reference
+    # --- END CACHE BOOTSTRAP ---
+
+    ws_bridge: Optional[WSPriceBridge] = None
     try:
-        import os
-        from ws_price_bridge import WSPriceBridge
         if os.getenv("USE_WS_PRICES", "false").lower() in ("1", "true", "yes"):
             logger.warning("WS bootstrap: forcing combined-stream enable on startup.")
             ws_symbols = ["BTCUSDT", "ETHUSDT"]
             _ws_bridge = WSPriceBridge(symbols=ws_symbols, logger=logger)
-            if hasattr(_ws_bridge, "enable_streams"):
-                _ws_bridge.enable_streams()
+            ws_bridge = _ws_bridge
+            if hasattr(ws_bridge, "enable_streams"):
+                ws_bridge.enable_streams()
             else:
-                _ws_bridge.start()
+                ws_bridge.start()
             try:
-                from realtime_signal_cache import get_active_cache
-                sc = get_active_cache()
-                if sc and hasattr(sc, "enable_streams"):
-                    sc.enable_streams(_ws_bridge)
-            except Exception:
-                pass
+                signal_cache.enable_streams(ws_bridge)
+                logger.info("RTSC: enable_streams(ws_bridge) wired successfully.")
+            except Exception as e:
+                logger.exception(f"RTSC wiring failed: {e}")
     except Exception as e:
         logger.exception(f"WS bootstrap failed early: {e}")
-    # === END WS HOOK ===
+
     logger.info("Starting Spot AI Super Agent loop...")
     run_agent_loop()
+
+
+if __name__ == "__main__":
+    main()
