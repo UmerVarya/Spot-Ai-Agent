@@ -332,7 +332,9 @@ class WSPriceBridge:
             backoff = min_backoff
             while True:
                 try:
-                    self.logger.info(f"WSPriceBridge: connecting combined stream: {url}")
+                    self.logger.info(
+                        f"WSPriceBridge: connecting combined stream URL (len={len(url)}): {url[:200]}..."
+                    )
                     ws = await websockets.connect(
                         url,
                         ping_interval=PING_INTERVAL,   # None => no client pings
