@@ -23,7 +23,9 @@ import requests
 from observability import log_event, record_metric
 
 BINANCE_WS = "wss://stream.binance.com:9443/stream"
-MAX_STREAMS_PER_COMBINED = max(1, int(os.getenv("BINANCE_MAX_STREAMS", "200")))
+MAX_STREAMS_PER_COMBINED = max(
+    1, min(200, int(os.getenv("BINANCE_MAX_STREAMS", "200")))
+)
 COMBINED_BASE = os.getenv(
     "WS_COMBINED_BASE",
     "wss://stream.binance.com:9443/stream?streams=",
@@ -47,6 +49,37 @@ def _stream_names(
         if want_book:
             names.append(f"{s}@bookTicker")
     return names
+
+
+def _combined_urls(
+    symbols: Iterable[str],
+    *,
+    want_kline_1m: bool = True,
+    want_ticker: bool = False,
+    want_book: bool = False,
+    chunk: Optional[int] = None,
+) -> List[str]:
+    streams = _stream_names(
+        symbols,
+        want_kline_1m=want_kline_1m,
+        want_ticker=want_ticker,
+        want_book=want_book,
+    )
+    if not streams:
+        return []
+
+    limit = MAX_STREAMS_PER_COMBINED if chunk is None else int(chunk)
+    limit = max(1, min(200, limit))
+
+    base = (
+        COMBINED_BASE.rstrip("?") + "?streams="
+        if "?" not in COMBINED_BASE
+        else COMBINED_BASE + ""
+    )
+    return [
+        base + "/".join(streams[i : i + limit])
+        for i in range(0, len(streams), limit)
+    ]
 
 
 KlineCallback = Callable[[str, str, Dict[str, Any]], None]
