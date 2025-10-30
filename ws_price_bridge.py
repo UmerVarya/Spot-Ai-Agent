@@ -49,7 +49,9 @@ except ValueError:
 DELAYMS = max(0, _delay_env)
 
 BINANCE_WS = "wss://stream.binance.com:9443/stream"
-WS_BASE = "wss://stream.binance.com:9443/stream?streams="
+WS_BASE = os.getenv(
+    "WS_COMBINED_BASE", "wss://stream.binance.com:9443/stream?streams="
+)
 
 logger = logging.getLogger(__name__)
 
@@ -507,10 +509,11 @@ class WSPriceBridge:
     def _build_stream_url(self, symbols: Sequence[str]) -> str:
         streams: List[str] = []
         for sym in symbols:
-            streams.append(f"{sym}@kline_{self._kline_interval}")
-            streams.append(f"{sym}@miniTicker")
+            token = sym.lower()
+            streams.append(f"{token}@kline_{self._kline_interval}")
+            streams.append(f"{token}@miniTicker")
             if self._on_book_ticker is not None:
-                streams.append(f"{sym}@bookTicker")
+                streams.append(f"{token}@bookTicker")
         params = "/".join(streams)
         return WS_BASE + params
 
