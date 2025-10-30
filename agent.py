@@ -640,17 +640,14 @@ def run_agent_loop() -> None:
     else:
         ws_bridge = None
 
-    # --- BOOTSTRAP REALTIME CACHE ---
+    # --- BOOTSTRAP REALTIME CACHE (must run once at startup) ---
     from realtime_signal_cache import RealTimeSignalCache, set_active_cache, get_active_cache
 
-    # Create/remember the cache if it doesn't already exist
     signal_cache = get_active_cache() or RealTimeSignalCache(logger=logger)
     set_active_cache(signal_cache)
 
-    # If the websocket bridge is running, hand it to the cache
     try:
         if ws_bridge:
-            # enable_streams should subscribe klines/tickers into the cache
             signal_cache.enable_streams(ws_bridge)
             logger.info("RTSC: enable_streams(ws_bridge) wired.")
         else:
