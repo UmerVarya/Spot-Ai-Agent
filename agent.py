@@ -2060,4 +2060,32 @@ def run_agent_loop() -> None:
 
 if __name__ == "__main__":
     logger.info("Starting Spot AI Super Agent loop...")
+    # === FORCE WEBSOCKET BRIDGE STARTUP (runs at main entry) ===
+    try:
+        import os
+        from ws_price_bridge import WSPriceBridge
+
+        # Only when USE_WS_PRICES is enabled
+        if os.getenv("USE_WS_PRICES", "false").lower() in ("1", "true", "yes"):
+            logger.warning("WS bootstrap: forcing combined-stream enable on startup.")
+            # Safe fallback list in case your scan list is empty at boot
+            ws_symbols = ["BTCUSDT", "ETHUSDT"]
+            _ws_bridge = WSPriceBridge(symbols=ws_symbols, logger=logger)
+            # prefer enable_streams() if available; else start()
+            if hasattr(_ws_bridge, "enable_streams"):
+                _ws_bridge.enable_streams()
+            else:
+                _ws_bridge.start()
+            try:
+                # Hand the running bridge to the signal cache if it exposes this
+                from realtime_signal_cache import get_active_cache
+
+                sc = get_active_cache()
+                if sc and hasattr(sc, "enable_streams"):
+                    sc.enable_streams(_ws_bridge)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.exception(f"WS bootstrap failed early: {e}")
+    # === END WS HOOK ===
     run_agent_loop()
