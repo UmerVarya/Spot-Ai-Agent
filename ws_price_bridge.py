@@ -64,7 +64,7 @@ class WSPriceBridge:
         self._resubscribe = threading.Event()
         self._symbols_lock = threading.Lock()
         self._heartbeat_timeout = max(5.0, float(heartbeat_timeout))
-        self._last_message = time.time()
+        self._last_messages: Dict[int, float] = {}
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._time_sync_interval = max(30.0, float(server_time_sync_interval))
         self._time_sync_stop = threading.Event()
@@ -210,7 +210,7 @@ class WSPriceBridge:
             self._resubscribe.clear()
             symbols = self._current_symbols()
             if not symbols:
-                self._last_message = time.time()
+                self._last_messages.clear()
                 await asyncio.sleep(1.0)
                 continue
 
@@ -276,6 +276,7 @@ class WSPriceBridge:
 
             batches: List[List[str]] = list(_chunks(streams, 200))
             total_batches = len(batches)
+            self._initialise_batch_heartbeats(total_batches)
             if total_batches == 1:
                 await self._consume_stream_batch(batches[0], 1, 1)
                 return
@@ -288,6 +289,7 @@ class WSPriceBridge:
             )
         finally:
             self._ws_task = None
+            self._last_messages.clear()
 
     async def _consume_stream_batch(
         self, batch: Sequence[str], index: int, total: int
@@ -311,13 +313,27 @@ class WSPriceBridge:
                 "WSPriceBridge: connected combined stream batch %d/%d", index, total
             )
             async for raw in ws:
-                self._on_message(raw)
+                self._on_message(raw, index)
 
-    def _on_message(self, raw: str) -> None:
-        self._handle_msg(raw)
+    def _initialise_batch_heartbeats(self, total_batches: int) -> None:
+        if total_batches <= 0:
+            self._last_messages.clear()
+            return
+        now = time.time()
+        self._last_messages = {index: now for index in range(1, total_batches + 1)}
 
-    def _handle_msg(self, raw: str) -> None:
-        self._last_message = time.time()
+    def _on_message(self, raw: str, batch_index: Optional[int] = None) -> None:
+        self._handle_msg(raw, batch_index)
+
+    def _handle_msg(self, raw: str, batch_index: Optional[int] = None) -> None:
+        if batch_index is not None:
+            self._last_messages[batch_index] = time.time()
+        elif self._last_messages:
+            # If we lost track of the originating batch, update all to avoid
+            # spurious stale triggers while still receiving traffic.
+            now = time.time()
+            for key in list(self._last_messages.keys()):
+                self._last_messages[key] = now
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError:  # pragma: no cover - defensive
@@ -387,19 +403,34 @@ class WSPriceBridge:
                 await asyncio.sleep(self._heartbeat_timeout / 2.0)
                 if self._stop.is_set():
                     return
-                gap = time.time() - self._last_message
-                if gap >= self._heartbeat_timeout:
-                    log_event(
-                        logger,
-                        "ws_heartbeat_stale",
-                        gap_seconds=gap,
-                        timeout=self._heartbeat_timeout,
-                    )
-                    record_metric("ws_gap_seconds", gap, labels={"stream": "price"})
-                    self._notify_stale(gap)
-                    self._resubscribe.set()
-                    self._cancel_ws_task()
-                    return
+                if not self._last_messages:
+                    continue
+                now = time.time()
+                stale_batches = [
+                    (batch_index, now - last)
+                    for batch_index, last in self._last_messages.items()
+                    if now - last >= self._heartbeat_timeout
+                ]
+                if not stale_batches:
+                    continue
+                worst_batch, worst_gap = max(stale_batches, key=lambda item: item[1])
+                log_event(
+                    logger,
+                    "ws_heartbeat_stale",
+                    gap_seconds=worst_gap,
+                    timeout=self._heartbeat_timeout,
+                    stale_batches=[index for index, _ in stale_batches],
+                    worst_batch=worst_batch,
+                )
+                record_metric(
+                    "ws_gap_seconds",
+                    worst_gap,
+                    labels={"stream": "price", "batch": str(worst_batch)},
+                )
+                self._notify_stale(worst_gap)
+                self._resubscribe.set()
+                self._cancel_ws_task()
+                return
         except asyncio.CancelledError:
             raise
 
