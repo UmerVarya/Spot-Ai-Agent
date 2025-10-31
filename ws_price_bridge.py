@@ -17,6 +17,9 @@ import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
+# Commented out legacy threaded stream import; we now use WSPriceBridge instead.
+# from binance import ThreadedWebsocketManager
+
 import requests
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from websockets import __version__ as WEBSOCKETS_VERSION
