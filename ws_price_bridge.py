@@ -15,7 +15,6 @@ import logging
 import os
 import threading
 import time
-from types import MethodType
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 import requests
@@ -39,11 +38,6 @@ IDLE_RECV_TIMEOUT = max(10, int(os.getenv("WS_IDLE_RECV_TIMEOUT", "90")))
 
 logger = logging.getLogger(__name__)
 
-
-async def _noop(self, *args: Any, **kwargs: Any) -> None:
-    """Coroutine placeholder used to disable websocket ping/pong."""
-
-    return None
 
 def make_streams(
     symbols: Iterable[str],
@@ -607,10 +601,22 @@ class WSPriceBridge:
             try:
                 async with ws_connect(url, **connect_kwargs) as ws:
                     try:
+                        proto_mod = getattr(ws.__class__, "__module__", "?")
+                        proto_name = getattr(ws.__class__, "__name__", "?")
+                        self.logger.warning(
+                            "WS BRIDGE MARK v3 | protocol=%s.%s",
+                            proto_mod,
+                            proto_name,
+                        )
+                    except Exception:
+                        self.logger.debug(
+                            "WS BRIDGE MARK v3 | protocol inspection failed (non-fatal)"
+                        )
+                    try:
                         if hasattr(ws, "ping"):
-                            ws.ping = MethodType(_noop, ws)  # type: ignore[attr-defined]
+                            ws.ping = lambda *a, **k: None  # type: ignore[assignment]
                         if hasattr(ws, "pong"):
-                            ws.pong = MethodType(_noop, ws)  # type: ignore[attr-defined]
+                            ws.pong = lambda *a, **k: None  # type: ignore[assignment]
                         for name in (
                             "_ping_interval",
                             "_ping_timeout",
