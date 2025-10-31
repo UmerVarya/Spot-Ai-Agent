@@ -215,12 +215,54 @@ def load_runtime_settings() -> RuntimeSettings:
     )
 
 
+def use_groq(default: bool = True) -> bool:
+    """Return ``True`` when Groq should be used as the primary LLM provider."""
+
+    return _env_bool("USE_GROQ", default)
+
+
+def use_ollama(default: bool = False) -> bool:
+    """Return ``True`` when Ollama can be used as a local fallback provider."""
+
+    return _env_bool("USE_OLLAMA", default)
+
+
+def get_ollama_url() -> str:
+    """Return the configured Ollama base URL."""
+
+    return os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+
+
+def get_default_groq_model() -> str:
+    """Return the default Groq model for trade workflows."""
+
+    return get_groq_model()
+
+
+def get_macro_groq_model() -> str:
+    """Return the Groq model for macro analysis workloads."""
+
+    return get_macro_model()
+
+
+def get_narrative_groq_model() -> str:
+    """Return the Groq model for narrative/news generation workloads."""
+
+    return get_news_model()
+
+
 __all__ = [
     "get",
     "get_groq_model",
     "get_macro_model",
     "get_news_model",
     "get_overflow_model",
+    "get_default_groq_model",
+    "get_macro_groq_model",
+    "get_narrative_groq_model",
+    "get_ollama_url",
+    "use_groq",
+    "use_ollama",
     "load_runtime_settings",
     "RuntimeSettings",
     "SymbolOverride",
