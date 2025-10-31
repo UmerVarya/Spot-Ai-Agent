@@ -29,21 +29,35 @@ class WSClientBridge:
             self._thread.start()
 
     def stop(self):
+        thread: Optional[threading.Thread] = None
+        app: Optional[websocket.WebSocketApp] = None
         with self._lock:
             self._stop = True
+            thread = self._thread
+            app = self._app
+
+        if app is not None:
             try:
-                if self._app is not None:
-                    self._app.keep_running = False
-                    try:
-                        self._app.close()
-                    except Exception:
-                        pass
+                app.keep_running = False
+                try:
+                    app.close()
+                except Exception:
+                    pass
             finally:
-                thread = self._thread
-                self._thread = None
-                self._app = None
+                # If another thread replaced the app reference after we released
+                # the lock we don't want to clear that one, so only clear when
+                # it still matches our snapshot.
+                with self._lock:
+                    if self._app is app:
+                        self._app = None
+
         if thread:
             thread.join(timeout=5.0)
+            if thread.is_alive():
+                return
+            with self._lock:
+                if self._thread is thread:
+                    self._thread = None
 
     def _run(self):
         backoff = 1.0
