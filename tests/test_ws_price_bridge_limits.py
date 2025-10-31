@@ -46,7 +46,7 @@ def test_max_streams_per_combined_is_clamped(monkeypatch):
         importlib.reload(bridge)
 
 
-def test_make_streams_filters_and_deduplicates():
+def test_make_streams_accepts_all_pairs_by_default():
     streams = bridge.make_streams(
         [" BTCUSDT ", "ETHBTC", "BTCUSDT", "SOLUSDT"],
         include_kline=True,
@@ -58,7 +58,22 @@ def test_make_streams_filters_and_deduplicates():
         "btcusdt@kline_1m",
         "btcusdt@ticker",
         "btcusdt@bookTicker",
+        "ethbtc@kline_1m",
+        "ethbtc@ticker",
+        "ethbtc@bookTicker",
         "solusdt@kline_1m",
         "solusdt@ticker",
         "solusdt@bookTicker",
     ]
+
+
+def test_make_streams_can_filter_by_suffix():
+    streams = bridge.make_streams(
+        ["BTCUSDT", "ETHBTC", "SOLBUSD"],
+        include_kline=False,
+        include_ticker=True,
+        include_book=False,
+        quote_suffix="busd",
+    )
+
+    assert streams == ["solbusd@ticker"]
