@@ -6,6 +6,7 @@ register callbacks for klines, mini tickers and (optionally) book ticker
 updates; the bridge handles reconnections with exponential backoff and
 normalises symbols to upper case for downstream consumers.
 """
+# guard comment: all connection calls use 'ws_connect' from websockets.legacy.client
 from __future__ import annotations
 
 import asyncio
