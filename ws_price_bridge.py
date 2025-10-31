@@ -17,9 +17,10 @@ import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
-import websockets
-
 import requests
+import websockets
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+from websockets.legacy.client import connect as ws_connect
 
 from observability import log_event, record_metric
 
@@ -224,7 +225,7 @@ class WSPriceBridge:
             "WS BRIDGE MARK v3 | file=%s | websockets=%s | connect=%s",
             __file__,
             inspect.getfile(websockets),
-            websockets.connect.__module__ + ".connect",
+            ws_connect.__module__ + ".connect",
         )
         self._symbols: List[str] = self._normalise_symbols(symbols)
         self._kline_interval = str(kline_interval or "1m").strip()
@@ -574,8 +575,13 @@ class WSPriceBridge:
             connect_kwargs = dict(
                 ping_interval=None,
                 ping_timeout=None,
-                close_timeout=0.5,
+                close_timeout=3.0,
+                open_timeout=20,
                 max_queue=None,
+                extra_headers=[
+                    ("User-Agent", "Mozilla/5.0"),
+                    ("Accept-Encoding", "identity"),
+                ],
             )
             payload = ""
             if "streams=" in url:
@@ -592,7 +598,33 @@ class WSPriceBridge:
             should_break = False
             idle_reconnect = False
             try:
-                async with websockets.connect(url, **connect_kwargs) as ws:
+                async with ws_connect(url, **connect_kwargs) as ws:
+                    try:
+                        if hasattr(ws, "ping"):
+                            ws.ping = lambda *a, **k: None  # type: ignore[attr-defined]
+                        if hasattr(ws, "pong"):
+                            ws.pong = lambda *a, **k: None  # type: ignore[attr-defined]
+                        for name in (
+                            "_ping_interval",
+                            "_ping_timeout",
+                            "_keepalive_ping_task",
+                            "_ping_task",
+                        ):
+                            if hasattr(ws, name):
+                                val = getattr(ws, name)
+                                try:
+                                    if hasattr(val, "cancel"):
+                                        val.cancel()
+                                except Exception:
+                                    pass
+                                try:
+                                    setattr(ws, name, None)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        self.logger.debug(
+                            "WS BRIDGE MARK v3 | ping/pong disable patch skipped (non-fatal)"
+                        )
                     self._ws = ws
                     backoff = 1.0
                     self._last_messages[batch_index] = time.time()
@@ -623,7 +655,7 @@ class WSPriceBridge:
                         self._on_message(raw, batch_index)
             except asyncio.CancelledError:
                 raise
-            except websockets.exceptions.ConnectionClosedError as e:
+            except (ConnectionClosedError, ConnectionClosedOK) as e:
                 code = getattr(e, "code", None)
                 reason = getattr(e, "reason", "") or ""
                 reason_lower = str(reason).lower()
