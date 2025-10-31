@@ -13,7 +13,7 @@ def _parse_streams(url: str) -> list[str]:
 
 def test_combined_urls_single_batch_under_limit(monkeypatch):
     monkeypatch.setattr(bridge, "MAX_STREAMS_PER_COMBINED", 5)
-    symbols = [f"sym{i}" for i in range(5)]
+    symbols = [f"SYM{i}USDT" for i in range(5)]
 
     urls = bridge._combined_urls(symbols, want_kline_1m=True)
 
@@ -25,7 +25,7 @@ def test_combined_urls_single_batch_under_limit(monkeypatch):
 
 def test_combined_urls_multiple_batches_over_limit(monkeypatch):
     monkeypatch.setattr(bridge, "MAX_STREAMS_PER_COMBINED", 3)
-    symbols = [f"sym{i}" for i in range(5)]
+    symbols = [f"SYM{i}USDT" for i in range(5)]
 
     urls = bridge._combined_urls(symbols, want_kline_1m=True)
 
@@ -44,3 +44,21 @@ def test_max_streams_per_combined_is_clamped(monkeypatch):
     finally:
         monkeypatch.delenv("BINANCE_MAX_STREAMS", raising=False)
         importlib.reload(bridge)
+
+
+def test_make_streams_filters_and_deduplicates():
+    streams = bridge.make_streams(
+        [" BTCUSDT ", "ETHBTC", "BTCUSDT", "SOLUSDT"],
+        include_kline=True,
+        include_ticker=True,
+        include_book=True,
+    )
+
+    assert streams == [
+        "btcusdt@kline_1m",
+        "btcusdt@ticker",
+        "btcusdt@bookTicker",
+        "solusdt@kline_1m",
+        "solusdt@ticker",
+        "solusdt@bookTicker",
+    ]
