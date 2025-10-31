@@ -6,7 +6,6 @@ register callbacks for klines, mini tickers and (optionally) book ticker
 updates; the bridge handles reconnections with exponential backoff and
 normalises symbols to upper case for downstream consumers.
 """
-# guard comment: all connection calls use 'ws_connect' from websockets.legacy.client
 from __future__ import annotations
 
 import asyncio
@@ -14,6 +13,7 @@ import inspect
 import json
 import logging
 import os
+from contextlib import suppress
 import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
@@ -21,22 +21,9 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 # Commented out legacy threaded stream import; we now use WSPriceBridge instead.
 # from binance import ThreadedWebsocketManager
 
+import aiohttp
 import requests
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
-from websockets import __version__ as WEBSOCKETS_VERSION
-from websockets.legacy.client import (
-    WebSocketClientProtocol,
-    connect as ws_connect,
-)
-
-CONNECT_FUNC_PATH = ".".join(
-    part
-    for part in (
-        getattr(ws_connect, "__module__", "?"),
-        getattr(ws_connect, "__name__", "connect"),
-    )
-    if part
-)
+from aiohttp import __version__ as AIOHTTP_VERSION
 
 from observability import log_event, record_metric
 
@@ -241,10 +228,9 @@ class _WebsocketsPriceBridge:
     ) -> None:
         self.logger = logger
         self.logger.warning(
-            "WS BRIDGE MARK v3 | backend=websockets | file=%s | websockets_version=%s | connect_func=%s",
+            "WS BRIDGE MARK v3 | backend=aiohttp | file=%s | aiohttp_version=%s",
             __file__,
-            WEBSOCKETS_VERSION,
-            CONNECT_FUNC_PATH,
+            AIOHTTP_VERSION,
         )
         self._symbols: List[str] = self._normalise_symbols(symbols)
         self._kline_interval = str(kline_interval or "1m").strip()
@@ -276,7 +262,8 @@ class _WebsocketsPriceBridge:
         self._tasks: List[asyncio.Task] = []
         self._urls: List[str] = []
         self._combined_base = _streams_prefix(COMBINED_BASE)
-        self._ws: Optional[WebSocketClientProtocol] = None
+        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._session: Optional[aiohttp.ClientSession] = None
         self._conn_lock: Optional[asyncio.Lock] = None
 
     # ------------------------------------------------------------------
@@ -294,7 +281,7 @@ class _WebsocketsPriceBridge:
         self.logger.info(
             "WS BRIDGE MARK v3 | WSPriceBridge: starting with %d streams | backend=%s",
             stream_count,
-            "websockets",
+            "aiohttp",
         )
         self._stop.clear()
         self._thread = threading.Thread(
@@ -516,26 +503,38 @@ class _WebsocketsPriceBridge:
             self._initialise_batch_heartbeats(total_batches)
             if self._conn_lock is None:
                 self._conn_lock = asyncio.Lock()
-            async with self._conn_lock:
-                if self._tasks:
-                    for task in list(self._tasks):
-                        if task and not task.done():
-                            task.cancel()
-                self._tasks = []
-                self._urls = urls
+            timeout_cfg = aiohttp.ClientTimeout(
+                total=None,
+                sock_connect=15,
+                sock_read=IDLE_RECV_TIMEOUT,
+            )
+            session = aiohttp.ClientSession(timeout=timeout_cfg)
+            try:
+                async with self._conn_lock:
+                    if self._tasks:
+                        for task in list(self._tasks):
+                            if task and not task.done():
+                                task.cancel()
+                    self._tasks = []
+                    self._urls = urls
+                    self._session = session
 
-                for index, url in enumerate(urls, start=1):
-                    self._tasks.append(
-                        asyncio.create_task(
-                            self._run_connection(url, index, total_batches)
+                    for index, url in enumerate(urls, start=1):
+                        self._tasks.append(
+                            asyncio.create_task(
+                                self._run_connection(session, url, index, total_batches)
+                            )
                         )
-                    )
 
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-
-            self._tasks = []
-            self._urls = []
-            self._last_messages.clear()
+                await asyncio.gather(*self._tasks, return_exceptions=True)
+            finally:
+                if self._session is session:
+                    self._session = None
+                self._tasks = []
+                self._urls = []
+                self._last_messages.clear()
+                with suppress(Exception):
+                    await session.close()
 
             if self._stop.is_set():
                 break
@@ -621,82 +620,42 @@ class _WebsocketsPriceBridge:
             )
             yield url
 
-    async def _run_connection(self, url: str, batch_index: int, total: int) -> None:
-        backoff = 1.0
-        while not self._stop.is_set() and not self._resubscribe.is_set():
-            # IMPORTANT: legacy client + no internal ping tasks; rely on idle reconnects
-            connect_kwargs = dict(
-                ping_interval=None,
-                ping_timeout=None,
-                close_timeout=3.0,
-                open_timeout=20,
-                max_queue=None,
-                extra_headers=[
-                    ("User-Agent", "Mozilla/5.0"),
-                    ("Accept-Encoding", "identity"),
-                ],
-            )
-            payload = ""
-            if "streams=" in url:
-                payload = url.split("streams=", 1)[1]
-            stream_count = len([token for token in payload.split("/") if token]) or 1
-            self.logger.warning(
-                "WS BRIDGE MARK v3 | websockets=%s | connect_func=%s | url=%s | n_streams=%d | url_len=%d",
-                WEBSOCKETS_VERSION,
-                CONNECT_FUNC_PATH,
-                url,
-                stream_count,
-                len(url),
-            )
-            sleep_delay = 0.0
-            should_break = False
-            idle_reconnect = False
-            try:
-                async with ws_connect(url, **connect_kwargs) as ws:
-                    try:
-                        proto_mod = getattr(ws.__class__, "__module__", "?")
-                        proto_name = getattr(ws.__class__, "__name__", "?")
-                        self.logger.warning(
-                            "WS BRIDGE MARK v3 | protocol=%s.%s",
-                            proto_mod,
-                            proto_name,
-                        )
-                    except Exception:
-                        self.logger.debug(
-                            "WS BRIDGE MARK v3 | protocol inspection failed (non-fatal)"
-                        )
-                    try:
-                        # Hard-disable ping/pong paths if present, but keep them awaitable
-                        async def _noop(*a, **k):
-                            return None
+    async def _run_connection(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        batch_index: int,
+        total: int,
+    ) -> None:
+        def _reconnect_delay(attempt: int) -> float:
+            step = max(1, attempt)
+            base = min(30.0, 1.5 * (2 ** (step - 1)))
+            jitter = 0.2 * (step % 3)
+            return base + jitter
 
-                        if hasattr(ws, "ping"):
-                            ws.ping = _noop
-                        if hasattr(ws, "pong"):
-                            ws.pong = _noop
-                        for name in (
-                            "_ping_interval",
-                            "_ping_timeout",
-                            "_keepalive_ping_task",
-                            "_ping_task",
-                        ):
-                            if hasattr(ws, name):
-                                val = getattr(ws, name)
-                                try:
-                                    if hasattr(val, "cancel"):
-                                        val.cancel()
-                                except Exception:
-                                    pass
-                                try:
-                                    setattr(ws, name, None)
-                                except Exception:
-                                    pass
-                    except Exception:
-                        self.logger.debug(
-                            "WS BRIDGE MARK v3 | ping/pong disable patch skipped (non-fatal)"
-                        )
+        payload = ""
+        if "streams=" in url:
+            payload = url.split("streams=", 1)[1]
+        stream_count = len([token for token in payload.split("/") if token]) or 1
+        attempt = 0
+
+        while not self._stop.is_set() and not self._resubscribe.is_set():
+            try:
+                self.logger.warning(
+                    "WS BRIDGE MARK v3 | aiohttp=%s | url=%s | n_streams=%d | url_len=%d",
+                    AIOHTTP_VERSION,
+                    url,
+                    stream_count,
+                    len(url),
+                )
+                async with session.ws_connect(
+                    url,
+                    heartbeat=30,
+                    max_msg_size=0,
+                    receive_timeout=IDLE_RECV_TIMEOUT,
+                ) as ws:
                     self._ws = ws
-                    backoff = 1.0
+                    attempt = 0
                     self._last_messages[batch_index] = time.time()
                     self.logger.warning(
                         "WS BRIDGE MARK v3 | connected | batch=%d/%d | streams=%d | url_len=%d",
@@ -705,108 +664,65 @@ class _WebsocketsPriceBridge:
                         stream_count,
                         len(url),
                     )
-                    while (
-                        not self._stop.is_set()
-                        and not self._resubscribe.is_set()
-                    ):
-                        try:
-                            raw = await asyncio.wait_for(
-                                ws.recv(), timeout=IDLE_RECV_TIMEOUT
-                            )
-                        except asyncio.TimeoutError:
-                            idle_reconnect = True
-                            self.logger.warning(
-                                "WS BRIDGE MARK v3 | idle > %ss with no messages | batch=%d/%d | reconnecting (no ping)",
-                                IDLE_RECV_TIMEOUT,
-                                batch_index,
-                                total,
-                            )
+                    async for msg in ws:
+                        if self._stop.is_set() or self._resubscribe.is_set():
                             break
-                        self._on_message(raw, batch_index)
-            except asyncio.CancelledError:
-                raise
-            except (ConnectionClosedError, ConnectionClosedOK) as e:
-                code = getattr(e, "code", None)
-                reason = getattr(e, "reason", "") or ""
-                reason_lower = str(reason).lower()
-                if code == 1008 and any(term in reason_lower for term in ("pong", "ping")):
-                    sleep_delay = max(10.0, backoff)
-                    self.logger.warning(
-                        "WS BRIDGE MARK v3 | pong timeout close | batch=%d/%d | code=1008 | delay=%.1fs | reason=%s",
-                        batch_index,
-                        total,
-                        sleep_delay,
-                        reason,
-                    )
-                    backoff = max(10.0, min(max(backoff, 1.0) * 1.5, 30.0))
-                elif code == 1008:
-                    sleep_delay = max(10.0, backoff)
-                    self.logger.warning(
-                        "WS BRIDGE MARK v3 | policy close | batch=%d/%d | code=1008 | delay=%.1fs | reason=%s",
-                        batch_index,
-                        total,
-                        sleep_delay,
-                        reason,
-                    )
-                    backoff = max(10.0, min(max(sleep_delay, 5.0) * 1.2, 30.0))
-                else:
-                    sleep_delay = max(3.0, min(backoff, 5.0))
-                    self.logger.warning(
-                        "WS BRIDGE MARK v3 | closed | batch=%d/%d | code=%s | delay=%.1fs | reason=%s",
-                        batch_index,
-                        total,
-                        code,
-                        sleep_delay,
-                        reason,
-                    )
-                    backoff = min(max(backoff * 1.7, 1.0), 30.0)
-            except Exception as e:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            self._last_messages[batch_index] = time.time()
+                            self._on_message(msg.data, batch_index)
+                        elif msg.type == aiohttp.WSMsgType.ERROR:
+                            exc = ws.exception()
+                            raise exc if exc is not None else RuntimeError("WS error")
+                        elif msg.type in (
+                            aiohttp.WSMsgType.CLOSE,
+                            aiohttp.WSMsgType.CLOSED,
+                        ):
+                            break
+                        else:
+                            continue
+
+                if self._stop.is_set() or self._resubscribe.is_set():
+                    break
+                attempt += 1
+                delay = _reconnect_delay(attempt)
                 self.logger.warning(
-                    "WS BRIDGE MARK v3 | connection error | batch=%d/%d | err=%s",
+                    "WS BRIDGE MARK v3 | socket ended | batch=%d/%d | reconnect in %.1fs",
                     batch_index,
                     total,
-                    e,
+                    delay,
                 )
-                logger.warning("WS reconnect loop error: %s", e)
-                backoff = min(backoff * 1.7, 30.0)
-                await asyncio.sleep(5.0)
-                continue
-            else:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                break
+            except asyncio.TimeoutError:
                 if self._stop.is_set() or self._resubscribe.is_set():
-                    should_break = True
-                else:
-                    if idle_reconnect:
-                        sleep_delay = 0.0
-                        self.logger.warning(
-                            "WS BRIDGE MARK v3 | socket idle reconnect | batch=%d/%d | next_delay=%.1fs",
-                            batch_index,
-                            total,
-                            sleep_delay,
-                        )
-                        backoff = 1.0
-                    else:
-                        sleep_delay = backoff
-                        self.logger.warning(
-                            "WS BRIDGE MARK v3 | socket ended | batch=%d/%d | reconnect in %.1fs",
-                            batch_index,
-                            total,
-                            sleep_delay,
-                        )
-                        backoff = min(backoff * 1.7, 30.0)
+                    break
+                attempt += 1
+                delay = _reconnect_delay(attempt)
+                self.logger.warning(
+                    "WS BRIDGE MARK v3 | idle timeout | batch=%d/%d | reconnect in %.1fs",
+                    batch_index,
+                    total,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            except Exception as exc:
+                if self._stop.is_set() or self._resubscribe.is_set():
+                    break
+                attempt += 1
+                delay = _reconnect_delay(attempt)
+                try:
+                    logger.warning(
+                        "WS reconnect (%s) in %.1fs | url_len=%d",
+                        type(exc).__name__,
+                        delay,
+                        len(url),
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(delay)
             finally:
                 self._ws = None
-
-            if should_break:
-                break
-
-            if sleep_delay > 0:
-                await asyncio.sleep(sleep_delay)
-            self.logger.warning(
-                "WS BRIDGE MARK v3 | retrying connection | batch=%d/%d | backoff=%.1fs",
-                batch_index,
-                total,
-                backoff,
-            )
 
     def _initialise_batch_heartbeats(self, total_batches: int) -> None:
         if total_batches <= 0:
