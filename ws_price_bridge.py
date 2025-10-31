@@ -9,7 +9,6 @@ normalises symbols to upper case for downstream consumers.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import logging
 import os
@@ -18,9 +17,21 @@ import time
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 import requests
-import websockets
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
-from websockets.legacy.client import connect as ws_connect
+from websockets import __version__ as WEBSOCKETS_VERSION
+from websockets.legacy.client import (
+    WebSocketClientProtocol,
+    connect as ws_connect,
+)
+
+CONNECT_FUNC_PATH = ".".join(
+    part
+    for part in (
+        getattr(ws_connect, "__module__", "?"),
+        getattr(ws_connect, "__name__", "connect"),
+    )
+    if part
+)
 
 from observability import log_event, record_metric
 
@@ -223,10 +234,10 @@ class WSPriceBridge:
     ) -> None:
         self.logger = logger
         self.logger.warning(
-            "WS BRIDGE MARK v3 | file=%s | websockets=%s | connect=%s",
+            "WS BRIDGE MARK v3 | file=%s | websockets_version=%s | connect_func=%s",
             __file__,
-            inspect.getfile(websockets),
-            ws_connect.__module__ + ".connect",
+            WEBSOCKETS_VERSION,
+            CONNECT_FUNC_PATH,
         )
         self._symbols: List[str] = self._normalise_symbols(symbols)
         self._kline_interval = str(kline_interval or "1m").strip()
@@ -255,7 +266,7 @@ class WSPriceBridge:
         self._tasks: List[asyncio.Task] = []
         self._urls: List[str] = []
         self._combined_base = COMBINED_BASE
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._ws: Optional[WebSocketClientProtocol] = None
         self._conn_lock: Optional[asyncio.Lock] = None
 
     # ------------------------------------------------------------------
@@ -573,6 +584,7 @@ class WSPriceBridge:
     async def _run_connection(self, url: str, batch_index: int, total: int) -> None:
         backoff = 1.0
         while not self._stop.is_set() and not self._resubscribe.is_set():
+            # IMPORTANT: legacy client + no internal ping tasks; rely on idle reconnects
             connect_kwargs = dict(
                 ping_interval=None,
                 ping_timeout=None,
@@ -589,11 +601,12 @@ class WSPriceBridge:
                 payload = url.split("streams=", 1)[1]
             stream_count = len([token for token in payload.split("/") if token]) or 1
             self.logger.warning(
-                "WS BRIDGE MARK v3 | connecting url=%s | n_streams=%d | url_len=%d | kwargs=%r",
+                "WS BRIDGE MARK v3 | websockets=%s | connect_func=%s | url=%s | n_streams=%d | url_len=%d",
+                WEBSOCKETS_VERSION,
+                CONNECT_FUNC_PATH,
                 url,
                 stream_count,
                 len(url),
-                connect_kwargs,
             )
             sleep_delay = 0.0
             should_break = False
