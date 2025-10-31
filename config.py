@@ -25,11 +25,6 @@ def use_groq() -> bool:
     return _truthy(os.getenv("USE_GROQ", "true"))
 
 
-def use_ollama() -> bool:
-    # Off by default. Must be explicitly enabled.
-    return _truthy(os.getenv("USE_OLLAMA", "false"))
-
-
 def get_default_groq_model() -> str:
     return os.getenv("DEFAULT_GROQ_MODEL", "qwen/qwen3-32b")
 
@@ -40,10 +35,6 @@ def get_macro_groq_model() -> str:
 
 def get_narrative_groq_model() -> str:
     return os.getenv("NARRATIVE_GROQ_MODEL", "llama-3.1-8b-instant")
-
-
-def get_ollama_url() -> str:
-    return os.getenv("OLLAMA_URL", "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -255,18 +246,6 @@ def use_groq(default: bool = True) -> bool:
     return _env_bool("USE_GROQ", default)
 
 
-def use_ollama(default: bool = False) -> bool:
-    """Return ``True`` when Ollama can be used as a local fallback provider."""
-
-    return _env_bool("USE_OLLAMA", default)
-
-
-def get_ollama_url() -> str:
-    """Return the configured Ollama base URL."""
-
-    return os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
-
-
 def get_default_groq_model() -> str:
     """Return the default Groq model for trade workflows."""
 
@@ -294,9 +273,7 @@ __all__ = [
     "get_default_groq_model",
     "get_macro_groq_model",
     "get_narrative_groq_model",
-    "get_ollama_url",
     "use_groq",
-    "use_ollama",
     "load_runtime_settings",
     "RuntimeSettings",
     "SymbolOverride",

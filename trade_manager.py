@@ -47,7 +47,6 @@ from trade_storage import (
 from rl_policy import RLPositionSizer
 from microstructure import plan_execution, detect_sell_pressure
 from orderflow import detect_aggression
-from local_llm import generate_post_trade_summary
 from observability import log_event
 
 # === Constants ===
@@ -78,6 +77,34 @@ _MANAGE_TRIGGER_COOLDOWN = 2.0
 _ACTIVE_TRADES_LOCK = threading.RLock()
 _KLINE_ID_LOCK = threading.Lock()
 _KLINE_CLOSE_IDS: Dict[str, int] = {}
+
+
+def generate_post_trade_summary(payload: Mapping[str, Any]) -> str:
+    """Create a deterministic textual summary for closed trades."""
+
+    symbol = str(payload.get("symbol", "Unknown")).upper()
+    direction = str(payload.get("direction", "")).upper()
+    entry = payload.get("entry_price")
+    exit_price = payload.get("exit_price")
+    outcome = payload.get("outcome") or "Outcome n/a"
+    pnl = payload.get("pnl")
+    holding = payload.get("holding_minutes")
+    reason = payload.get("reason") or payload.get("notes")
+
+    parts = [f"{symbol} {direction}".strip()]
+    if entry is not None and exit_price is not None:
+        parts.append(f"entry {entry} → exit {exit_price}")
+    elif exit_price is not None:
+        parts.append(f"exit {exit_price}")
+    parts.append(f"result: {outcome}")
+    if pnl is not None:
+        parts.append(f"PnL {pnl}")
+    if holding is not None:
+        parts.append(f"held {holding}m")
+    if reason:
+        parts.append(f"notes: {reason}")
+
+    return "; ".join(str(item) for item in parts if item).strip()
 
 
 def _register_kline_close_id(symbol: str, close_time: Optional[int]) -> bool:

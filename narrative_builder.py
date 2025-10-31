@@ -21,7 +21,6 @@ from dotenv import load_dotenv
 import config
 from groq_client import get_groq_client
 from groq_safe import safe_chat_completion
-from local_llm import generate_local_narrative
 from log_utils import setup_logger
 
 load_dotenv()
@@ -82,9 +81,6 @@ Write a short, confident explanation justifying the trade in plain English. End 
 
     client = get_groq_client()
     if client is None:
-        fallback = generate_local_narrative(trade_data)
-        if fallback:
-            return fallback
         return "⚠️ Groq client unavailable for narrative generation."
 
     try:
@@ -98,7 +94,4 @@ Write a short, confident explanation justifying the trade in plain English. End 
         return response.choices[0].message.content.strip()
     except Exception as e:
         logger.warning("Groq narrative generation failed: %s", e)
-        fallback = generate_local_narrative(trade_data)
-        if fallback:
-            return fallback
         return f"⚠️ Error generating narrative: {e}"
