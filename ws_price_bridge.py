@@ -34,22 +34,65 @@ COMBINED_BASE = os.getenv(
 
 logger = logging.getLogger(__name__)
 
+def make_streams(
+    symbols: Iterable[str],
+    *,
+    kline_interval: str = "1m",
+    include_kline: bool = True,
+    include_ticker: bool = True,
+    include_book: bool = False,
+    ticker_stream: str = "ticker",
+    quote_suffix: Optional[str] = "usdt",
+) -> List[str]:
+    """Return a de-duplicated list of Binance stream names for ``symbols``.
+
+    ``symbols`` are normalised to lower case with leading/trailing whitespace
+    removed.  Only pairs ending in ``quote_suffix`` (``"usdt"`` by default)
+    are kept.  Stream names are emitted in a stable order with duplicates
+    removed while preserving the first occurrence.
+    """
+
+    interval = str(kline_interval or "1m").strip().lower() or "1m"
+    ticker_name = str(ticker_stream or "ticker").strip() or "ticker"
+
+    ordered: List[str] = []
+    seen: set[str] = set()
+
+    def _append(value: str) -> None:
+        if value and value not in seen:
+            ordered.append(value)
+            seen.add(value)
+
+    for sym in symbols:
+        token = str(sym or "").strip().lower()
+        if not token:
+            continue
+        if quote_suffix and not token.endswith(quote_suffix):
+            continue
+        if include_kline:
+            _append(f"{token}@kline_{interval}")
+        if include_ticker:
+            _append(f"{token}@{ticker_name}")
+        if include_book:
+            _append(f"{token}@bookTicker")
+
+    return ordered
+
+
 def _stream_names(
     symbols: Iterable[str],
     want_kline_1m: bool = True,
     want_ticker: bool = False,
     want_book: bool = False,
 ) -> List[str]:
-    names = []
-    for sym in symbols:
-        s = sym.lower()
-        if want_kline_1m:
-            names.append(f"{s}@kline_1m")
-        if want_ticker:
-            names.append(f"{s}@ticker")
-        if want_book:
-            names.append(f"{s}@bookTicker")
-    return names
+    return make_streams(
+        symbols,
+        kline_interval="1m",
+        include_kline=want_kline_1m,
+        include_ticker=want_ticker,
+        include_book=want_book,
+        ticker_stream="ticker",
+    )
 
 
 def _combined_urls(
@@ -383,11 +426,13 @@ class WSPriceBridge:
         want_ticker = bool(flags.get("want_ticker"))
         want_book = bool(flags.get("want_book"))
         if interval == "1m" and flags.get("want_kline_1m", False):
-            streams = _stream_names(
+            streams = make_streams(
                 symbols,
-                want_kline_1m=want_kline,
-                want_ticker=want_ticker,
-                want_book=want_book,
+                kline_interval="1m",
+                include_kline=want_kline,
+                include_ticker=want_ticker,
+                include_book=want_book,
+                ticker_stream="ticker",
             )
             self.logger.warning(
                 "WS BRIDGE MARK v3 | streams=%d | chunk=200", len(streams)
@@ -397,17 +442,14 @@ class WSPriceBridge:
                 self.logger.warning("WS BRIDGE MARK v3 | combined url built")
             return urls
 
-        names: List[str] = []
-        for symbol in symbols:
-            token = str(symbol or "").strip().lower()
-            if not token:
-                continue
-            if want_kline:
-                names.append(f"{token}@kline_{interval}")
-            if want_ticker:
-                names.append(f"{token}@miniTicker")
-            if want_book:
-                names.append(f"{token}@bookTicker")
+        names = make_streams(
+            symbols,
+            kline_interval=interval,
+            include_kline=want_kline,
+            include_ticker=want_ticker,
+            include_book=want_book,
+            ticker_stream="miniTicker",
+        )
         if not names:
             return []
         self.logger.warning(
@@ -680,4 +722,10 @@ class WSPriceBridge:
         return normalised
 
 
-__all__ = ["WSPriceBridge", "BINANCE_WS", "COMBINED_BASE", "MAX_STREAMS_PER_COMBINED"]
+__all__ = [
+    "WSPriceBridge",
+    "BINANCE_WS",
+    "COMBINED_BASE",
+    "MAX_STREAMS_PER_COMBINED",
+    "make_streams",
+]
