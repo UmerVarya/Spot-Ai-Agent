@@ -1044,7 +1044,11 @@ if WS_BACKEND == "wsclient":
                     if not batch:
                         continue
                     clients.append(
-                        _WSClientBridge(batch, self._make_handler(index))
+                        _WSClientBridge(
+                            batch,
+                            self._make_handler(index),
+                            base_url=self._combined_base,
+                        )
                     )
                 with self._lock:
                     self._stop.clear()
