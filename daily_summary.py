@@ -11,7 +11,6 @@ import pandas as pd
 import config
 from groq_client import get_groq_client
 from groq_safe import safe_chat_completion
-from local_llm import generate_daily_recap as generate_local_daily_recap
 from log_utils import setup_logger
 from trade_storage import load_trade_history_df
 
@@ -290,9 +289,5 @@ def generate_daily_summary(
                     return message.strip()
         except Exception as exc:  # pragma: no cover - network failure path
             logger.warning("Groq daily summary generation failed: %s", exc)
-
-    local_response = generate_local_daily_recap(prompt)
-    if local_response:
-        return local_response.strip()
 
     return _fallback_summary(metrics, highlights, veto_notes)

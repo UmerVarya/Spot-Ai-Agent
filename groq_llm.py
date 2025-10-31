@@ -45,12 +45,6 @@ from groq_safe import (
 )
 from log_utils import setup_logger
 
-try:  # Optional import for logging fallback details
-    from llm_client import get_base_url as _get_ollama_base_url
-except Exception:  # pragma: no cover - optional dependency path
-    def _get_ollama_base_url() -> str:
-        return "unknown"
-
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_URL = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1/chat/completions")
 _HTTP_TIMEOUT_SECONDS = 10
@@ -108,7 +102,7 @@ _BATCH_SYSTEM_MESSAGE = (
 if GROQ_API_KEY:
     logger.info("LLM backend active: Groq (model=%s)", config.get_groq_model())
 else:
-    logger.info("LLM backend active: Ollama (base_url=%s)", _get_ollama_base_url())
+    logger.info("LLM backend inactive: GROQ_API_KEY not provided")
 
 
 def _normalise_header_name(name: str) -> str:
@@ -468,70 +462,6 @@ def _sanitize_prompt(prompt: str, max_len: int = 3000) -> str:
     return prompt
 
 
-def _fallback_to_local(prompt: str, *, temperature: float, max_tokens: int, reason: str) -> str | None:
-    """Try serving the request via the local Ollama model."""
-
-    try:
-        from local_llm import structured_trade_judgment
-    except Exception as exc:  # pragma: no cover - optional dependency path
-        logger.debug("Local LLM fallback unavailable: %s", exc)
-        return None
-
-    response = structured_trade_judgment(prompt, temperature=temperature, num_ctx=None)
-    if response:
-        logger.info("Served LLM request via local model (%s)", reason)
-    return response
-
-
-async def _async_fallback_to_local(prompt: str, *, temperature: float, max_tokens: int, reason: str) -> str | None:
-    try:
-        from local_llm import async_structured_judgment
-    except Exception as exc:  # pragma: no cover - optional dependency path
-        logger.debug("Async local LLM fallback unavailable: %s", exc)
-        return None
-
-    response = await async_structured_judgment(prompt, temperature=temperature, num_ctx=None)
-    if response:
-        logger.info("Served async LLM request via local model (%s)", reason)
-    return response
-
-
-async def _async_batch_local(
-    chunk: List[Tuple[str, str]],
-    *,
-    temperature: float,
-    max_tokens: int,
-    reason: str,
-) -> Dict[str, str]:
-    try:
-        from local_llm import async_structured_judgment, structured_trade_judgment
-    except Exception as exc:  # pragma: no cover - optional dependency path
-        logger.debug("Batch local fallback unavailable: %s", exc)
-        return {symbol: "LLM error: local fallback unavailable" for symbol, _ in chunk}
-
-    results: Dict[str, str] = {}
-    loop = asyncio.get_running_loop()
-    for symbol, prompt in chunk:
-        try:
-            if async_structured_judgment:
-                resp = await async_structured_judgment(prompt, temperature=temperature, num_ctx=None)
-            else:  # pragma: no cover - defensive branch
-                resp = await loop.run_in_executor(
-                    None,
-                    lambda p=prompt: structured_trade_judgment(p, temperature=temperature, num_ctx=None),
-                )
-        except Exception as exc:  # pragma: no cover - local runtime error
-            logger.debug("Local batch fallback failed for %s: %s", symbol, exc)
-            resp = None
-        if resp:
-            results[symbol] = resp
-        else:
-            results[symbol] = "LLM error: local fallback unavailable"
-    if results:
-        logger.info("Served %d prompts via local batch fallback (%s)", len(results), reason)
-    return results
-
-
 def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 500) -> str:
     """Query Groq LLM with a prompt asking for trade advice in JSON format."""
 
@@ -545,26 +475,10 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
     )
 
     if not GROQ_API_KEY:
-        fallback = _fallback_to_local(
-            user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reason="missing Groq API key",
-        )
-        if fallback:
-            return fallback
-        return "LLM error: Groq API key missing and local fallback unavailable."
+        return "LLM error: Groq API key missing."
 
     client = get_groq_client()
     if client is None:
-        fallback = _fallback_to_local(
-            user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reason="Groq client unavailable",
-        )
-        if fallback:
-            return fallback
         return "LLM error: Groq client unavailable."
 
     messages = [
@@ -616,15 +530,7 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
         )
         if http_response:
             return http_response
-        fallback = _fallback_to_local(
-            user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reason="Groq rate limit",
-        )
-        if fallback:
-            return fallback
-        return "LLM error: Unable to generate response."
+        return f"LLM error: {describe_error(err)}"
     except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
         latency = time.perf_counter() - start
         logger.error("Groq request failed in %.2fs: %s", latency, _format_exception(err))
@@ -639,15 +545,7 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
         )
         if http_response:
             return http_response
-        fallback = _fallback_to_local(
-            user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reason="Groq error",
-        )
-        if fallback:
-            return fallback
-        return "LLM error: Unable to generate response."
+        return f"LLM error: {describe_error(err)}"
     except Exception as err:
         latency = time.perf_counter() - start
         logger.error("LLM Exception after %.2fs: %s", latency, err, exc_info=True)
@@ -662,14 +560,6 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
         )
         if http_response:
             return http_response
-        fallback = _fallback_to_local(
-            user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reason="Groq exception",
-        )
-        if fallback:
-            return fallback
         return "LLM error: Exception occurred."
 
 
@@ -686,26 +576,10 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
     )
 
     if not GROQ_API_KEY:
-        fallback = await _async_fallback_to_local(
-            user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reason="missing Groq API key",
-        )
-        if fallback:
-            return fallback
-        return "LLM error: Groq API key missing and local fallback unavailable."
+        return "LLM error: Groq API key missing."
 
     client = get_groq_client()
     if client is None:
-        fallback = await _async_fallback_to_local(
-            user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reason="Groq client unavailable",
-        )
-        if fallback:
-            return fallback
         return "LLM error: Groq client unavailable."
 
     messages = [
@@ -751,15 +625,7 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
                 status_code or "unknown",
             )
             await asyncio.sleep(delay)
-        fallback = await _async_fallback_to_local(
-            user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reason="Groq rate limit",
-        )
-        if fallback:
-            return fallback
-        return "LLM error: Unable to generate response."
+        return f"LLM error: {describe_error(err)}"
     except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
         latency = time.perf_counter() - start
         logger.error("Async Groq request failed in %.2fs: %s", latency, _format_exception(err))
@@ -767,15 +633,7 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
             _extract_rate_limit_headers(err),
             _extract_status_code(err),
         )
-        fallback = await _async_fallback_to_local(
-            user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reason="Groq error",
-        )
-        if fallback:
-            return fallback
-        return "LLM error: Unable to generate response."
+        return f"LLM error: {describe_error(err)}"
     except Exception as err:
         latency = time.perf_counter() - start
         logger.error("Async LLM Exception after %.2fs: %s", latency, err, exc_info=True)
@@ -783,14 +641,6 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
             _extract_rate_limit_headers(err),
             _extract_status_code(err),
         )
-        fallback = await _async_fallback_to_local(
-            user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reason="Groq exception",
-        )
-        if fallback:
-            return fallback
         return "LLM error: Exception occurred."
 
 
@@ -807,23 +657,13 @@ async def async_batch_llm_judgment(
         return {}
     items = [(symbol, _sanitize_prompt(prompt)) for symbol, prompt in prompts.items()]
     if not GROQ_API_KEY:
-        logger.warning("Groq API key missing. Using local LLM for %d prompts", len(items))
-        return await _async_batch_local(
-            items,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reason="missing Groq API key",
-        )
+        logger.warning("Groq API key missing. Unable to execute %d prompts", len(items))
+        return {symbol: "LLM error: Groq API key missing." for symbol, _ in items}
 
     client = get_groq_client()
     if client is None:
-        logger.warning("Groq client unavailable. Falling back to local batch handler")
-        return await _async_batch_local(
-            items,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reason="Groq client unavailable",
-        )
+        logger.warning("Groq client unavailable. Unable to execute %d prompts", len(items))
+        return {symbol: "LLM error: Groq client unavailable." for symbol, _ in items}
 
     results: Dict[str, str] = {}
     model = config.get_groq_model()
@@ -881,13 +721,9 @@ async def async_batch_llm_judgment(
                     status_code or "unknown",
                 )
                 await asyncio.sleep(delay)
-            fallback = await _async_batch_local(
-                chunk,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                reason="Groq rate limit",
-            )
-            results.update(fallback)
+            error_text = f"LLM error: {describe_error(err)}"
+            for symbol, _ in chunk:
+                results[symbol] = error_text
             continue
         except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
             latency = time.perf_counter() - start
@@ -900,13 +736,9 @@ async def async_batch_llm_judgment(
                 _extract_rate_limit_headers(err),
                 _extract_status_code(err),
             )
-            fallback = await _async_batch_local(
-                chunk,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                reason="Groq error",
-            )
-            results.update(fallback)
+            error_text = f"LLM error: {describe_error(err)}"
+            for symbol, _ in chunk:
+                results[symbol] = error_text
             continue
         except Exception as err:
             latency = time.perf_counter() - start
@@ -915,13 +747,9 @@ async def async_batch_llm_judgment(
                 _extract_rate_limit_headers(err),
                 _extract_status_code(err),
             )
-            fallback = await _async_batch_local(
-                chunk,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                reason="Groq exception",
-            )
-            results.update(fallback)
+            error_text = "LLM error: Exception occurred."
+            for symbol, _ in chunk:
+                results[symbol] = error_text
             continue
 
         try:

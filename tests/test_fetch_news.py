@@ -3,6 +3,10 @@ import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import httpx
+from groq import RateLimitError
+from unittest.mock import AsyncMock
+
 
 def _example_events():
     now = datetime.utcnow()
@@ -122,16 +126,20 @@ def test_analyze_news_with_llm_async_retries_on_runtime_error(monkeypatch):
     assert calls == ["custom-model", fetch_news.config.DEFAULT_OVERFLOW_MODEL]
 
 
-def test_analyze_news_with_llm_async_uses_local_fallback(monkeypatch):
+def test_analyze_news_with_llm_async_rate_limit_raises(monkeypatch):
     import fetch_news
 
     monkeypatch.setattr(fetch_news, "GROQ_API_KEY", "test-key", raising=False)
     monkeypatch.setattr(fetch_news.config, "get_news_model", lambda: "custom-model", raising=False)
-
-    async def fake_chat(messages, *, model, temperature, max_tokens):
-        raise RuntimeError("Groq LLM request failed")
-
-    monkeypatch.setattr(fetch_news, "_chat_completion_async", fake_chat, raising=False)
+    request = httpx.Request("GET", "https://example.com")
+    response = httpx.Response(429, request=request)
+    rate_limit_error = RateLimitError(message="rate limit", response=response, body=None)
+    monkeypatch.setattr(
+        fetch_news,
+        "_chat_completion_async",
+        AsyncMock(side_effect=rate_limit_error),
+        raising=False,
+    )
 
     monkeypatch.setattr(
         fetch_news,
@@ -146,26 +154,9 @@ def test_analyze_news_with_llm_async_uses_local_fallback(monkeypatch):
         raising=False,
     )
 
-    monkeypatch.setattr(
-        fetch_news,
-        "reconcile_with_quant_filters",
-        lambda decision, reason, metrics: (decision, 0.4, f"LOCAL:{reason}"),
-        raising=False,
-    )
-
-    def fake_adapter():
-        return (
-            lambda: True,
-            lambda prompt, temperature=0.1: json.dumps(
-                {"safe_decision": "no", "reason": "Local fallback"}
-            ),
-        )
-
-    monkeypatch.setattr(fetch_news, "_get_local_llm_adapter", fake_adapter, raising=False)
-
     result = asyncio.run(fetch_news.analyze_news_with_llm_async(_example_events()))
 
-    assert result == {"safe": False, "sensitivity": 0.4, "reason": "LOCAL:Local fallback"}
+    assert result == {"safe": True, "sensitivity": 0, "reason": "LLM error"}
 
 
 def test_analyze_news_with_llm_async_handles_non_json(monkeypatch):

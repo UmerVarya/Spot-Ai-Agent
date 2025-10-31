@@ -27,7 +27,7 @@ import asyncio
 import random
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Mapping, Optional, Set
 
 from ws_price_bridge import WSPriceBridge
 
@@ -244,10 +244,10 @@ from volume_profile import (
 )
 from diversify import select_diversified_signals
 from groq_llm import async_batch_llm_judgment
+from groq_client import get_groq_client
 from ml_model import predict_success_probability
 from sequence_model import predict_next_return, train_sequence_model, SEQ_PKL
 from drawdown_guard import is_trading_blocked
-from local_llm import warm_up_local_llm, run_pretrade_risk_check, generate_signal_explainer
 import numpy as np
 from rl_policy import RLPositionSizer
 from trade_utils import get_rl_state
@@ -258,11 +258,52 @@ from realtime_signal_cache import RealTimeSignalCache, set_active_cache, get_act
 from ws_user_bridge import UserDataStreamBridge
 from auction_state import get_auction_state
 from alternative_data import get_alternative_data
-from risk_veto import minutes_until_next_event
+from risk_veto import minutes_until_next_event, evaluate_risk_veto
 from state_manager import CentralState
 from worker_pools import ScheduledTask, WorkerPools
 from market_stream import BinanceEventStream
 from observability import log_event, record_metric
+
+
+def warm_up_groq_client() -> bool:
+    """Initialise the shared Groq client for downstream modules."""
+
+    return get_groq_client() is not None
+
+
+def run_pretrade_risk_check(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Evaluate deterministic risk veto rules before placing a trade."""
+
+    return evaluate_risk_veto(payload)
+
+
+def generate_signal_explainer(payload: Mapping[str, Any]) -> str:
+    """Return a concise textual summary describing why a signal was accepted."""
+
+    symbol = str(payload.get("symbol", "Unknown")).upper()
+    pattern = payload.get("pattern") or "n/a"
+    score = payload.get("score")
+    confidence = payload.get("confidence")
+    macro_bias = payload.get("macro_bias")
+    orderflow = payload.get("orderflow")
+    volume_profile = payload.get("volume_profile")
+    context = payload.get("context")
+
+    parts = [f"{symbol}: pattern {pattern}"]
+    if score is not None:
+        parts.append(f"score {score}")
+    if confidence is not None:
+        parts.append(f"confidence {confidence}")
+    if macro_bias:
+        parts.append(f"macro {macro_bias}")
+    if orderflow:
+        parts.append(f"order flow {orderflow}")
+    if volume_profile:
+        parts.append(f"volume {volume_profile}")
+    if context:
+        parts.append(f"context: {context}")
+
+    return "; ".join(str(item) for item in parts if item).strip()
 
 
 def dispatch_schedule_refresh(cache, symbol: str) -> None:
@@ -386,11 +427,11 @@ NEWS_MONITOR_STATE_PATH = os.getenv("NEWS_MONITOR_STATE_PATH", "news_monitor_sta
 RUN_DASHBOARD = os.getenv("RUN_DASHBOARD", "0") == "1"
 USE_RL_POSITION_SIZER = False
 rl_sizer = RLPositionSizer() if USE_RL_POSITION_SIZER else None
-LOCAL_LLM_READY = warm_up_local_llm()
-if LOCAL_LLM_READY:
-    logger.info("Local LLM warm-up completed")
+GROQ_CLIENT_READY = warm_up_groq_client()
+if GROQ_CLIENT_READY:
+    logger.info("Groq client initialised for LLM workflows")
 else:
-    logger.info("Local LLM warm-up skipped or unavailable")
+    logger.info("Groq client unavailable; LLM workflows will be disabled")
 
 # Time-to-live for alternative data fetches
 ALT_DATA_REFRESH_INTERVAL = float(os.getenv("ALT_DATA_REFRESH_INTERVAL", "300"))

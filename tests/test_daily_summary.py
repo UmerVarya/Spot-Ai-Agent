@@ -7,7 +7,6 @@ import daily_summary
 
 def _disable_llm(monkeypatch) -> None:
     monkeypatch.setattr(daily_summary, "get_groq_client", lambda: None)
-    monkeypatch.setattr(daily_summary, "generate_local_daily_recap", lambda *_: None)
 
 
 def test_generate_daily_summary_no_trades(monkeypatch) -> None:

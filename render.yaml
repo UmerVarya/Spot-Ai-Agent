@@ -15,8 +15,6 @@ services:
             property: connectionString
         - key: DATA_DIR
           value: /var/data
-        - key: OLLAMA_URL
-          value: https://ollama-render-7rfu.onrender.com
       disks:
         - name: trade-data
           mountPath: /var/data

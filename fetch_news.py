@@ -31,18 +31,6 @@ logger = setup_logger(__name__)
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-
-def _get_local_llm_adapter() -> Optional[Tuple[Callable[[], bool], Callable[..., str]]]:
-    """Return callables for the local Ollama fallback when available."""
-
-    try:
-        from local_llm import is_enabled as local_is_enabled, generate as local_generate
-    except Exception:
-        return None
-    return local_is_enabled, local_generate
-
-
 def _run_coroutine(coro_factory: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
     """Execute an async coroutine factory safely from synchronous code."""
 
@@ -205,34 +193,6 @@ async def analyze_news_with_llm_async(
         ],
     }
 
-    async def _run_local_news_fallback() -> Optional[Dict[str, Any]]:
-        adapter = _get_local_llm_adapter()
-        if adapter is None:
-            return None
-        is_enabled, generate = adapter
-        if not is_enabled():
-            return None
-
-        combined_prompt = f"{system_prompt}\n\n{user_prompt}"
-        loop = asyncio.get_running_loop()
-        try:
-            raw_reply = await loop.run_in_executor(
-                None, lambda: generate(combined_prompt, temperature=0.1)
-            )
-        except Exception as exc:
-            logger.warning("Local news fallback failed: %s", exc, exc_info=True)
-            return None
-
-        safe_decision, reason = parse_llm_json(raw_reply, logger)
-        if safe_decision is None:
-            return {"safe": True, "sensitivity": 0, "reason": reason or "Local LLM error"}
-
-        safe, sensitivity, reconciled_reason = reconcile_with_quant_filters(
-            safe_decision, reason or "No reason provided.", metrics
-        )
-        logger.info("Used local LLM fallback for news analysis")
-        return {"safe": safe, "sensitivity": sensitivity, "reason": reconciled_reason}
-
     try:
         response: Optional[Any] = None
         last_error: Optional[Exception] = None
@@ -261,9 +221,6 @@ async def analyze_news_with_llm_async(
                     model_name,
                     err,
                 )
-                fallback_result = await _run_local_news_fallback()
-                if fallback_result is not None:
-                    return fallback_result
                 break
             except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
                 last_error = err
@@ -307,9 +264,6 @@ async def analyze_news_with_llm_async(
                 break
 
         if response is None:
-            fallback_result = await _run_local_news_fallback()
-            if fallback_result is not None:
-                return fallback_result
             if last_error is not None:
                 raise last_error
             raise RuntimeError("Groq LLM request failed")
