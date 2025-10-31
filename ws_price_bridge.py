@@ -32,6 +32,8 @@ COMBINED_BASE = os.getenv(
     "wss://stream.binance.com:9443/stream?streams=",
 )
 MAX_COMBINED_URL_LEN = max(512, int(os.getenv("BINANCE_MAX_URL_LEN", "1900")))
+MAX_CONNS = max(1, int(os.getenv("WS_MAX_CONNS", "4")))
+IDLE_RECV_TIMEOUT = max(10, int(os.getenv("WS_IDLE_RECV_TIMEOUT", "90")))
 
 logger = logging.getLogger(__name__)
 
@@ -449,6 +451,14 @@ class WSPriceBridge:
                 await asyncio.sleep(1.0)
                 continue
 
+            if len(urls) > MAX_CONNS:
+                self.logger.warning(
+                    "WS BRIDGE MARK v3 | too many url batches=%d | max_conns=%d | truncating",
+                    len(urls),
+                    MAX_CONNS,
+                )
+                urls = urls[:MAX_CONNS]
+
             total_batches = len(urls)
             self._initialise_batch_heartbeats(total_batches)
             if self._conn_lock is None:
@@ -564,20 +574,23 @@ class WSPriceBridge:
             connect_kwargs = dict(
                 ping_interval=None,
                 ping_timeout=None,
-                close_timeout=1,
+                close_timeout=0.5,
                 max_queue=None,
-            )
-            self.logger.warning(
-                "WS BRIDGE MARK v3 | connecting url=%s kwargs=%r",
-                url,
-                connect_kwargs,
             )
             payload = ""
             if "streams=" in url:
                 payload = url.split("streams=", 1)[1]
             stream_count = len([token for token in payload.split("/") if token]) or 1
+            self.logger.warning(
+                "WS BRIDGE MARK v3 | connecting url=%s | n_streams=%d | url_len=%d | kwargs=%r",
+                url,
+                stream_count,
+                len(url),
+                connect_kwargs,
+            )
             sleep_delay = 0.0
             should_break = False
+            idle_reconnect = False
             try:
                 async with websockets.connect(url, **connect_kwargs) as ws:
                     self._ws = ws
@@ -590,7 +603,23 @@ class WSPriceBridge:
                         stream_count,
                         len(url),
                     )
-                    async for raw in ws:
+                    while (
+                        not self._stop.is_set()
+                        and not self._resubscribe.is_set()
+                    ):
+                        try:
+                            raw = await asyncio.wait_for(
+                                ws.recv(), timeout=IDLE_RECV_TIMEOUT
+                            )
+                        except asyncio.TimeoutError:
+                            idle_reconnect = True
+                            self.logger.warning(
+                                "WS BRIDGE MARK v3 | idle > %ss with no messages | batch=%d/%d | reconnecting (no ping)",
+                                IDLE_RECV_TIMEOUT,
+                                batch_index,
+                                total,
+                            )
+                            break
                         self._on_message(raw, batch_index)
             except asyncio.CancelledError:
                 raise
@@ -599,7 +628,7 @@ class WSPriceBridge:
                 reason = getattr(e, "reason", "") or ""
                 reason_lower = str(reason).lower()
                 if code == 1008 and any(term in reason_lower for term in ("pong", "ping")):
-                    sleep_delay = max(3.0, min(backoff, 6.0))
+                    sleep_delay = max(10.0, backoff)
                     self.logger.warning(
                         "WS BRIDGE MARK v3 | pong timeout close | batch=%d/%d | code=1008 | delay=%.1fs | reason=%s",
                         batch_index,
@@ -607,7 +636,7 @@ class WSPriceBridge:
                         sleep_delay,
                         reason,
                     )
-                    backoff = min(max(backoff, 1.0) * 1.5, 15.0)
+                    backoff = max(10.0, min(max(backoff, 1.0) * 1.5, 30.0))
                 elif code == 1008:
                     sleep_delay = max(10.0, backoff)
                     self.logger.warning(
@@ -617,7 +646,7 @@ class WSPriceBridge:
                         sleep_delay,
                         reason,
                     )
-                    backoff = min(max(sleep_delay, 5.0) * 1.2, 30.0)
+                    backoff = max(10.0, min(max(sleep_delay, 5.0) * 1.2, 30.0))
                 else:
                     sleep_delay = max(3.0, min(backoff, 5.0))
                     self.logger.warning(
@@ -642,14 +671,24 @@ class WSPriceBridge:
                 if self._stop.is_set() or self._resubscribe.is_set():
                     should_break = True
                 else:
-                    sleep_delay = backoff
-                    self.logger.warning(
-                        "WS BRIDGE MARK v3 | socket ended | batch=%d/%d | reconnect in %.1fs",
-                        batch_index,
-                        total,
-                        sleep_delay,
-                    )
-                    backoff = min(backoff * 1.7, 30.0)
+                    if idle_reconnect:
+                        sleep_delay = 0.0
+                        self.logger.warning(
+                            "WS BRIDGE MARK v3 | socket idle reconnect | batch=%d/%d | next_delay=%.1fs",
+                            batch_index,
+                            total,
+                            sleep_delay,
+                        )
+                        backoff = 1.0
+                    else:
+                        sleep_delay = backoff
+                        self.logger.warning(
+                            "WS BRIDGE MARK v3 | socket ended | batch=%d/%d | reconnect in %.1fs",
+                            batch_index,
+                            total,
+                            sleep_delay,
+                        )
+                        backoff = min(backoff * 1.7, 30.0)
             finally:
                 self._ws = None
 
