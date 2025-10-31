@@ -26,6 +26,7 @@ import sys
 import asyncio
 import random
 import logging
+import threading
 from datetime import datetime
 from typing import Any, Dict, Mapping, Optional, Set
 
@@ -36,6 +37,61 @@ import config
 
 runtime_settings = config.load_runtime_settings()
 use_ws_prices = runtime_settings.use_ws_prices
+
+SCAN_MIN_INTERVAL = 0.20  # seconds; keeps scans responsive without spamming
+_scan_event: Optional[threading.Event] = None
+_last_scan_fire = 0.0
+_scan_lock = threading.Lock()
+_scan_tick_thread: Optional[threading.Thread] = None
+
+
+def attach_scan_event(ev: threading.Event) -> None:
+    """Register the threading event used to wake the scan loop."""
+
+    global _scan_event
+    _scan_event = ev
+
+
+def _trigger_scan(reason: str = "market") -> None:
+    """Set the scan event with light global debouncing."""
+
+    global _last_scan_fire
+    event = _scan_event
+    if event is None:
+        return
+    now = time.monotonic()
+    with _scan_lock:
+        if now - _last_scan_fire < SCAN_MIN_INTERVAL:
+            return
+        _last_scan_fire = now
+    event.set()
+
+
+async def notify_scan(reason: str = "market") -> None:
+    """Coroutine-compatible helper to wake the scan loop."""
+
+    _trigger_scan(reason)
+
+
+def _ensure_periodic_tick(interval: float = 5.0) -> None:
+    """Start a lightweight periodic tick that keeps the scan loop warm."""
+
+    global _scan_tick_thread
+    if _scan_tick_thread is not None and _scan_tick_thread.is_alive():
+        return
+
+    def _runner() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                _trigger_scan("periodic")
+            except Exception:
+                logger.debug("Periodic scan tick failed", exc_info=True)
+
+    _scan_tick_thread = threading.Thread(
+        target=_runner, name="scan-periodic-tick", daemon=True
+    )
+    _scan_tick_thread.start()
 
 
 async def _rtsc_diag_task(sc: Any) -> None:
@@ -191,7 +247,6 @@ except Exception as e:
     logger.exception("WS bootstrap failed: %s", e)
 # --- end WS bootstrap ---
 import json
-import threading
 from fetch_news import (
     fetch_news,  # noqa: F401
     run_news_fetcher,  # noqa: F401
@@ -709,6 +764,22 @@ def run_agent_loop() -> None:
     time.sleep(1.0)
     signal_cache.flush_pending()
 
+    async def on_market_event(symbol: str, kind: str) -> None:
+        if not symbol:
+            return
+        try:
+            await signal_cache.schedule_refresh(symbol)
+        except Exception:
+            logger.debug(
+                "WS market event refresh failed for %s", symbol, exc_info=True
+            )
+        try:
+            await notify_scan(f"{symbol}:{kind}")
+        except Exception:
+            logger.debug(
+                "WS market event notify failed for %s", symbol, exc_info=True
+            )
+
     ws_state_lock = threading.Lock()
     ws_state = {"last": time.time(), "stale": False}
     closed_bar_lock = threading.Lock()
@@ -794,6 +865,7 @@ def run_agent_loop() -> None:
                 on_kline=_handle_ws_kline,
                 on_ticker=_handle_ws_ticker,
                 on_book_ticker=book_callback,
+                on_market_event=on_market_event,
                 on_stale=_note_ws_stale,
                 heartbeat_timeout=runtime_settings.max_ws_gap_before_rest,
                 server_time_sync_interval=runtime_settings.server_time_sync_interval,
@@ -837,6 +909,8 @@ def run_agent_loop() -> None:
     worker_pools = WorkerPools()
     guard_stop = threading.Event()
     scan_trigger = threading.Event()
+    attach_scan_event(scan_trigger)
+    _ensure_periodic_tick()
     scan_lock = threading.Lock()
     manual_cache_primes: dict[str, float] = {}
     guard_interval = float(os.getenv("GUARD_INTERVAL", "0.75"))
@@ -884,7 +958,7 @@ def run_agent_loop() -> None:
         except Exception as exc:
             logger.debug("News refresh task failed: %s", exc, exc_info=True)
 
-    def on_market_event(event: dict) -> None:
+    def handle_legacy_market_event(event: dict) -> None:
         try:
             event_type = str(event.get("type", ""))
             symbol = str(event.get("symbol", "")).upper()
@@ -914,7 +988,7 @@ def run_agent_loop() -> None:
     if _legacy_streams_enabled():
         market_stream = BinanceEventStream(
             symbols=["BTCUSDT"],
-            on_event=on_market_event,
+            on_event=handle_legacy_market_event,
             max_queue=runtime_settings.max_queue,
         )
         market_stream.start()
