@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
+
 import ws_price_bridge as bridge
 
 
@@ -77,3 +79,32 @@ def test_make_streams_can_filter_by_suffix():
     )
 
     assert streams == ["solbusd@ticker"]
+
+
+def test_ws_bridge_normalises_combined_base(monkeypatch):
+    monkeypatch.setenv("WS_BACKEND", "wsclient")
+    monkeypatch.setenv("WS_COMBINED_BASE", "wss://example.com/stream")
+    reloaded = importlib.reload(bridge)
+
+    try:
+        instance = reloaded.WSPriceBridge(["BTCUSDT"])
+
+        assert instance._combined_base == "wss://example.com/stream?streams="
+    finally:
+        monkeypatch.delenv("WS_BACKEND", raising=False)
+        monkeypatch.delenv("WS_COMBINED_BASE", raising=False)
+        importlib.reload(bridge)
+
+
+def test_wsclient_bridge_base_url_is_normalised_directly():
+    pytest.importorskip("websocket")
+    import ws_backend_client as backend
+    reloaded_client = importlib.reload(backend)
+
+    bridge_client = reloaded_client.WSClientBridge(
+        ["btcusdt@kline_1m"],
+        lambda _msg: None,
+        base_url="wss://example.com/stream",
+    )
+
+    assert bridge_client._base_url == "wss://example.com/stream?streams="
