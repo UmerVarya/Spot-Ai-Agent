@@ -628,10 +628,14 @@ class _WebsocketsPriceBridge:
                             "WS BRIDGE MARK v3 | protocol inspection failed (non-fatal)"
                         )
                     try:
+                        # Hard-disable ping/pong paths if present, but keep them awaitable
+                        async def _noop(*a, **k):
+                            return None
+
                         if hasattr(ws, "ping"):
-                            ws.ping = lambda *a, **k: None  # type: ignore[assignment]
+                            ws.ping = _noop
                         if hasattr(ws, "pong"):
-                            ws.pong = lambda *a, **k: None  # type: ignore[assignment]
+                            ws.pong = _noop
                         for name in (
                             "_ping_interval",
                             "_ping_timeout",
