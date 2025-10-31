@@ -130,9 +130,16 @@ def _chunk_stream_batches(
     batch_len = 0
     max_streams = max(1, min(200, int(max_streams or 1)))
     for raw in streams:
-        token = str(raw or "").strip().lower()
-        if not token:
+        token_raw = str(raw or "").strip()
+        if not token_raw:
             continue
+
+        if "@" in token_raw:
+            symbol, sep, suffix = token_raw.partition("@")
+            token = f"{symbol.lower()}{sep}{suffix}"
+        else:
+            token = token_raw.lower()
+
         token_len = len(token)
         if token_len > payload_limit:
             if log:
