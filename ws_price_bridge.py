@@ -452,10 +452,21 @@ class _WebsocketsPriceBridge:
                     "WSPriceBridge: symbol list too large (%d), truncating to 190 for Binance limit",
                     len(symbols),
                 )
-                truncated = symbols[:190]
+                truncated = list(symbols[:190])
+                replaced_shared = False
                 with self._symbols_lock:
-                    self._symbols = list(truncated)
-                symbols = truncated
+                    if self._symbols == symbols:
+                        self._symbols = truncated
+                        replaced_shared = True
+                if replaced_shared:
+                    symbols = truncated
+                else:
+                    # Another thread updated the subscription list while we were
+                    # preparing the truncation; respect the newer list instead of
+                    # overwriting it with a stale snapshot.
+                    symbols = self._current_symbols()
+                    if len(symbols) > 190:
+                        symbols = symbols[:190]
             if not symbols:
                 self._last_messages.clear()
                 await asyncio.sleep(1.0)
