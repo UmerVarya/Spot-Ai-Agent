@@ -2,7 +2,7 @@ import json
 import logging
 import threading
 import time
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 import websocket  # websocket-client
 
@@ -16,17 +16,34 @@ class WSClientBridge:
         self.streams = [s.strip().lower() for s in streams if s]
         self.on_message = on_message
         self._stop = False
-        self._thread = None
+        self._thread: Optional[threading.Thread] = None
+        self._app: Optional[websocket.WebSocketApp] = None
+        self._lock = threading.RLock()
 
     def start(self):
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop = False
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop = False
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
 
     def stop(self):
-        self._stop = True
+        with self._lock:
+            self._stop = True
+            try:
+                if self._app is not None:
+                    self._app.keep_running = False
+                    try:
+                        self._app.close()
+                    except Exception:
+                        pass
+            finally:
+                thread = self._thread
+                self._thread = None
+                self._app = None
+        if thread:
+            thread.join(timeout=5.0)
 
     def _run(self):
         backoff = 1.0
@@ -43,10 +60,10 @@ class WSClientBridge:
                     url,
                     on_message=lambda _ws, msg: self._on_msg(msg),
                     on_error=lambda _ws, err: LOG.warning("wsclient error: %s", err),
-                    on_close=lambda _ws, code, msg: LOG.info(
-                        "wsclient closed code=%s msg=%s", code, msg
-                    ),
+                    on_close=lambda _ws, code, msg: self._on_close(code, msg),
                 )
+                with self._lock:
+                    self._app = ws
                 ws.run_forever(
                     ping_interval=None,
                     ping_timeout=None,
@@ -56,6 +73,10 @@ class WSClientBridge:
                 )
             except Exception as e:
                 LOG.warning("wsclient exception: %s", e)
+            finally:
+                with self._lock:
+                    if self._app is ws:
+                        self._app = None
             if self._stop:
                 break
             time.sleep(backoff)
@@ -63,6 +84,9 @@ class WSClientBridge:
             LOG.info(
                 "WS BRIDGE MARK v3 | wsclient reconnecting backoff=%.1fs", backoff
             )
+        with self._lock:
+            if self._thread is threading.current_thread():
+                self._thread = None
 
     def _on_msg(self, msg: str):
         try:
@@ -70,3 +94,8 @@ class WSClientBridge:
                 self.on_message(msg)
         except Exception:
             LOG.exception("wsclient on_message error")
+
+    def _on_close(self, code, msg):
+        LOG.info("wsclient closed code=%s msg=%s", code, msg)
+        with self._lock:
+            self._app = None
