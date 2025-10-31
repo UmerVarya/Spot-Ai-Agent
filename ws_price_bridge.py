@@ -47,7 +47,7 @@ COMBINED_BASE = os.getenv(
 MAX_COMBINED_URL_LEN = max(512, int(os.getenv("BINANCE_MAX_URL_LEN", "1900")))
 MAX_CONNS = max(1, int(os.getenv("WS_MAX_CONNS", "4")))
 IDLE_RECV_TIMEOUT = max(10, int(os.getenv("WS_IDLE_RECV_TIMEOUT", "90")))
-WS_BACKEND = (os.getenv("WS_BACKEND", "websockets") or "websockets").strip().lower()
+WS_BACKEND = (os.getenv("WS_BACKEND", "wsclient") or "wsclient").strip().lower()
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +279,15 @@ class _WebsocketsPriceBridge:
 
         if self._thread and self._thread.is_alive():
             return
+        try:
+            stream_count = len(self._current_symbols())
+        except Exception:
+            stream_count = 0
+        self.logger.info(
+            "WS BRIDGE MARK v3 | WSPriceBridge: starting with %d streams | backend=%s",
+            stream_count,
+            "websockets",
+        )
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run_loop, name="binance-ws-bridge", daemon=True
@@ -971,7 +980,338 @@ if WS_BACKEND == "wsclient":
         )
         WSPriceBridge = _WebsocketsPriceBridge
     else:
-        WSPriceBridge = _WSClientBridge
+
+        class _WSClientPriceBridge:
+            """Threaded price bridge backed by websocket-client."""
+
+            def __init__(
+                self,
+                symbols: Iterable[str],
+                *,
+                kline_interval: str = "1m",
+                on_kline: Optional[KlineCallback] = None,
+                on_ticker: Optional[TickerCallback] = None,
+                on_book_ticker: Optional[BookTickerCallback] = None,
+                on_stale: Optional[Callable[[float], None]] = None,
+                heartbeat_timeout: float = 10.0,
+                server_time_sync_interval: float = 120.0,
+                max_retries: int = 10,
+            ) -> None:
+                self.logger = logger
+                self._symbols_lock = threading.RLock()
+                self._symbols: List[str] = _WebsocketsPriceBridge._normalise_symbols(symbols)
+                self._kline_interval = str(kline_interval or "1m").strip() or "1m"
+                self._on_kline = on_kline
+                self._on_ticker = on_ticker
+                self._on_book_ticker = on_book_ticker
+                self._on_stale = on_stale
+                self._heartbeat_timeout = max(5.0, float(heartbeat_timeout))
+                self._lock = threading.RLock()
+                self._stop = threading.Event()
+                self._clients: List[_WSClientBridge] = []
+                self._last_messages: Dict[int, float] = {}
+                self._heartbeat_thread: Optional[threading.Thread] = None
+                self._callback_lock = threading.Lock()
+                self._extra_callbacks: List[
+                    Callable[[str, str, Dict[str, Any]], None]
+                ] = []
+                self._running = False
+                self._combined_base = COMBINED_BASE
+
+            # ------------------------------------------------------------------
+            # Public API
+            # ------------------------------------------------------------------
+            def start(self) -> None:
+                with self._lock:
+                    if self._running:
+                        return
+                    symbols = self._current_symbols()
+                batches = self._build_batches(symbols)
+                stream_count = sum(len(batch) for batch in batches)
+                self.logger.info(
+                    "WS BRIDGE MARK v3 | WSPriceBridge: starting with %d streams | backend=%s",
+                    stream_count,
+                    "wsclient",
+                )
+                if not batches:
+                    self.logger.info(
+                        "WS BRIDGE MARK v3 | WSPriceBridge: no streams to subscribe; skipping connect."
+                    )
+                    return
+                clients: List[_WSClientBridge] = []
+                now = time.time()
+                for index, batch in enumerate(batches, start=1):
+                    if not batch:
+                        continue
+                    clients.append(
+                        _WSClientBridge(batch, self._make_handler(index))
+                    )
+                with self._lock:
+                    self._stop.clear()
+                    self._clients = clients
+                    self._last_messages = {
+                        index: now for index in range(1, len(clients) + 1)
+                    }
+                    self._running = bool(clients)
+                for client in clients:
+                    try:
+                        client.start()
+                    except Exception:
+                        self.logger.warning(
+                            "WS BRIDGE MARK v3 | wsclient start failed", exc_info=True
+                        )
+                with self._lock:
+                    if self._running and self._heartbeat_thread is None:
+                        self._heartbeat_thread = threading.Thread(
+                            target=self._heartbeat_loop,
+                            name="wsclient-heartbeat",
+                            daemon=True,
+                        )
+                        self._heartbeat_thread.start()
+
+            def stop(self, timeout: float = 3.0) -> None:
+                self._shutdown_clients(timeout=timeout, log=True)
+
+            def update_symbols(self, symbols: Iterable[str]) -> None:
+                normalised = self._normalise_symbols(symbols)
+                with self._symbols_lock:
+                    if normalised == self._symbols:
+                        return
+                    self._symbols = normalised
+                self._restart_clients()
+
+            def register_callback(
+                self, callback: Callable[[str, str, Dict[str, Any]], None]
+            ) -> None:
+                if not callable(callback):
+                    raise TypeError("callback must be callable")
+                with self._callback_lock:
+                    if callback in self._extra_callbacks:
+                        return
+                    had_callbacks = bool(self._extra_callbacks)
+                    self._extra_callbacks.append(callback)
+                if not had_callbacks and self._on_kline is None:
+                    self._restart_clients()
+
+            def unregister_callback(
+                self, callback: Callable[[str, str, Dict[str, Any]], None]
+            ) -> None:
+                with self._callback_lock:
+                    try:
+                        self._extra_callbacks.remove(callback)
+                        has_callbacks = bool(self._extra_callbacks)
+                    except ValueError:
+                        return
+                if not has_callbacks and self._on_kline is None:
+                    self._restart_clients()
+
+            @property
+            def symbols(self) -> List[str]:
+                return self._current_symbols()
+
+            # ------------------------------------------------------------------
+            # Internal helpers
+            # ------------------------------------------------------------------
+            def _restart_clients(self) -> None:
+                with self._lock:
+                    running = self._running
+                if not running:
+                    return
+                self._shutdown_clients(timeout=3.0, log=False)
+                self.start()
+
+            def _shutdown_clients(self, timeout: float, log: bool) -> None:
+                with self._lock:
+                    clients = list(self._clients)
+                    thread = self._heartbeat_thread
+                    self._clients = []
+                    self._heartbeat_thread = None
+                    self._running = False
+                    self._last_messages.clear()
+                    self._stop.set()
+                for client in clients:
+                    try:
+                        client.stop()
+                    except Exception:
+                        self.logger.debug(
+                            "WS BRIDGE MARK v3 | wsclient stop failed", exc_info=True
+                        )
+                if thread:
+                    thread.join(timeout=timeout)
+                if log:
+                    self.logger.info("WS BRIDGE MARK v3 | WSPriceBridge: stopped")
+
+            def _current_symbols(self) -> List[str]:
+                with self._symbols_lock:
+                    return list(self._symbols)
+
+            def _normalise_symbols(self, symbols: Iterable[str]) -> List[str]:
+                return _WebsocketsPriceBridge._normalise_symbols(symbols)
+
+            def _build_batches(self, symbols: Iterable[str]) -> List[List[str]]:
+                interval = (self._kline_interval or "1m").strip().lower() or "1m"
+                has_external_callbacks = self._has_external_callbacks()
+                want_kline = self._on_kline is not None or has_external_callbacks
+                want_ticker = self._on_ticker is not None
+                want_book = self._on_book_ticker is not None
+                streams = make_streams(
+                    symbols,
+                    kline_interval=interval,
+                    include_kline=want_kline,
+                    include_ticker=want_ticker,
+                    include_book=want_book,
+                    ticker_stream="ticker",
+                )
+                if not streams:
+                    return []
+                prefix = _streams_prefix(self._combined_base)
+                batches = list(
+                    _chunk_stream_batches(
+                        streams,
+                        max_streams=MAX_STREAMS_PER_COMBINED,
+                        max_url_len=MAX_COMBINED_URL_LEN,
+                        prefix=prefix,
+                        log=self.logger,
+                    )
+                )
+                if len(batches) > MAX_CONNS:
+                    self.logger.warning(
+                        "WS BRIDGE MARK v3 | too many url batches=%d | max_conns=%d | truncating",
+                        len(batches),
+                        MAX_CONNS,
+                    )
+                    batches = batches[:MAX_CONNS]
+                return [batch for batch in batches if batch]
+
+            def _make_handler(self, batch_index: int) -> Callable[[str], None]:
+                def _handler(msg: str, _idx: int = batch_index) -> None:
+                    self._handle_msg(msg, _idx)
+
+                return _handler
+
+            def _handle_msg(
+                self, raw: str, batch_index: Optional[int] = None
+            ) -> None:
+                if batch_index is not None:
+                    with self._lock:
+                        self._last_messages[batch_index] = time.time()
+                else:
+                    with self._lock:
+                        if self._last_messages:
+                            now = time.time()
+                            for key in list(self._last_messages.keys()):
+                                self._last_messages[key] = now
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    logger.debug("WS bridge received non-JSON payload")
+                    return
+                if not isinstance(obj, dict):
+                    return
+                data = obj.get("data", obj)
+                if not isinstance(data, dict):
+                    return
+                event = data.get("e")
+                if event == "kline":
+                    kline = data.get("k")
+                    if isinstance(kline, dict):
+                        self._dispatch_kline(kline)
+                    return
+                if event in ("24hrMiniTicker", "24hrTicker"):
+                    self._dispatch_ticker(data)
+                    return
+                if event == "bookTicker":
+                    self._dispatch_book_ticker(data)
+                    return
+                if "k" in data:
+                    kline = data.get("k")
+                    if isinstance(kline, dict):
+                        self._dispatch_kline(kline)
+
+            def _dispatch_kline(self, kline: Mapping[str, Any]) -> None:
+                symbol = str(kline.get("s") or "").upper()
+                interval = str(kline.get("i") or "")
+                if not symbol:
+                    return
+                payload = dict(kline)
+                if self._on_kline is not None:
+                    try:
+                        self._on_kline(symbol, interval, payload)
+                    except Exception:
+                        logger.exception("WS bridge kline callback failed for %s", symbol)
+                self._emit_callbacks(symbol, "kline", payload)
+
+            def _dispatch_ticker(self, payload: Mapping[str, Any]) -> None:
+                if self._on_ticker is None:
+                    return
+                symbol = str(payload.get("s") or "").upper()
+                if not symbol:
+                    return
+                try:
+                    self._on_ticker(symbol, dict(payload))
+                except Exception:
+                    logger.exception("WS bridge ticker callback failed for %s", symbol)
+
+            def _dispatch_book_ticker(self, payload: Mapping[str, Any]) -> None:
+                if self._on_book_ticker is None:
+                    return
+                symbol = str(payload.get("s") or "").upper()
+                if not symbol:
+                    return
+                try:
+                    self._on_book_ticker(symbol, dict(payload))
+                except Exception:
+                    logger.exception(
+                        "WS bridge book ticker callback failed for %s", symbol
+                    )
+
+            def _heartbeat_loop(self) -> None:
+                try:
+                    while not self._stop.wait(self._heartbeat_timeout / 2.0):
+                        with self._lock:
+                            if not self._running:
+                                continue
+                            last = dict(self._last_messages)
+                        if not last:
+                            continue
+                        now = time.time()
+                        gap = max(now - ts for ts in last.values())
+                        if gap >= self._heartbeat_timeout:
+                            self._notify_stale(gap)
+                finally:
+                    self.logger.debug(
+                        "WS BRIDGE MARK v3 | wsclient heartbeat loop exiting"
+                    )
+
+            def _notify_stale(self, gap: float) -> None:
+                callback = self._on_stale
+                if callback is None:
+                    return
+                try:
+                    callback(gap)
+                except Exception:
+                    logger.debug("WS stale callback failed", exc_info=True)
+
+            def _emit_callbacks(
+                self, symbol: str, event_type: str, payload: Mapping[str, Any]
+            ) -> None:
+                with self._callback_lock:
+                    callbacks = list(self._extra_callbacks)
+                if not callbacks:
+                    return
+                for callback in callbacks:
+                    try:
+                        callback(symbol, event_type, dict(payload))
+                    except Exception:
+                        logger.debug(
+                            "WS bridge external callback failed", exc_info=True
+                        )
+
+            def _has_external_callbacks(self) -> bool:
+                with self._callback_lock:
+                    return bool(self._extra_callbacks)
+
+        WSPriceBridge = _WSClientPriceBridge
 else:
     WSPriceBridge = _WebsocketsPriceBridge
 
