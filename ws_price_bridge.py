@@ -47,6 +47,7 @@ COMBINED_BASE = os.getenv(
 MAX_COMBINED_URL_LEN = max(512, int(os.getenv("BINANCE_MAX_URL_LEN", "1900")))
 MAX_CONNS = max(1, int(os.getenv("WS_MAX_CONNS", "4")))
 IDLE_RECV_TIMEOUT = max(10, int(os.getenv("WS_IDLE_RECV_TIMEOUT", "90")))
+WS_BACKEND = (os.getenv("WS_BACKEND", "websockets") or "websockets").strip().lower()
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +218,7 @@ TickerCallback = Callable[[str, Dict[str, Any]], None]
 BookTickerCallback = Callable[[str, Dict[str, Any]], None]
 
 
-class WSPriceBridge:
+class _WebsocketsPriceBridge:
     """Run Binance WebSocket streams and dispatch updates to callbacks."""
 
     def __init__(
@@ -235,7 +236,7 @@ class WSPriceBridge:
     ) -> None:
         self.logger = logger
         self.logger.warning(
-            "WS BRIDGE MARK v3 | file=%s | websockets_version=%s | connect_func=%s",
+            "WS BRIDGE MARK v3 | backend=websockets | file=%s | websockets_version=%s | connect_func=%s",
             __file__,
             WEBSOCKETS_VERSION,
             CONNECT_FUNC_PATH,
@@ -955,6 +956,20 @@ class WSPriceBridge:
             normalised.append(token)
         return normalised
 
+
+if WS_BACKEND == "wsclient":
+    try:
+        from ws_backend_client import WSClientBridge as _WSClientBridge
+    except Exception:  # pragma: no cover - optional dependency
+        logger.warning(
+            "WS BRIDGE MARK v3 | wsclient backend unavailable; falling back to websockets",
+            exc_info=True,
+        )
+        WSPriceBridge = _WebsocketsPriceBridge
+    else:
+        WSPriceBridge = _WSClientBridge
+else:
+    WSPriceBridge = _WebsocketsPriceBridge
 
 __all__ = [
     "WSPriceBridge",
