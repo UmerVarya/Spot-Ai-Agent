@@ -31,6 +31,7 @@ COMBINED_BASE = os.getenv(
     "WS_COMBINED_BASE",
     "wss://stream.binance.com:9443/stream?streams=",
 )
+MAX_COMBINED_URL_LEN = max(512, int(os.getenv("BINANCE_MAX_URL_LEN", "1900")))
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,65 @@ def _stream_names(
     return names
 
 
+def _streams_prefix(base: str) -> str:
+    base = (base or "").rstrip("?")
+    if "streams=" in base:
+        if base.endswith("streams"):
+            return base + "="
+        return base
+    separator = "&" if "?" in base else "?"
+    return f"{base}{separator}streams="
+
+
+def _chunk_stream_batches(
+    streams: Iterable[str],
+    *,
+    max_streams: int,
+    max_url_len: int,
+    prefix: str,
+    log: Optional[logging.Logger] = None,
+) -> Iterable[List[str]]:
+    prefix_len = len(prefix)
+    payload_limit = max_url_len - prefix_len
+    if payload_limit <= 0:
+        if log:
+            log.error(
+                "WS BRIDGE MARK v3 | prefix too long for url limit | prefix_len=%d | max=%d",
+                prefix_len,
+                max_url_len,
+            )
+        return []
+
+    batch: List[str] = []
+    batch_len = 0
+    max_streams = max(1, min(200, int(max_streams or 1)))
+    for raw in streams:
+        token = str(raw or "").strip().lower()
+        if not token:
+            continue
+        token_len = len(token)
+        if token_len > payload_limit:
+            if log:
+                log.error(
+                    "WS BRIDGE MARK v3 | stream token exceeds url limit | token=%s | len=%d | limit=%d",
+                    token,
+                    token_len,
+                    payload_limit,
+                )
+            continue
+        projected = batch_len + token_len if not batch else batch_len + token_len + 1
+        if len(batch) >= max_streams or projected > payload_limit:
+            if batch:
+                yield batch
+            batch = [token]
+            batch_len = token_len
+        else:
+            batch.append(token)
+            batch_len = projected
+    if batch:
+        yield batch
+
+
 def _combined_urls(
     symbols: Iterable[str],
     *,
@@ -71,15 +131,17 @@ def _combined_urls(
 
     limit = MAX_STREAMS_PER_COMBINED if chunk is None else int(chunk)
     limit = max(1, min(200, limit))
+    prefix = _streams_prefix(COMBINED_BASE)
 
-    base = (
-        COMBINED_BASE.rstrip("?") + "?streams="
-        if "?" not in COMBINED_BASE
-        else COMBINED_BASE + ""
-    )
     return [
-        base + "/".join(streams[i : i + limit])
-        for i in range(0, len(streams), limit)
+        prefix + "/".join(batch)
+        for batch in _chunk_stream_batches(
+            streams,
+            max_streams=limit,
+            max_url_len=MAX_COMBINED_URL_LEN,
+            prefix=prefix,
+            log=logger,
+        )
     ]
 
 
@@ -393,8 +455,10 @@ class WSPriceBridge:
                 "WS BRIDGE MARK v3 | streams=%d | chunk=200", len(streams)
             )
             urls = list(self._combined_urls(streams, chunk=200))
-            for _ in urls:
-                self.logger.warning("WS BRIDGE MARK v3 | combined url built")
+            self.logger.warning(
+                "WS BRIDGE MARK v3 | combined urls=%d | mode=kline_1m",
+                len(urls),
+            )
             return urls
 
         names: List[str] = []
@@ -414,25 +478,35 @@ class WSPriceBridge:
             "WS BRIDGE MARK v3 | streams=%d | chunk=200", len(names)
         )
         urls = list(self._combined_urls(names, chunk=200))
-        for _ in urls:
-            self.logger.warning("WS BRIDGE MARK v3 | combined url built")
+        self.logger.warning(
+            "WS BRIDGE MARK v3 | combined urls=%d | mode=mix",
+            len(urls),
+        )
         return urls
 
     def _combined_urls(self, streams: List[str], chunk: int = 200) -> Iterable[str]:
         if not streams:
-            return
+            return []
         try:
             chunk = int(chunk)
         except (TypeError, ValueError):
             chunk = 200
         chunk = max(1, min(200, chunk))
-        base = (
-            self._combined_base.rstrip("?") + "?streams="
-            if "?" not in self._combined_base
-            else self._combined_base + ""
-        )
-        for i in range(0, len(streams), chunk):
-            yield base + "/".join(streams[i : i + chunk])
+        prefix = _streams_prefix(self._combined_base)
+        for batch in _chunk_stream_batches(
+            streams,
+            max_streams=chunk,
+            max_url_len=MAX_COMBINED_URL_LEN,
+            prefix=prefix,
+            log=self.logger,
+        ):
+            url = prefix + "/".join(batch)
+            self.logger.warning(
+                "WS BRIDGE MARK v3 | combined url built | batch_size=%d | url_len=%d",
+                len(batch),
+                len(url),
+            )
+            yield url
 
     async def _run_connection(self, url: str, batch_index: int, total: int) -> None:
         backoff = 1.0
@@ -448,44 +522,98 @@ class WSPriceBridge:
                 url,
                 connect_kwargs,
             )
+            payload = ""
+            if "streams=" in url:
+                payload = url.split("streams=", 1)[1]
+            stream_count = len([token for token in payload.split("/") if token]) or 1
+            sleep_delay = 0.0
+            should_break = False
             try:
                 async with websockets.connect(url, **connect_kwargs) as ws:
                     self._ws = ws
-                    self.logger.info("WSPriceBridge: connected")
                     backoff = 1.0
                     self._last_messages[batch_index] = time.time()
+                    self.logger.warning(
+                        "WS BRIDGE MARK v3 | connected | batch=%d/%d | streams=%d | url_len=%d",
+                        batch_index,
+                        total,
+                        stream_count,
+                        len(url),
+                    )
                     async for raw in ws:
                         self._on_message(raw, batch_index)
             except asyncio.CancelledError:
                 raise
             except websockets.exceptions.ConnectionClosedError as e:
                 code = getattr(e, "code", None)
-                self.logger.warning(
-                    "WSPriceBridge: connection closed (code=%s) → will reconnect",
-                    code,
-                )
-                await asyncio.sleep(10 if code == 1008 else 3)
+                reason = getattr(e, "reason", "") or ""
+                reason_lower = str(reason).lower()
+                if code == 1008 and any(term in reason_lower for term in ("pong", "ping")):
+                    sleep_delay = max(3.0, min(backoff, 6.0))
+                    self.logger.warning(
+                        "WS BRIDGE MARK v3 | pong timeout close | batch=%d/%d | code=1008 | delay=%.1fs | reason=%s",
+                        batch_index,
+                        total,
+                        sleep_delay,
+                        reason,
+                    )
+                    backoff = min(max(backoff, 1.0) * 1.5, 15.0)
+                elif code == 1008:
+                    sleep_delay = max(10.0, backoff)
+                    self.logger.warning(
+                        "WS BRIDGE MARK v3 | policy close | batch=%d/%d | code=1008 | delay=%.1fs | reason=%s",
+                        batch_index,
+                        total,
+                        sleep_delay,
+                        reason,
+                    )
+                    backoff = min(max(sleep_delay, 5.0) * 1.2, 30.0)
+                else:
+                    sleep_delay = max(3.0, min(backoff, 5.0))
+                    self.logger.warning(
+                        "WS BRIDGE MARK v3 | closed | batch=%d/%d | code=%s | delay=%.1fs | reason=%s",
+                        batch_index,
+                        total,
+                        code,
+                        sleep_delay,
+                        reason,
+                    )
+                    backoff = min(max(backoff * 1.7, 1.0), 30.0)
             except Exception:
                 self.logger.warning(
-                    "WSPriceBridge: connection error on batch %d/%d; reconnecting",
+                    "WS BRIDGE MARK v3 | connection error | batch=%d/%d",
                     batch_index,
                     total,
                     exc_info=True,
                 )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
+                sleep_delay = backoff
+                backoff = min(backoff * 1.7, 30.0)
             else:
                 if self._stop.is_set() or self._resubscribe.is_set():
-                    break
-                self.logger.info(
-                    "WSPriceBridge: connection closed for batch %d/%d; reconnecting",
-                    batch_index,
-                    total,
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
+                    should_break = True
+                else:
+                    sleep_delay = backoff
+                    self.logger.warning(
+                        "WS BRIDGE MARK v3 | socket ended | batch=%d/%d | reconnect in %.1fs",
+                        batch_index,
+                        total,
+                        sleep_delay,
+                    )
+                    backoff = min(backoff * 1.7, 30.0)
             finally:
                 self._ws = None
+
+            if should_break:
+                break
+
+            if sleep_delay > 0:
+                await asyncio.sleep(sleep_delay)
+            self.logger.warning(
+                "WS BRIDGE MARK v3 | retrying connection | batch=%d/%d | backoff=%.1fs",
+                batch_index,
+                total,
+                backoff,
+            )
 
     def _initialise_batch_heartbeats(self, total_batches: int) -> None:
         if total_batches <= 0:
