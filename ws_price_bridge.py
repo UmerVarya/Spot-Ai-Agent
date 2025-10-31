@@ -10,6 +10,7 @@ normalises symbols to upper case for downstream consumers.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -232,6 +233,7 @@ class _WebsocketsPriceBridge:
         on_kline: Optional[KlineCallback] = None,
         on_ticker: Optional[TickerCallback] = None,
         on_book_ticker: Optional[BookTickerCallback] = None,
+        on_market_event: Optional[Callable[[str, str], Any]] = None,
         on_stale: Optional[Callable[[float], None]] = None,
         heartbeat_timeout: float = 10.0,
         server_time_sync_interval: float = 120.0,
@@ -251,6 +253,7 @@ class _WebsocketsPriceBridge:
         self._on_kline = on_kline
         self._on_ticker = on_ticker
         self._on_book_ticker = on_book_ticker
+        self._on_market_event = on_market_event
         self._on_stale = on_stale
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -259,6 +262,8 @@ class _WebsocketsPriceBridge:
         self._symbols_lock = threading.Lock()
         self._heartbeat_timeout = max(5.0, float(heartbeat_timeout))
         self._last_messages: Dict[int, float] = {}
+        self._last_ticker_fire: Dict[str, float] = {}
+        self._ticker_min_interval = 0.75
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._time_sync_interval = max(30.0, float(server_time_sync_interval))
         self._time_sync_stop = threading.Event()
@@ -839,17 +844,23 @@ class _WebsocketsPriceBridge:
             except Exception:  # pragma: no cover - callback safety
                 logger.exception("WS bridge kline callback failed for %s", symbol)
         self._emit_callbacks(symbol, "kline", payload)
+        if payload.get("x"):
+            self._schedule_market_event(symbol, "kline_close")
 
     def _dispatch_ticker(self, payload: Mapping[str, Any]) -> None:
-        if self._on_ticker is None:
-            return
         symbol = str(payload.get("s") or "").upper()
         if not symbol:
             return
-        try:
-            self._on_ticker(symbol, dict(payload))
-        except Exception:  # pragma: no cover - callback safety
-            logger.exception("WS bridge ticker callback failed for %s", symbol)
+        if self._on_ticker is not None:
+            try:
+                self._on_ticker(symbol, dict(payload))
+            except Exception:  # pragma: no cover - callback safety
+                logger.exception("WS bridge ticker callback failed for %s", symbol)
+        now = time.monotonic()
+        last = self._last_ticker_fire.get(symbol, 0.0)
+        if now - last >= self._ticker_min_interval:
+            self._last_ticker_fire[symbol] = now
+            self._schedule_market_event(symbol, "ticker")
 
     def _dispatch_book_ticker(self, payload: Mapping[str, Any]) -> None:
         if self._on_book_ticker is None:
@@ -921,6 +932,44 @@ class _WebsocketsPriceBridge:
             callback(gap)
         except Exception:
             logger.debug("WS stale callback failed", exc_info=True)
+
+    async def _invoke_market_event(self, symbol: str, kind: str) -> None:
+        callback = self._on_market_event
+        if callback is None or not symbol:
+            return
+        try:
+            result = callback(symbol, kind)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug(
+                "WS bridge market event callback failed for %s", symbol, exc_info=True
+            )
+
+    def _schedule_market_event(self, symbol: str, kind: str) -> None:
+        callback = self._on_market_event
+        if callback is None or not symbol:
+            return
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            try:
+                result = callback(symbol, kind)
+                if inspect.isawaitable(result):
+                    asyncio.run(result)
+            except Exception:
+                logger.debug(
+                    "WS bridge market event callback failed for %s", symbol, exc_info=True
+                )
+            return
+        coro = self._invoke_market_event(symbol, kind)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            loop.create_task(coro)
+        else:
+            asyncio.run_coroutine_threadsafe(coro, loop)
 
     def _time_sync_loop(self) -> None:
         while not self._time_sync_stop.is_set():
@@ -995,6 +1044,7 @@ if WS_BACKEND == "wsclient":
                 on_kline: Optional[KlineCallback] = None,
                 on_ticker: Optional[TickerCallback] = None,
                 on_book_ticker: Optional[BookTickerCallback] = None,
+                on_market_event: Optional[Callable[[str, str], Any]] = None,
                 on_stale: Optional[Callable[[float], None]] = None,
                 heartbeat_timeout: float = 10.0,
                 server_time_sync_interval: float = 120.0,
@@ -1007,6 +1057,7 @@ if WS_BACKEND == "wsclient":
                 self._on_kline = on_kline
                 self._on_ticker = on_ticker
                 self._on_book_ticker = on_book_ticker
+                self._on_market_event = on_market_event
                 self._on_stale = on_stale
                 self._heartbeat_timeout = max(5.0, float(heartbeat_timeout))
                 self._lock = threading.RLock()
@@ -1020,6 +1071,8 @@ if WS_BACKEND == "wsclient":
                 ] = []
                 self._running = False
                 self._combined_base = _streams_prefix(COMBINED_BASE)
+                self._last_ticker_fire: Dict[str, float] = {}
+                self._ticker_min_interval = 0.75
 
             # ------------------------------------------------------------------
             # Public API
@@ -1247,17 +1300,23 @@ if WS_BACKEND == "wsclient":
                     except Exception:
                         logger.exception("WS bridge kline callback failed for %s", symbol)
                 self._emit_callbacks(symbol, "kline", payload)
+                if payload.get("x"):
+                    self._fire_market_event(symbol, "kline_close")
 
             def _dispatch_ticker(self, payload: Mapping[str, Any]) -> None:
-                if self._on_ticker is None:
-                    return
                 symbol = str(payload.get("s") or "").upper()
                 if not symbol:
                     return
-                try:
-                    self._on_ticker(symbol, dict(payload))
-                except Exception:
-                    logger.exception("WS bridge ticker callback failed for %s", symbol)
+                if self._on_ticker is not None:
+                    try:
+                        self._on_ticker(symbol, dict(payload))
+                    except Exception:
+                        logger.exception("WS bridge ticker callback failed for %s", symbol)
+                now = time.monotonic()
+                last = self._last_ticker_fire.get(symbol, 0.0)
+                if now - last >= self._ticker_min_interval:
+                    self._last_ticker_fire[symbol] = now
+                    self._fire_market_event(symbol, "ticker")
 
             def _dispatch_book_ticker(self, payload: Mapping[str, Any]) -> None:
                 if self._on_book_ticker is None:
@@ -1298,6 +1357,19 @@ if WS_BACKEND == "wsclient":
                     callback(gap)
                 except Exception:
                     logger.debug("WS stale callback failed", exc_info=True)
+
+            def _fire_market_event(self, symbol: str, kind: str) -> None:
+                callback = self._on_market_event
+                if callback is None or not symbol:
+                    return
+                try:
+                    result = callback(symbol, kind)
+                    if inspect.isawaitable(result):
+                        asyncio.run(result)
+                except Exception:
+                    logger.debug(
+                        "WS bridge market event callback failed for %s", symbol, exc_info=True
+                    )
 
             def _emit_callbacks(
                 self, symbol: str, event_type: str, payload: Mapping[str, Any]
