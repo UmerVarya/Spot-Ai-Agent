@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import threading
 import time
 from typing import Callable, List, Optional
@@ -20,6 +21,54 @@ def _normalise_base_url(base: str) -> str:
         return candidate
     separator = "&" if "?" in candidate else "?"
     return f"{candidate}{separator}streams="
+
+
+def _get_env_float(*names: str) -> Optional[float]:
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _run_forever_kwargs() -> dict:
+    """Build kwargs for websocket-client's ``run_forever`` helper.
+
+    The websocket-client library can drop idle connections if heartbeat pings
+    are not sent. Recent production logs showed repeated ``Read loop has been
+    closed`` errors which usually indicate the remote side closed the
+    connection after prolonged inactivity. Enabling periodic pings keeps the
+    transport alive and allows the automatic reconnect logic in this module to
+    operate less frequently.
+
+    Values can be customised with ``WSCLIENT_PING_INTERVAL`` /
+    ``WSCLIENT_PING_TIMEOUT``. For backwards compatibility we also honour the
+    generic ``WS_PING_INTERVAL`` / ``WS_PING_TIMEOUT`` variables that are used
+    by the async websockets backend.
+    """
+
+    ping_interval = _get_env_float("WSCLIENT_PING_INTERVAL", "WS_PING_INTERVAL")
+    if ping_interval is not None and ping_interval <= 0:
+        return {}
+
+    if ping_interval is None:
+        ping_interval = 20.0
+    ping_interval = max(1.0, ping_interval)
+
+    timeout_value = _get_env_float("WSCLIENT_PING_TIMEOUT", "WS_PING_TIMEOUT")
+    if timeout_value is None or timeout_value <= 0:
+        ping_timeout = max(1.0, min(ping_interval / 2.0, 10.0))
+    else:
+        ping_timeout = max(1.0, min(timeout_value, ping_interval))
+
+    return {
+        "ping_interval": ping_interval,
+        "ping_timeout": ping_timeout,
+    }
 
 
 class WSClientBridge:
@@ -96,13 +145,13 @@ class WSClientBridge:
                 )
                 with self._lock:
                     self._app = ws
-                ws.run_forever(
-                    ping_interval=None,
-                    ping_timeout=None,
-                    origin=None,
-                    http_proxy_host=None,
-                    http_proxy_port=None,
-                )
+                run_kwargs = {
+                    "origin": None,
+                    "http_proxy_host": None,
+                    "http_proxy_port": None,
+                }
+                run_kwargs.update(_run_forever_kwargs())
+                ws.run_forever(**run_kwargs)
             except Exception as e:
                 LOG.warning("wsclient exception: %s", e)
             finally:
