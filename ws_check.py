@@ -1,5 +1,6 @@
 import asyncio, json
 from os import getenv
+from websockets import __version__ as WEBSOCKETS_VERSION
 from websockets.legacy.client import connect as ws_connect
 
 DEFAULT_STREAM = "wss://stream.binance.com:9443/stream?streams=!miniTicker@arr"
@@ -19,6 +20,13 @@ async def main() -> None:
         extra_headers=[("User-Agent", "Mozilla/5.0"), ("Accept-Encoding", "identity")],
         compression=None,
     ) as ws:
+        print(
+            "Connected.",
+            "websockets",
+            WEBSOCKETS_VERSION,
+            "connect_func",
+            ws_connect.__module__,
+        )
         print("Protocol:", ws.__class__.__module__, ws.__class__.__name__)
         try:
             if hasattr(ws, "ping"):
@@ -27,7 +35,6 @@ async def main() -> None:
                 ws.pong = lambda *a, **k: None
         except Exception:
             pass
-        print("Connected.")
         for i in range(3):
             msg = await asyncio.wait_for(ws.recv(), timeout=IDLE_RECV_TIMEOUT)
             try:
