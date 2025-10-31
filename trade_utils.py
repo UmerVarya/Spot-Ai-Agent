@@ -990,6 +990,13 @@ def get_top_symbols(limit: int = 30) -> list:
     tickers = client.get_ticker()
     sorted_tickers = sorted(tickers, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
     symbols = [x['symbol'] for x in sorted_tickers if x['symbol'].endswith("USDT") and not x['symbol'].endswith("BUSD")]
+    exclude = {
+        token.strip().upper()
+        for token in os.getenv("SYMBOL_EXCLUDE", "").split(",")
+        if token.strip()
+    }
+    if exclude:
+        symbols = [sym for sym in symbols if sym.upper() not in exclude]
     return symbols[:limit]
 
 def _extract_trade_returns(df: pd.DataFrame) -> pd.Series:
