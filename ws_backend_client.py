@@ -12,13 +12,20 @@ BINANCE_WS_BASE = "wss://stream.binance.com:9443/stream?streams="
 
 
 class WSClientBridge:
-    def __init__(self, streams: List[str], on_message: Callable[[str], None]):
+    def __init__(
+        self,
+        streams: List[str],
+        on_message: Callable[[str], None],
+        *,
+        base_url: str = BINANCE_WS_BASE,
+    ):
         self.streams = [s.strip().lower() for s in streams if s]
         self.on_message = on_message
         self._stop = False
         self._thread: Optional[threading.Thread] = None
         self._app: Optional[websocket.WebSocketApp] = None
         self._lock = threading.RLock()
+        self._base_url = (base_url or BINANCE_WS_BASE).strip() or BINANCE_WS_BASE
 
     def start(self):
         with self._lock:
@@ -61,7 +68,7 @@ class WSClientBridge:
 
     def _run(self):
         backoff = 1.0
-        url = BINANCE_WS_BASE + "/".join(self.streams)
+        url = self._base_url + "/".join(self.streams)
         while not self._stop:
             ws = None
             try:
