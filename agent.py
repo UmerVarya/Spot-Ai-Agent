@@ -389,6 +389,13 @@ SIGNAL_CACHE_PRIME_COOLDOWN = float(os.getenv("SIGNAL_CACHE_PRIME_COOLDOWN", "30
 SIGNAL_CACHE_PRIME_TIMEOUT = float(os.getenv("SIGNAL_CACHE_PRIME_TIMEOUT", "15"))
 
 
+def _legacy_streams_enabled() -> bool:
+    """Return True when legacy Binance websocket threads are allowed."""
+
+    flag = (os.getenv("DISABLE_LEGACY_BINANCE_WS", "1") or "1").strip().lower()
+    return flag not in {"1", "true", "yes", "on"}
+
+
 def _prepare_signal_cache_params() -> tuple[float, float, int, float, float]:
     """Resolve environment-tunable parameters for the signal cache."""
 
@@ -805,7 +812,7 @@ def run_agent_loop() -> None:
     else:
         ws_bridge = None
     user_stream_bridge: Optional[UserDataStreamBridge]
-    if ENABLE_USER_STREAM:
+    if ENABLE_USER_STREAM and _legacy_streams_enabled():
         def _handle_user_stream(payload: Dict[str, Any]) -> None:
             try:
                 process_user_stream_event(payload)
@@ -820,6 +827,11 @@ def run_agent_loop() -> None:
             user_stream_bridge = None
     else:
         user_stream_bridge = None
+        if ENABLE_USER_STREAM:
+            logger.info(
+                "Binance user data stream disabled (WSPriceBridge is authoritative)."
+                " Set DISABLE_LEGACY_BINANCE_WS=0 to re-enable at your own risk."
+            )
 
     state = CentralState()
     worker_pools = WorkerPools()
@@ -898,10 +910,20 @@ def run_agent_loop() -> None:
         except Exception:
             logger.exception("Failed to process market event: %s", event)
 
-    market_stream = BinanceEventStream(
-        symbols=["BTCUSDT"], on_event=on_market_event, max_queue=runtime_settings.max_queue
-    )
-    market_stream.start()
+    market_stream: Optional[BinanceEventStream]
+    if _legacy_streams_enabled():
+        market_stream = BinanceEventStream(
+            symbols=["BTCUSDT"],
+            on_event=on_market_event,
+            max_queue=runtime_settings.max_queue,
+        )
+        market_stream.start()
+    else:
+        market_stream = None
+        logger.info(
+            "Legacy Binance market stream disabled (WSPriceBridge provides price data)."
+            " Set DISABLE_LEGACY_BINANCE_WS=0 to re-enable at your own risk."
+        )
 
     def guard_loop() -> None:
         nonlocal last_rest_backfill
@@ -923,12 +945,13 @@ def run_agent_loop() -> None:
                             scan_trigger.set()
                 except Exception as monitor_exc:
                     logger.debug("News monitor state unavailable: %s", monitor_exc, exc_info=True)
-            market_stream.ensure_alive()
-            if not market_stream.is_connected():
-                tracked = list(state.tracked_symbols())
-                if not tracked:
-                    tracked = ["BTCUSDT"]
-                market_stream.poll_rest(tracked)
+            if market_stream is not None:
+                market_stream.ensure_alive()
+                if not market_stream.is_connected():
+                    tracked = list(state.tracked_symbols())
+                    if not tracked:
+                        tracked = ["BTCUSDT"]
+                    market_stream.poll_rest(tracked)
             if ENABLE_WS_BRIDGE and REST_BACKFILL_ENABLED:
                 with ws_state_lock:
                     gap = now - ws_state["last"]
@@ -1147,7 +1170,7 @@ def run_agent_loop() -> None:
                 top_symbols = [sym for sym in top_symbols if sym.upper() == "BTCUSDT"]
                 if macro_reason_text:
                     logger.warning("Macro gating (%s). Scanning only BTCUSDT.", macro_reason_text)
-            if top_symbols:
+            if top_symbols and market_stream is not None:
                 market_stream.set_symbols(top_symbols)
             session = get_market_session()
             if top_symbols:
