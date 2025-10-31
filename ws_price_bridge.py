@@ -446,6 +446,16 @@ class _WebsocketsPriceBridge:
         while not self._stop.is_set():
             self._resubscribe.clear()
             symbols = self._current_symbols()
+            # 🧠 Safety: Don't oversubscribe Binance's combined stream cap
+            if len(symbols) > 190:
+                logger.warning(
+                    "WSPriceBridge: symbol list too large (%d), truncating to 190 for Binance limit",
+                    len(symbols),
+                )
+                truncated = symbols[:190]
+                with self._symbols_lock:
+                    self._symbols = list(truncated)
+                symbols = truncated
             if not symbols:
                 self._last_messages.clear()
                 await asyncio.sleep(1.0)
@@ -739,15 +749,17 @@ class _WebsocketsPriceBridge:
                         reason,
                     )
                     backoff = min(max(backoff * 1.7, 1.0), 30.0)
-            except Exception:
+            except Exception as e:
                 self.logger.warning(
-                    "WS BRIDGE MARK v3 | connection error | batch=%d/%d",
+                    "WS BRIDGE MARK v3 | connection error | batch=%d/%d | err=%s",
                     batch_index,
                     total,
-                    exc_info=True,
+                    e,
                 )
-                sleep_delay = backoff
+                logger.warning("WS reconnect loop error: %s", e)
                 backoff = min(backoff * 1.7, 30.0)
+                await asyncio.sleep(5.0)
+                continue
             else:
                 if self._stop.is_set() or self._resubscribe.is_set():
                     should_break = True
