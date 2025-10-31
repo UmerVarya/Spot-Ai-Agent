@@ -43,14 +43,15 @@ def make_streams(
     include_ticker: bool = True,
     include_book: bool = False,
     ticker_stream: str = "ticker",
-    quote_suffix: Optional[str] = "usdt",
+    quote_suffix: Optional[str] = None,
 ) -> List[str]:
     """Return a de-duplicated list of Binance stream names for ``symbols``.
 
     ``symbols`` are normalised to lower case with leading/trailing whitespace
-    removed.  Only pairs ending in ``quote_suffix`` (``"usdt"`` by default)
-    are kept.  Stream names are emitted in a stable order with duplicates
-    removed while preserving the first occurrence.
+    removed.  If ``quote_suffix`` is provided, only pairs ending in that suffix
+    are kept; by default all symbols are accepted.  Stream names are emitted in
+    a stable order with duplicates removed while preserving the first
+    occurrence.
     """
 
     interval = str(kline_interval or "1m").strip().lower() or "1m"
