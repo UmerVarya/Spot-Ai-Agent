@@ -11,6 +11,17 @@ LOG = logging.getLogger("WSClientBridge")
 BINANCE_WS_BASE = "wss://stream.binance.com:9443/stream?streams="
 
 
+def _normalise_base_url(base: str) -> str:
+    candidate = (base or BINANCE_WS_BASE).strip() or BINANCE_WS_BASE
+    candidate = candidate.rstrip("?")
+    if "streams=" in candidate:
+        if candidate.endswith("streams"):
+            return candidate + "="
+        return candidate
+    separator = "&" if "?" in candidate else "?"
+    return f"{candidate}{separator}streams="
+
+
 class WSClientBridge:
     def __init__(
         self,
@@ -25,7 +36,7 @@ class WSClientBridge:
         self._thread: Optional[threading.Thread] = None
         self._app: Optional[websocket.WebSocketApp] = None
         self._lock = threading.RLock()
-        self._base_url = (base_url or BINANCE_WS_BASE).strip() or BINANCE_WS_BASE
+        self._base_url = _normalise_base_url(base_url)
 
     def start(self):
         with self._lock:

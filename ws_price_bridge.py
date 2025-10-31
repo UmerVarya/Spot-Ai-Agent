@@ -267,7 +267,7 @@ class _WebsocketsPriceBridge:
         ] = []
         self._tasks: List[asyncio.Task] = []
         self._urls: List[str] = []
-        self._combined_base = COMBINED_BASE
+        self._combined_base = _streams_prefix(COMBINED_BASE)
         self._ws: Optional[WebSocketClientProtocol] = None
         self._conn_lock: Optional[asyncio.Lock] = None
 
@@ -1016,7 +1016,7 @@ if WS_BACKEND == "wsclient":
                     Callable[[str, str, Dict[str, Any]], None]
                 ] = []
                 self._running = False
-                self._combined_base = COMBINED_BASE
+                self._combined_base = _streams_prefix(COMBINED_BASE)
 
             # ------------------------------------------------------------------
             # Public API
