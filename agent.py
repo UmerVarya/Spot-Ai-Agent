@@ -13,6 +13,44 @@ computed ``allowed_new`` value was being treated as a correlation threshold,
 resulting in at most two signals being selected regardless of available slots.
 """
 
+# ---- kill legacy python-binance websockets globally when disabled ----
+import os
+
+if os.getenv("DISABLE_LEGACY_BINANCE_WS", "0") == "1":
+    try:
+        import binance.streams as _bn_streams
+
+        class _NoopTWM:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self, *a, **k):
+                pass
+
+            def stop(self, *a, **k):
+                pass
+
+            def join(self, *a, **k):
+                pass
+
+            # return dummy "conn_key" so callers don't crash
+            def start_kline_socket(self, *a, **k):
+                return None
+
+            def start_miniticker_socket(self, *a, **k):
+                return None
+
+            def start_symbol_ticker_socket(self, *a, **k):
+                return None
+
+            def start_user_socket(self, *a, **k):
+                return None
+
+        _bn_streams.ThreadedWebsocketManager = _NoopTWM
+    except Exception:
+        pass
+# ----------------------------------------------------------------------
+
 import quiet_logging  # silences Binance/RTSC spam globally
 
 from log_utils import setup_logger, LOG_FILE
@@ -21,7 +59,6 @@ logger = setup_logger(__name__)
 
 import math
 import time
-import os
 import sys
 import asyncio
 import random
