@@ -283,7 +283,6 @@ try:
 except Exception as e:
     logger.exception("WS bootstrap failed: %s", e)
 # --- end WS bootstrap ---
-import json
 from fetch_news import (
     fetch_news,  # noqa: F401
     run_news_fetcher,  # noqa: F401
@@ -303,6 +302,9 @@ from trade_utils import (
     compute_performance_metrics,
     summarise_technical_score,
     get_order_book,
+    load_symbol_scores,
+    save_symbol_scores,
+    SYMBOL_SCORES_FILE,
 )
 from trade_manager import (
     manage_trades,
@@ -699,10 +701,12 @@ def run_agent_loop() -> None:
     if RUN_DASHBOARD:
         threading.Thread(target=run_streamlit, daemon=True).start()
     # Ensure symbol_scores.json exists
-    if not os.path.exists("symbol_scores.json"):
-        with open("symbol_scores.json", "w") as f:
-            json.dump({}, f)
-        logger.info("Initialized empty symbol_scores.json")
+    try:
+        if not os.path.exists(SYMBOL_SCORES_FILE):
+            save_symbol_scores({})
+            logger.info("Initialized empty symbol_scores.json")
+    except Exception:
+        logger.debug("Failed to initialise symbol_scores store", exc_info=True)
     (
         refresh_interval,
         stale_mult,
@@ -801,6 +805,10 @@ def run_agent_loop() -> None:
     time.sleep(1.0)
     signal_cache.flush_pending()
 
+    guard_stop = threading.Event()
+    scan_trigger = threading.Event()
+    attach_scan_event(scan_trigger)
+
     async def on_market_event(symbol: str, kind: str) -> None:
         if not symbol:
             return
@@ -809,6 +817,19 @@ def run_agent_loop() -> None:
         except Exception:
             logger.debug(
                 "WS market event refresh failed for %s", symbol, exc_info=True
+            )
+        if kind == "kline_close":
+            try:
+                dispatch_schedule_refresh(signal_cache, symbol)
+            except Exception:
+                logger.debug(
+                    "WS market event dispatch failed for %s", symbol, exc_info=True
+                )
+        try:
+            scan_trigger.set()
+        except Exception:
+            logger.debug(
+                "WS market event trigger failed for %s", symbol, exc_info=True
             )
         try:
             await notify_scan(f"{symbol}:{kind}")
@@ -845,10 +866,6 @@ def run_agent_loop() -> None:
                 return False
             last_closed_bars[symbol] = close_time
         return True
-
-    guard_stop = threading.Event()
-    scan_trigger = threading.Event()
-    attach_scan_event(scan_trigger)
 
     global _ws_bridge
     ws_bridge: Optional[WSPriceBridge]
@@ -2343,17 +2360,13 @@ def run_agent_loop() -> None:
                 logger.error("Error managing trades: %s", e, exc_info=True)
             # Persist symbol scores to disk
             try:
-                with open("symbol_scores.json", "r") as f:
-                    old_data = json.load(f)
-            except FileNotFoundError:
-                old_data = {}
+                old_data = load_symbol_scores()
             except Exception as e:
                 logger.error("Error reading symbol_scores.json: %s", e, exc_info=True)
                 old_data = {}
             try:
                 old_data.update(symbol_scores)
-                with open("symbol_scores.json", "w") as f:
-                    json.dump(old_data, f, indent=4)
+                save_symbol_scores(old_data)
                 logger.info("Saved symbol scores (persistent memory updated).")
             except Exception as e:
                 logger.error("Error saving symbol scores: %s", e, exc_info=True)
