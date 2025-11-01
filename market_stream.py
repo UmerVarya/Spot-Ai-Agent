@@ -23,8 +23,19 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 from observability import log_event, record_metric
 
 try:  # pragma: no cover - optional import during docs build
-    from binance import ThreadedWebsocketManager  # type: ignore
     from binance.client import Client  # type: ignore
+    try:
+        from binance.streams import ThreadedWebsocketManager  # type: ignore
+    except Exception:  # pragma: no cover - binance<1.0 fallback
+        from binance import ThreadedWebsocketManager  # type: ignore
+    else:  # pragma: no cover - align top-level alias when available
+        try:
+            import binance as _binance_module  # type: ignore
+
+            if getattr(_binance_module, "ThreadedWebsocketManager", ThreadedWebsocketManager) is not ThreadedWebsocketManager:
+                setattr(_binance_module, "ThreadedWebsocketManager", ThreadedWebsocketManager)
+        except Exception:
+            pass
 except Exception:  # pragma: no cover - handled gracefully in runtime
     ThreadedWebsocketManager = None  # type: ignore
     Client = None  # type: ignore
