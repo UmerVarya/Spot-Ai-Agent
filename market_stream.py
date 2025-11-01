@@ -35,6 +35,9 @@ except Exception:  # pragma: no cover - fallback mapping
     def map_symbol_for_binance(symbol: str) -> str:
         return symbol.upper()
 
+DISABLE_LEGACY_BINANCE_WS = os.getenv("DISABLE_LEGACY_BINANCE_WS", "1") == "1"
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -315,7 +318,9 @@ class BinanceMarketStream:
         self._order_books: Dict[str, OrderBookState] = {}
         self._trades: Dict[str, RollingTradeStats] = {}
         self._symbol_locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
-        self._disabled = False
+        self._disabled = bool(DISABLE_LEGACY_BINANCE_WS)
+        if self._disabled:
+            logger.debug("Binance market stream disabled via configuration.")
 
     def _ensure_manager(self) -> None:
         if self._disabled:
@@ -570,7 +575,9 @@ class BinanceEventStream:
         self._last_message = 0.0
         self._connected = threading.Event()
         self._backoff = ExponentialBackoff(base=1.0, factor=2.0, max_interval=90.0)
-        self._disabled = False
+        self._disabled = bool(DISABLE_LEGACY_BINANCE_WS)
+        if self._disabled:
+            logger.debug("Binance event stream disabled via configuration.")
 
     # ------------------------------------------------------------------
     # Public API
@@ -661,6 +668,8 @@ class BinanceEventStream:
     # Internal helpers
     # ------------------------------------------------------------------
     def _ensure_manager(self) -> None:
+        if self._disabled:
+            return
         if ThreadedWebsocketManager is None or Client is None:
             logger.debug("Binance WebSocket dependencies unavailable; disabling event stream.")
             self._disabled = True
