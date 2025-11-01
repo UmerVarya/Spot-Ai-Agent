@@ -46,7 +46,8 @@ except Exception:  # pragma: no cover - fallback mapping
     def map_symbol_for_binance(symbol: str) -> str:
         return symbol.upper()
 
-DISABLE_LEGACY_BINANCE_WS = os.getenv("DISABLE_LEGACY_BINANCE_WS", "1") == "1"
+_disable_legacy_env = (os.getenv("DISABLE_LEGACY_BINANCE_WS", "1") or "1").strip().lower()
+DISABLE_LEGACY_BINANCE_WS = _disable_legacy_env in {"1", "true", "yes", "on"}
 
 
 logger = logging.getLogger(__name__)
