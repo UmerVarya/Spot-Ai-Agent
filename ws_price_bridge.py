@@ -656,7 +656,7 @@ class _WebsocketsPriceBridge:
                 ) as ws:
                     self._ws = ws
                     attempt = 0
-                    self._last_messages[batch_index] = time.time()
+                    self._last_messages[batch_index] = time.monotonic()
                     self.logger.warning(
                         "WS BRIDGE MARK v3 | connected | batch=%d/%d | streams=%d | url_len=%d",
                         batch_index,
@@ -668,7 +668,7 @@ class _WebsocketsPriceBridge:
                         if self._stop.is_set() or self._resubscribe.is_set():
                             break
                         if msg.type == aiohttp.WSMsgType.TEXT:
-                            self._last_messages[batch_index] = time.time()
+                            self._last_messages[batch_index] = time.monotonic()
                             self._on_message(msg.data, batch_index)
                         elif msg.type == aiohttp.WSMsgType.ERROR:
                             exc = ws.exception()
@@ -728,7 +728,7 @@ class _WebsocketsPriceBridge:
         if total_batches <= 0:
             self._last_messages.clear()
             return
-        now = time.time()
+        now = time.monotonic()
         self._last_messages = {index: now for index in range(1, total_batches + 1)}
 
     def _on_message(self, raw: str, batch_index: Optional[int] = None) -> None:
@@ -736,11 +736,11 @@ class _WebsocketsPriceBridge:
 
     def _handle_msg(self, raw: str, batch_index: Optional[int] = None) -> None:
         if batch_index is not None:
-            self._last_messages[batch_index] = time.time()
+            self._last_messages[batch_index] = time.monotonic()
         elif self._last_messages:
             # If we lost track of the originating batch, update all to avoid
             # spurious stale triggers while still receiving traffic.
-            now = time.time()
+            now = time.monotonic()
             for key in list(self._last_messages.keys()):
                 self._last_messages[key] = now
         try:
@@ -820,7 +820,7 @@ class _WebsocketsPriceBridge:
                     return
                 if not self._last_messages:
                     continue
-                now = time.time()
+                now = time.monotonic()
                 stale_batches = [
                     (batch_index, now - last)
                     for batch_index, last in self._last_messages.items()
@@ -1034,7 +1034,7 @@ if WS_BACKEND == "wsclient":
                     )
                     return
                 clients: List[_WSClientBridge] = []
-                now = time.time()
+                now = time.monotonic()
                 for index, batch in enumerate(batches, start=1):
                     if not batch:
                         continue
@@ -1193,11 +1193,11 @@ if WS_BACKEND == "wsclient":
             ) -> None:
                 if batch_index is not None:
                     with self._lock:
-                        self._last_messages[batch_index] = time.time()
+                        self._last_messages[batch_index] = time.monotonic()
                 else:
                     with self._lock:
                         if self._last_messages:
-                            now = time.time()
+                            now = time.monotonic()
                             for key in list(self._last_messages.keys()):
                                 self._last_messages[key] = now
                 try:
@@ -1279,7 +1279,7 @@ if WS_BACKEND == "wsclient":
                             last = dict(self._last_messages)
                         if not last:
                             continue
-                        now = time.time()
+                        now = time.monotonic()
                         gap = max(now - ts for ts in last.values())
                         if gap >= self._heartbeat_timeout:
                             self._notify_stale(gap)

@@ -818,13 +818,13 @@ def run_agent_loop() -> None:
             )
 
     ws_state_lock = threading.Lock()
-    ws_state = {"last": time.time(), "stale": False}
+    ws_state = {"last_mono": time.monotonic(), "stale": False}
     closed_bar_lock = threading.Lock()
     last_closed_bars: Dict[str, int] = {}
 
     def _mark_ws_activity() -> None:
         with ws_state_lock:
-            ws_state["last"] = time.time()
+            ws_state["last_mono"] = time.monotonic()
             ws_state["stale"] = False
 
     def _note_ws_stale(gap: float) -> None:
@@ -1068,10 +1068,12 @@ def run_agent_loop() -> None:
                         tracked = ["BTCUSDT"]
                     market_stream.poll_rest(tracked)
             if ENABLE_WS_BRIDGE and REST_BACKFILL_ENABLED:
+                now_mono = time.monotonic()
                 with ws_state_lock:
-                    gap = now - ws_state["last"]
+                    last_mono = ws_state.get("last_mono", now_mono)
                     stale_flag = ws_state["stale"]
                     ws_state["stale"] = False
+                gap = now_mono - last_mono
                 if gap >= runtime_settings.max_ws_gap_before_rest or stale_flag:
                     if now - last_rest_backfill >= runtime_settings.max_ws_gap_before_rest:
                         tracked_symbols = tuple(signal_cache.symbols())
