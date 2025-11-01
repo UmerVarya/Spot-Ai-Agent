@@ -128,13 +128,13 @@ def optimize_indicator_weights(
             ema_span = None
 
         signals = pd.read_csv(
-            SIGNAL_LOG_FILE,
+            filepath_or_buffer=SIGNAL_LOG_FILE,
             tail(lookback),
             engine="python",
             on_bad_lines="skip",
         ).tail(lookback)
         trades = pd.read_csv(
-            TRADE_HISTORY_FILE,
+            filepath_or_buffer=TRADE_HISTORY_FILE,
             tail(lookback),
             engine="python",
             on_bad_lines="skip",
