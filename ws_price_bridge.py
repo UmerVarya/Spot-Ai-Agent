@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import os
 from contextlib import suppress
 import threading
@@ -39,6 +40,11 @@ MAX_COMBINED_URL_LEN = max(512, int(os.getenv("BINANCE_MAX_URL_LEN", "1900")))
 MAX_CONNS = max(1, int(os.getenv("WS_MAX_CONNS", "4")))
 IDLE_RECV_TIMEOUT = max(10, int(os.getenv("WS_IDLE_RECV_TIMEOUT", "90")))
 WS_BACKEND = (os.getenv("WS_BACKEND", "wsclient") or "wsclient").strip().lower()
+
+WS_MAX_RECONNECTS = int(os.getenv("WS_MAX_RECONNECTS", "20"))
+WS_RECONNECT_BASE_MS = int(os.getenv("WS_RECONNECT_BASE_MS", "400"))
+WS_RECONNECT_MAX_MS = int(os.getenv("WS_RECONNECT_MAX_MS", "8000"))
+WS_SILENCE_SEC = float(os.getenv("WS_SILENCE_SEC", "10.0"))
 
 logger = logging.getLogger(__name__)
 
@@ -1012,6 +1018,13 @@ if WS_BACKEND == "wsclient":
                 self._combined_base = _streams_prefix(COMBINED_BASE)
                 self._last_ticker_fire: Dict[str, float] = {}
                 self._ticker_min_interval = 0.75
+                self._last_msg_mono = time.monotonic()
+                self._reconnects = 0
+                self._max_reconnects = max(1, int(WS_MAX_RECONNECTS))
+                self._reconnect_backoff_ms = max(1, int(WS_RECONNECT_BASE_MS))
+                self._silence_threshold = max(
+                    float(self._heartbeat_timeout), float(WS_SILENCE_SEC), 1.0
+                )
 
             # ------------------------------------------------------------------
             # Public API
@@ -1051,6 +1064,7 @@ if WS_BACKEND == "wsclient":
                     self._last_messages = {
                         index: now for index in range(1, len(clients) + 1)
                     }
+                    self._last_msg_mono = now
                     self._running = bool(clients)
                 for client in clients:
                     try:
@@ -1120,6 +1134,7 @@ if WS_BACKEND == "wsclient":
                 self.start()
 
             def _shutdown_clients(self, timeout: float, log: bool) -> None:
+                current_thread = threading.current_thread()
                 with self._lock:
                     clients = list(self._clients)
                     thread = self._heartbeat_thread
@@ -1135,7 +1150,7 @@ if WS_BACKEND == "wsclient":
                         self.logger.debug(
                             "WS BRIDGE MARK v3 | wsclient stop failed", exc_info=True
                         )
-                if thread:
+                if thread and thread is not current_thread:
                     thread.join(timeout=timeout)
                 if log:
                     self.logger.info("WS BRIDGE MARK v3 | WSPriceBridge: stopped")
@@ -1191,15 +1206,17 @@ if WS_BACKEND == "wsclient":
             def _handle_msg(
                 self, raw: str, batch_index: Optional[int] = None
             ) -> None:
+                now = time.monotonic()
                 if batch_index is not None:
                     with self._lock:
-                        self._last_messages[batch_index] = time.monotonic()
+                        self._last_messages[batch_index] = now
+                        self._last_msg_mono = now
                 else:
                     with self._lock:
                         if self._last_messages:
-                            now = time.monotonic()
                             for key in list(self._last_messages.keys()):
                                 self._last_messages[key] = now
+                        self._last_msg_mono = now
                 try:
                     obj = json.loads(raw)
                 except json.JSONDecodeError:
@@ -1272,7 +1289,10 @@ if WS_BACKEND == "wsclient":
 
             def _heartbeat_loop(self) -> None:
                 try:
-                    while not self._stop.wait(self._heartbeat_timeout / 2.0):
+                    interval = max(0.5, self._heartbeat_timeout / 2.0)
+                    while not self._stop.wait(interval):
+                        if self._watchdog_tick():
+                            return
                         with self._lock:
                             if not self._running:
                                 continue
@@ -1283,10 +1303,71 @@ if WS_BACKEND == "wsclient":
                         gap = max(now - ts for ts in last.values())
                         if gap >= self._heartbeat_timeout:
                             self._notify_stale(gap)
+                            self._schedule_reconnect()
+                            return
                 finally:
                     self.logger.debug(
                         "WS BRIDGE MARK v3 | wsclient heartbeat loop exiting"
                     )
+
+            def _watchdog_tick(self) -> bool:
+                if self._stop.is_set():
+                    return False
+                now = time.monotonic()
+                gap = now - self._last_msg_mono
+                if gap > self._silence_threshold:
+                    self._notify_stale(gap)
+                    self.logger.info(
+                        {"event": "ws_gap_fallback", "gap_seconds": round(gap, 3)}
+                    )
+                    self._schedule_reconnect()
+                    return True
+                return False
+
+            def _schedule_reconnect(self) -> None:
+                if self._stop.is_set():
+                    return
+                if self._reconnects >= self._max_reconnects:
+                    self.logger.error(
+                        "Max reconnections %s reached; holding stream.",
+                        self._max_reconnects,
+                    )
+                    return
+
+                self._reconnects += 1
+                delay_ms = min(self._reconnect_backoff_ms, WS_RECONNECT_MAX_MS)
+                self.logger.warning(
+                    "Reconnecting WS (attempt %s/%s) in %sms ...",
+                    self._reconnects,
+                    self._max_reconnects,
+                    delay_ms,
+                )
+                time.sleep(delay_ms / 1000.0)
+
+                try:
+                    self._restart_clients()
+                except Exception as exc:
+                    self.logger.exception("WS reopen failed: %s", exc)
+                else:
+                    with self._lock:
+                        running = self._running
+                    if not running:
+                        self._reconnects = 0
+                        self._reconnect_backoff_ms = max(
+                            1, int(WS_RECONNECT_BASE_MS)
+                        )
+                        return
+                    self._reconnects = 0
+                    self._reconnect_backoff_ms = max(
+                        1, int(WS_RECONNECT_BASE_MS)
+                    )
+                    self._last_msg_mono = time.monotonic()
+                    return
+
+                self._reconnect_backoff_ms = min(
+                    int(math.ceil(self._reconnect_backoff_ms * 1.7)),
+                    WS_RECONNECT_MAX_MS,
+                )
 
             def _notify_stale(self, gap: float) -> None:
                 callback = self._on_stale
