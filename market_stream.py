@@ -32,7 +32,9 @@ try:  # pragma: no cover - optional import during docs build
         try:
             import binance as _binance_module  # type: ignore
 
-            if getattr(_binance_module, "ThreadedWebsocketManager", ThreadedWebsocketManager) is not ThreadedWebsocketManager:
+            _sentinel = object()
+            _current_twm = getattr(_binance_module, "ThreadedWebsocketManager", _sentinel)
+            if _current_twm is _sentinel or _current_twm is ThreadedWebsocketManager:
                 setattr(_binance_module, "ThreadedWebsocketManager", ThreadedWebsocketManager)
         except Exception:
             pass

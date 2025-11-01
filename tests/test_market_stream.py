@@ -53,7 +53,7 @@ def test_event_queue_is_bounded() -> None:
     assert stream.event_queue.qsize() <= 2
 
 
-def test_threaded_websocket_manager_import_prefers_streams() -> None:
+def test_threaded_websocket_manager_import_preserves_monkey_patch() -> None:
     global market_stream
 
     original_modules = {
@@ -79,7 +79,52 @@ def test_threaded_websocket_manager_import_prefers_streams() -> None:
     fake_client.Client = DummyClient  # type: ignore[attr-defined]
     fake_binance.client = fake_client  # type: ignore[attr-defined]
     fake_binance.streams = fake_streams  # type: ignore[attr-defined]
-    fake_binance.ThreadedWebsocketManager = object()  # type: ignore[attr-defined]
+    stub_manager = object()
+    fake_binance.ThreadedWebsocketManager = stub_manager  # type: ignore[attr-defined]
+
+    sys.modules["binance"] = fake_binance
+    sys.modules["binance.streams"] = fake_streams
+    sys.modules["binance.client"] = fake_client
+
+    try:
+        market_stream = importlib.reload(market_stream)
+        assert market_stream.ThreadedWebsocketManager is DummyManager
+        assert getattr(sys.modules["binance"], "ThreadedWebsocketManager") is stub_manager
+    finally:
+        for name in ["binance", "binance.streams", "binance.client"]:
+            sys.modules.pop(name, None)
+        for name, module in original_modules.items():
+            if module is not None:
+                sys.modules[name] = module
+        market_stream = importlib.reload(market_stream)
+
+
+def test_threaded_websocket_manager_import_sets_missing_alias() -> None:
+    global market_stream
+
+    original_modules = {
+        name: sys.modules.get(name)
+        for name in ("binance", "binance.streams", "binance.client")
+    }
+    for name in ["binance", "binance.streams", "binance.client"]:
+        sys.modules.pop(name, None)
+
+    fake_binance = types.ModuleType("binance")
+    fake_streams = types.ModuleType("binance.streams")
+
+    class DummyManager:  # pragma: no cover - simple sentinel
+        pass
+
+    fake_streams.ThreadedWebsocketManager = DummyManager  # type: ignore[attr-defined]
+
+    fake_client = types.ModuleType("binance.client")
+
+    class DummyClient:  # pragma: no cover - simple sentinel
+        pass
+
+    fake_client.Client = DummyClient  # type: ignore[attr-defined]
+    fake_binance.client = fake_client  # type: ignore[attr-defined]
+    fake_binance.streams = fake_streams  # type: ignore[attr-defined]
 
     sys.modules["binance"] = fake_binance
     sys.modules["binance.streams"] = fake_streams
