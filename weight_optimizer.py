@@ -129,13 +129,13 @@ def optimize_indicator_weights(
 
         signals = pd.read_csv(
             filepath_or_buffer=SIGNAL_LOG_FILE,
-            tail(lookback),
+            sep=tail(lookback),
             engine="python",
             on_bad_lines="skip",
         ).tail(lookback)
         trades = pd.read_csv(
             filepath_or_buffer=TRADE_HISTORY_FILE,
-            tail(lookback),
+            sep=tail(lookback),
             engine="python",
             on_bad_lines="skip",
         ).tail(lookback)
