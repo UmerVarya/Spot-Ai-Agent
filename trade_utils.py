@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import os
 import json
+import tempfile
 import time
 import random
 from dataclasses import dataclass, field
@@ -38,8 +39,9 @@ from risk_metrics import (
 # Directory containing this module
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Path to the signal log file (formerly trades_log.csv)
-SIGNAL_LOG_FILE = os.getenv("SIGNAL_LOG_FILE",
-                            os.path.join(_MODULE_DIR, "signal_log.csv"))
+SIGNAL_LOG_FILE = os.getenv(
+    "SIGNAL_LOG_FILE", os.path.join(_MODULE_DIR, "signal_log.csv")
+)
 
 logger = setup_logger(__name__)
 
@@ -477,7 +479,45 @@ except Exception:
             return (False, False)
 
 # Path to stored symbol scores
-SYMBOL_SCORES_FILE = os.path.join(os.path.dirname(__file__), "symbol_scores.json")
+BASE_DIR = _MODULE_DIR
+SCORES_FILE = os.path.join(BASE_DIR, "symbol_scores.json")
+SYMBOL_SCORES_FILE = SCORES_FILE
+
+
+def _safe_json_load(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+            if not text:
+                raise json.JSONDecodeError("empty", "", 0)
+            return json.loads(text)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logger.warning("Resetting corrupted or missing %s (%s)", path, e)
+        return {}
+
+
+def _safe_json_dump(path: str, obj: Dict[str, Any]) -> None:
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".scores_", dir=d, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
+def load_symbol_scores() -> Dict[str, Any]:
+    return _safe_json_load(SCORES_FILE)
+
+
+def save_symbol_scores(scores: Dict[str, Any]) -> None:
+    _safe_json_dump(SCORES_FILE, scores)
 
 _binance_client: Optional[Client] = None
 _client_init_error: Optional[str] = None
@@ -1906,10 +1946,7 @@ def evaluate_signal(
         else:
             pattern_name = "None"
         try:
-            scores = {}
-            if os.path.exists(SYMBOL_SCORES_FILE):
-                with open(SYMBOL_SCORES_FILE, "r") as f:
-                    scores = json.load(f)
+            scores = load_symbol_scores()
             scores[symbol] = {
                 "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                 "score": normalized_score,
@@ -1920,8 +1957,7 @@ def evaluate_signal(
                 "trend_score": trend_norm,
                 "mean_reversion_score": mean_rev_norm,
             }
-            with open(SYMBOL_SCORES_FILE, "w") as f:
-                json.dump(scores, f, indent=2)
+            save_symbol_scores(scores)
         except Exception as e:
             logger.warning("[SYMBOL SCORES] Failed to update symbol_scores.json: %s", e, exc_info=True)
         spread_bps = None
