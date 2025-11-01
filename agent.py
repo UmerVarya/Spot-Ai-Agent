@@ -809,6 +809,10 @@ def run_agent_loop() -> None:
             last_closed_bars[symbol] = close_time
         return True
 
+    guard_stop = threading.Event()
+    scan_trigger = threading.Event()
+    attach_scan_event(scan_trigger)
+
     global _ws_bridge
     ws_bridge: Optional[WSPriceBridge]
 
@@ -830,6 +834,7 @@ def run_agent_loop() -> None:
                     signal_cache.on_ws_bar_close(symbol, close_ts)
                     kicked = [symbol]
                     dispatch_schedule_refresh(signal_cache, symbol)
+                    scan_trigger.set()
                     logging.getLogger(__name__).warning(
                         f"[AGENT] kicked {len(kicked)}: {kicked}"
                     )
@@ -840,6 +845,8 @@ def run_agent_loop() -> None:
             try:
                 _mark_ws_activity()
                 process_live_ticker(symbol, payload)
+                dispatch_schedule_refresh(signal_cache, symbol)
+                scan_trigger.set()
             except Exception:
                 logger.debug("WS ticker handler error for %s", symbol, exc_info=True)
 
@@ -907,9 +914,6 @@ def run_agent_loop() -> None:
 
     state = CentralState()
     worker_pools = WorkerPools()
-    guard_stop = threading.Event()
-    scan_trigger = threading.Event()
-    attach_scan_event(scan_trigger)
     _ensure_periodic_tick()
     scan_lock = threading.Lock()
     manual_cache_primes: dict[str, float] = {}
