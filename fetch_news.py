@@ -92,11 +92,24 @@ async def run_news_fetcher_async(
 ) -> List[Dict[str, str]]:
     """Asynchronously fetch and cache crypto + macro news events."""
 
-    async with _client_session(session) as client:
-        crypto, macro = await asyncio.gather(
-            fetch_crypto_news(client), fetch_macro_news(client)
-        )
-    events = crypto + macro
+    try:
+        async with _client_session(session) as client:
+            results = await asyncio.gather(
+                fetch_crypto_news(client),
+                fetch_macro_news(client),
+                return_exceptions=True,
+            )
+    except Exception as exc:
+        logger.warning("News fetcher failed: %s", exc, exc_info=True)
+        return []
+
+    events: List[Dict[str, str]] = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.warning("News fetch task failed: %s", result, exc_info=True)
+            continue
+        events.extend(result)
+
     if events:
         save_events(events, path)
     return events
@@ -104,7 +117,11 @@ async def run_news_fetcher_async(
 
 def run_news_fetcher(path: str = "news_events.json") -> List[Dict[str, str]]:
     """Synchronous wrapper for fetching news events."""
-    return _run_coroutine(lambda: run_news_fetcher_async(path))
+    try:
+        return _run_coroutine(lambda: run_news_fetcher_async(path))
+    except Exception as exc:
+        logger.warning("News fetcher execution failed: %s", exc, exc_info=True)
+        return []
 
 
 def save_events(events: List[Dict[str, str]], path: str = "news_events.json") -> None:
