@@ -889,8 +889,10 @@ def run_agent_loop() -> None:
                     kicked = [symbol]
                     dispatch_schedule_refresh(signal_cache, symbol)
                     scan_trigger.set()
-                    logging.getLogger(__name__).warning(
-                        f"[AGENT] kicked {len(kicked)}: {kicked}"
+                    logging.getLogger(__name__).debug(
+                        "[AGENT] kicked %d: %s",
+                        len(kicked),
+                        kicked,
                     )
             except Exception:
                 logger.debug("WS kline handler error for %s", symbol, exc_info=True)
@@ -1108,8 +1110,10 @@ def run_agent_loop() -> None:
                         kicked = list(tracked_symbols)
                         for sym in kicked:
                             dispatch_schedule_refresh(signal_cache, sym)
-                        logging.getLogger(__name__).warning(
-                            f"[AGENT] kicked {len(kicked)}: {kicked}"
+                        logging.getLogger(__name__).debug(
+                            "[AGENT] kicked %d: %s",
+                            len(kicked),
+                            kicked,
                         )
                         last_rest_backfill = now
             guard_stop.wait(guard_interval)
@@ -1139,7 +1143,7 @@ def run_agent_loop() -> None:
                 continue
             scan_trigger.clear()
             last_scan_time = now
-            logger.info("=== Scan @ %s ===", time.strftime('%Y-%m-%d %H:%M:%S'))
+            logger.debug("=== Scan @ %s ===", time.strftime('%Y-%m-%d %H:%M:%S'))
             try:
                 btc_bars_len = signal_cache.bars_len("BTCUSDT")
             except Exception as cache_exc:
@@ -1149,10 +1153,10 @@ def run_agent_loop() -> None:
                 )
             else:
                 if btc_bars_len_last is None:
-                    logger.info("BTCUSDT cached bars: %d", btc_bars_len)
+                    logger.debug("BTCUSDT cached bars: %d", btc_bars_len)
                 else:
                     delta = btc_bars_len - btc_bars_len_last
-                    logger.info(
+                    logger.debug(
                         "BTCUSDT cached bars: %d (Δ %+d)",
                         btc_bars_len,
                         delta,
@@ -1344,8 +1348,10 @@ def run_agent_loop() -> None:
                 kicked = list(symbols_to_fetch[:kick])
                 for symbol in kicked:
                     dispatch_schedule_refresh(signal_cache, symbol)
-                logging.getLogger(__name__).warning(
-                    f"[AGENT] kicked {len(kicked)}: {kicked}"
+                logging.getLogger(__name__).debug(
+                    "[AGENT] kicked %d: %s",
+                    len(kicked),
+                    kicked,
                 )
             if signal_cache.circuit_breaker_active():
                 logger.warning(
