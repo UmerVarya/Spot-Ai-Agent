@@ -340,7 +340,11 @@ from diversify import select_diversified_signals
 from groq_llm import async_batch_llm_judgment
 from groq_client import get_groq_client
 from ml_model import predict_success_probability
-from sequence_model import predict_next_return, train_sequence_model, SEQ_PKL
+from sequence_model import (
+    SEQ_PKL,
+    predict_next_return,
+    schedule_sequence_model_training,
+)
 from drawdown_guard import is_trading_blocked
 import numpy as np
 from rl_policy import RLPositionSizer
@@ -1776,7 +1780,10 @@ def run_agent_loop() -> None:
                 next_ret = 0.0
                 try:
                     if not os.path.exists(SEQ_PKL):
-                        train_sequence_model(indicators_df)
+                        if schedule_sequence_model_training(indicators_df):
+                            logger.info(
+                                "Sequence model retraining kicked off in background."
+                            )
                     next_ret = predict_next_return(indicators_df.tail(10))
                 except Exception:
                     pass
