@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -144,6 +146,40 @@ def test_sequence_model_training(tmp_path, monkeypatch):
     window = df.tail(8)
     pred = sequence_model.predict_next_return(window)
     assert isinstance(pred, float)
+
+
+def test_schedule_sequence_model_training_background(monkeypatch, tmp_path):
+    calls: list[int] = []
+
+    def fake_train(df: pd.DataFrame, window_size: int = 10):
+        calls.append(window_size)
+        time.sleep(0.05)
+
+    monkeypatch.setattr(sequence_model, 'train_sequence_model', fake_train)
+    monkeypatch.setattr(sequence_model, 'SEQ_PKL', str(tmp_path / 'sequence_async.pkl'))
+    monkeypatch.setattr(sequence_model, 'SKLEARN_AVAILABLE', True)
+
+    rows = 40
+    df = pd.DataFrame(
+        {
+            'timestamp': pd.date_range('2024-01-01', periods=rows, freq='H'),
+            'close': np.linspace(100, 101, rows),
+            'feature_a': np.random.rand(rows),
+        }
+    )
+
+    triggered = sequence_model.schedule_sequence_model_training(df, window_size=8)
+    assert triggered is True
+    assert sequence_model.is_sequence_model_training()
+    second = sequence_model.schedule_sequence_model_training(df, window_size=8)
+    assert second is False
+
+    # Wait for the background thread to finish
+    timeout = time.time() + 5
+    while sequence_model.is_sequence_model_training() and time.time() < timeout:
+        time.sleep(0.01)
+
+    assert calls == [8]
 
 
 def test_rl_policy_adaptive_behaviour(tmp_path, monkeypatch):

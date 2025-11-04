@@ -7,6 +7,7 @@ classifier.
 """
 
 import os
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -53,6 +54,9 @@ except Exception:  # pragma: no cover - optional dependency
     LGBMRegressor = None  # type: ignore
 
 logger = setup_logger(__name__)
+
+_training_lock = threading.Lock()
+_training_thread: Optional[threading.Thread] = None
 
 # File paths for persistence
 ROOT_DIR = os.path.dirname(__file__)
@@ -325,3 +329,62 @@ def predict_next_return(window_df: pd.DataFrame) -> float:
         return float(pred[0])
     except Exception:  # pragma: no cover
         return 0.0
+
+
+def schedule_sequence_model_training(
+    df: pd.DataFrame,
+    *,
+    window_size: int = 10,
+) -> bool:
+    """Kick off background training for the sequence model if needed.
+
+    Returns ``True`` when a new asynchronous training job was scheduled.
+    If training is already running, the artefact exists, or prerequisites are
+    missing (e.g., insufficient rows or scikit-learn unavailable), ``False`` is
+    returned instead.
+    """
+
+    if not SKLEARN_AVAILABLE:
+        return False
+    if df is None or len(df) < window_size + 2:
+        return False
+    if os.path.exists(SEQ_PKL):
+        return False
+
+    data_copy = df.copy(deep=True)
+
+    def _worker() -> None:
+        try:
+            train_sequence_model(data_copy, window_size=window_size)
+        except Exception:
+            logger.exception("Asynchronous sequence model training failed.")
+        finally:
+            with _training_lock:
+                global _training_thread
+                _training_thread = None
+
+    with _training_lock:
+        global _training_thread
+        if _training_thread is not None and _training_thread.is_alive():
+            return False
+        _training_thread = threading.Thread(
+            target=_worker,
+            name="sequence-model-trainer",
+            daemon=True,
+        )
+        _training_thread.start()
+
+    logger.info(
+        "Asynchronous sequence model training scheduled (window=%d, samples=%d).",
+        window_size,
+        len(data_copy),
+    )
+    return True
+
+
+def is_sequence_model_training() -> bool:
+    """Return ``True`` while an asynchronous training job is active."""
+
+    with _training_lock:
+        thread = _training_thread
+    return bool(thread and thread.is_alive())
