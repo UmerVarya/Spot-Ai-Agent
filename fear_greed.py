@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
+from http.client import RemoteDisconnected
 from requests import exceptions as requests_exceptions
 
 from log_utils import setup_logger
@@ -34,6 +35,12 @@ class FearGreedIndexFetcher:
 
         try:
             value = self._fetch_remote()
+        except RemoteDisconnected as exc:
+            logger.warning(
+                "Connection dropped fetching Fear & Greed Index, using cached value: %s",
+                exc,
+            )
+            return self._cached_or_default()
         except requests_exceptions.SSLError as exc:
             logger.warning(
                 "TLS error fetching Fear & Greed Index, using cached value: %s",
