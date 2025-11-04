@@ -47,6 +47,13 @@ from trade_storage import (
 from rl_policy import RLPositionSizer
 from microstructure import plan_execution, detect_sell_pressure
 from orderflow import detect_aggression
+from trade_constants import (
+    TP_ATR_MULTIPLIERS,
+    TRAIL_FINAL_ATR,
+    TRAIL_INITIAL_ATR,
+    TRAIL_LOCK_IN_RATIO,
+    TRAIL_TIGHT_ATR,
+)
 from observability import log_event
 
 # === Constants ===
@@ -643,6 +650,101 @@ def _update_rl(trade: dict, exit_price: float) -> None:
         pass
 
 
+def _get_trade_atr(trade: dict) -> Optional[float]:
+    """Return the ATR value associated with ``trade`` when available."""
+
+    atr_entry = _to_float(trade.get("atr_at_entry"))
+    if atr_entry is not None and atr_entry > 0:
+        return atr_entry
+
+    entry_price = _to_float(trade.get("entry"))
+    tp1_price = _to_float(trade.get("tp1"))
+    if entry_price is None or tp1_price is None:
+        return None
+
+    base_multiplier = TP_ATR_MULTIPLIERS[0] if TP_ATR_MULTIPLIERS else None
+    if base_multiplier is None or base_multiplier <= 0:
+        return None
+
+    direction = str(trade.get("direction", "long")).lower()
+    if direction == "short":
+        distance = entry_price - tp1_price
+    else:
+        distance = tp1_price - entry_price
+    if distance is None or distance <= 0:
+        return None
+
+    return distance / base_multiplier
+
+
+def _activate_trailing_mode(
+    trade: dict,
+    tp_price: float,
+    *,
+    current_price: Optional[float],
+) -> Optional[float]:
+    """Enable trailing-stop management and return the locked-in stop price."""
+
+    entry_price = _to_float(trade.get("entry"))
+    if entry_price is None or tp_price is None:
+        return None
+
+    direction = str(trade.get("direction", "long")).lower()
+    if direction == "short":
+        move = entry_price - tp_price
+        if move <= 0:
+            return None
+        lock_price = entry_price - move * TRAIL_LOCK_IN_RATIO
+    else:
+        move = tp_price - entry_price
+        if move <= 0:
+            return None
+        lock_price = entry_price + move * TRAIL_LOCK_IN_RATIO
+
+    lock_price = round(lock_price, 6)
+    trade["trailing_active"] = True
+    trade["profit_riding"] = True
+    trade["locked_profit_price"] = lock_price
+
+    reference = tp_price
+    if current_price is not None:
+        if direction == "short":
+            reference = min(current_price, tp_price)
+        else:
+            reference = max(current_price, tp_price)
+
+    existing_anchor = _to_float(trade.get("trail_high"))
+    if direction == "short":
+        if existing_anchor is None:
+            trade["trail_high"] = reference
+        else:
+            trade["trail_high"] = min(existing_anchor, reference)
+    else:
+        if existing_anchor is None:
+            trade["trail_high"] = reference
+        else:
+            trade["trail_high"] = max(existing_anchor, reference)
+
+    trade["trail_multiplier"] = TRAIL_INITIAL_ATR
+    trade.pop("next_trail_tp", None)
+    trade.pop("trail_tp_pct", None)
+    trade.pop("last_trail_partial_pnl", None)
+
+    return lock_price
+
+
+def _adjust_trailing_multiplier(trade: dict, new_multiplier: float) -> bool:
+    """Reduce the trailing ATR multiplier when the new value is tighter."""
+
+    if new_multiplier is None or new_multiplier <= 0:
+        return False
+    current = _to_float(trade.get("trail_multiplier"))
+    if current is None or not math.isfinite(current) or new_multiplier < current - 1e-9:
+        trade["trail_multiplier"] = new_multiplier
+        return True
+    return False
+
+
 def _update_stop_loss(trade: dict, new_sl: float) -> None:
     """Update the trade's stop-loss and mirror the change on Binance."""
     symbol = trade.get("symbol")
@@ -654,12 +756,18 @@ def _update_stop_loss(trade: dict, new_sl: float) -> None:
     order_id = trade.get("sl_order_id")
     status = trade.get("status", {})
     tp_price = None
-    if not status.get("tp1"):
-        tp_price = trade.get("tp1")
-    elif not status.get("tp2"):
-        tp_price = trade.get("tp2")
-    elif not status.get("tp3"):
-        tp_price = trade.get("tp3")
+    strategy = str(trade.get("take_profit_strategy") or "").lower()
+    trailing_mode = bool(trade.get("trailing_active"))
+    if strategy != "atr_trailing":
+        if not status.get("tp1"):
+            tp_price = trade.get("tp1")
+        elif not status.get("tp2"):
+            tp_price = trade.get("tp2")
+        elif not status.get("tp3"):
+            tp_price = trade.get("tp3")
+    elif not trailing_mode:
+        # ATR trailing strategy keeps a dynamic stop without resting TP orders.
+        tp_price = None
     if symbol:
         new_id = update_stop_loss_order(symbol, qty, new_sl, order_id, tp_price)
         if new_id is not None:
@@ -925,6 +1033,9 @@ def _manage_trades_body() -> None:
         trade.setdefault("realized_slippage", 0.0)
         trade.setdefault("tp1_partial", False)
         trade.setdefault("tp2_partial", False)
+        trade.setdefault("trailing_active", False)
+        if trade.get("trailing_active") and not _to_float(trade.get("trail_multiplier")):
+            trade["trail_multiplier"] = TRAIL_INITIAL_ATR
         fallback_exit_price: Optional[float] = None
         for price_key in ("last_price", "current_price", "entry"):
             price_val = trade.get(price_key)
@@ -1098,7 +1209,8 @@ def _manage_trades_body() -> None:
                 observed_price = float(live_low)
             except Exception:
                 pass
-        profit_riding_mode = "🚀 TP4" if trade.get('profit_riding', False) else "—"
+        trailing_mode = bool(trade.get('trailing_active'))
+        profit_riding_mode = "🔒 Trail" if trailing_mode else "—"
         logger.debug(
             "Managing %s | Price=%s High=%s Low=%s SL=%s TP1=%s TP2=%s TP3=%s Status=%s Mode=%s",
             symbol,
@@ -1339,8 +1451,9 @@ def _manage_trades_body() -> None:
             macd_signal_last = macd_signal_prev = macd_signal or 0
 
         macd_hist = macd_line_last - macd_signal_last
-        kc_lower_val = kc_lower_series.iloc[-1] if hasattr(kc_lower_series, 'iloc') else kc_lower_series or 0
+        _ = kc_lower_series  # retained for compatibility with earlier logic
         # Only long trades are supported in spot mode
+        # Trailing-first management logic
         trade_closed = False
         exit_signals = should_exit_position(
             trade,
@@ -1348,349 +1461,187 @@ def _manage_trades_body() -> None:
             recent_high=recent_high,
             recent_low=recent_low,
         )
-        if direction == "long":
-            if exit_signals:
-                for signal in exit_signals:
-                    label = signal.get("type")
-                    target_price = _to_float(signal.get("price"))
-                    if label == "tp1":
-                        if status_flags.get("tp1") or target_price is None:
-                            continue
-                        status_flags["tp1"] = True
-                        initial_qty = _to_float(
-                            trade.get('initial_size', trade.get('position_size', 1))
-                        )
-                        if initial_qty is None or initial_qty <= 0:
-                            initial_qty = _to_float(trade.get('position_size', 1)) or 0.0
-                        qty = _to_float(trade.get('position_size', 1)) or 0.0
-                        sell_qty = min(initial_qty * 0.5, qty)
-                        if sell_qty <= 0:
-                            continue
-                        commission_rate = estimate_commission(symbol, quantity=sell_qty, maker=False)
-                        fees = target_price * sell_qty * commission_rate
-                        slip_price = simulate_slippage(target_price, direction=direction)
-                        slippage_amt = abs(slip_price - target_price)
-                        exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                        _record_partial_exit(
-                            trade,
-                            "tp1",
-                            exit_price=target_price,
-                            quantity=sell_qty,
-                            fees=fees,
-                            slippage=slippage_amt,
-                            exit_time=exit_time,
-                        )
-                        partial_trade = trade.copy()
-                        entry_price_val = entry
-                        partial_trade['position_size'] = sell_qty
-                        partial_trade['initial_size'] = sell_qty
-                        if entry_price_val is not None:
-                            partial_trade['size'] = sell_qty * entry_price_val
-                            partial_trade['notional'] = sell_qty * entry_price_val
-                        else:
-                            partial_trade['size'] = sell_qty
-                        partial_trade['exit_reason'] = "TP1 partial"
-                        partial_trade['outcome'] = "tp1_partial"
-                        partial_pnl = trade.get('last_partial_pnl')
-                        if partial_pnl is not None:
-                            partial_trade['realized_pnl'] = partial_pnl
-                            partial_trade['total_pnl'] = partial_pnl
-                        partial_trade['realized_fees'] = fees
-                        partial_trade['total_fees'] = fees
-                        partial_trade['realized_slippage'] = slippage_amt
-                        partial_trade['total_slippage'] = slippage_amt
-                        try:
-                            log_trade_result(
-                                partial_trade,
-                                outcome="tp1_partial",
-                                exit_price=target_price,
-                                exit_time=exit_time,
-                                fees=fees,
-                                slippage=slippage_amt,
-                            )
-                        except Exception as error:
-                            logger.error("Failed to log TP1 partial for %s: %s", symbol, error)
-                        remaining_qty = max(0.0, qty - sell_qty)
-                        trade['position_size'] = remaining_qty
-                        if entry_price_val is not None:
-                            trade['size'] = remaining_qty * entry_price_val
-                        _persist_active_snapshot(updated_trades, active_trades, index)
-                        break_even_price = entry_price_val
-                        current_sl = _to_float(trade.get('sl'))
-                        if break_even_price is None:
-                            break_even_price = current_sl if current_sl is not None else target_price
-                        elif current_sl is not None:
-                            break_even_price = max(break_even_price, current_sl)
-                        if break_even_price is not None:
-                            _update_stop_loss(trade, break_even_price)
+        if exit_signals:
+            for signal in exit_signals:
+                label = str(signal.get("type") or "").lower()
+                target_price = _to_float(signal.get("price"))
+                if label == "tp1" and direction == "long":
+                    if status_flags.get("tp1") or target_price is None:
+                        continue
+                    status_flags["tp1"] = True
+                    lock_price = _activate_trailing_mode(
+                        trade,
+                        target_price,
+                        current_price=current_price,
+                    )
+                    actions.append("tp1_trailing_activate")
+                    if lock_price is not None:
+                        current_sl = _to_float(trade.get("sl"))
+                        if current_sl is None or lock_price > current_sl:
+                            _update_stop_loss(trade, lock_price)
+                            sl = lock_price
                             _persist_active_snapshot(updated_trades, active_trades, index)
+                    logger.info(
+                        "%s TP1 threshold reached — trailing mode activated (SL %.6f)",
+                        symbol,
+                        lock_price if lock_price is not None else trade.get("sl"),
+                    )
+                    try:
+                        send_email(
+                            f"🔒 Trail armed: {symbol}",
+                            (
+                                f"TP threshold {target_price:.6f} reached. "
+                                f"Stop now protecting {TRAIL_LOCK_IN_RATIO * 100:.0f}% of the move."
+                            ),
+                        )
+                    except Exception:
+                        logger.debug("Failed to send trailing activation email for %s", symbol, exc_info=True)
+                elif label == "tp2" and direction == "long":
+                    if status_flags.get("tp2") or target_price is None:
+                        continue
+                    status_flags["tp2"] = True
+                    if _adjust_trailing_multiplier(trade, TRAIL_TIGHT_ATR):
+                        _persist_active_snapshot(updated_trades, active_trades, index)
                         logger.info(
-                            "%s hit TP1 — sold 50%% and moved SL to Break Even (%s)",
+                            "%s TP2 threshold — trailing distance tightened to %.2f ATR",
                             symbol,
-                            break_even_price,
+                            TRAIL_TIGHT_ATR,
                         )
-                        send_email(
-                            f"✅ TP1 Partial: {symbol}",
-                            f"Partial exit qty: {sell_qty:.6f} @ {target_price} (PnL: {trade.get('pnl_tp1', 0.0):.4f})\n\n"
-                            f"Narrative:\n{trade.get('narrative', 'N/A')}",
-                        )
-                        actions.append("tp1_partial")
-                    elif label == "tp2":
-                        if status_flags.get("tp2") or target_price is None:
-                            continue
-                        status_flags["tp2"] = True
-                        initial_qty = _to_float(
-                            trade.get('initial_size', trade.get('position_size', 1))
-                        )
-                        if initial_qty is None or initial_qty <= 0:
-                            initial_qty = _to_float(trade.get('position_size', 1)) or 0.0
-                        qty = _to_float(trade.get('position_size', 1)) or 0.0
-                        sell_qty = min(initial_qty * 0.3, qty)
-                        if sell_qty <= 0:
-                            continue
-                        commission_rate = estimate_commission(symbol, quantity=sell_qty, maker=False)
-                        fees = target_price * sell_qty * commission_rate
-                        slip_price = simulate_slippage(target_price, direction=direction)
-                        slippage_amt = abs(slip_price - target_price)
-                        exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                        _record_partial_exit(
-                            trade,
-                            "tp2",
-                            exit_price=target_price,
-                            quantity=sell_qty,
-                            fees=fees,
-                            slippage=slippage_amt,
-                            exit_time=exit_time,
-                        )
-                        partial_trade = trade.copy()
-                        entry_price_val = entry
-                        partial_trade['position_size'] = sell_qty
-                        partial_trade['initial_size'] = sell_qty
-                        if entry_price_val is not None:
-                            partial_trade['size'] = sell_qty * entry_price_val
-                            partial_trade['notional'] = sell_qty * entry_price_val
-                        else:
-                            partial_trade['size'] = sell_qty
-                        partial_trade['exit_reason'] = "TP2 partial"
-                        partial_trade['outcome'] = "tp2_partial"
-                        partial_pnl = trade.get('last_partial_pnl')
-                        if partial_pnl is not None:
-                            partial_trade['realized_pnl'] = partial_pnl
-                            partial_trade['total_pnl'] = partial_pnl
-                        partial_trade['realized_fees'] = fees
-                        partial_trade['total_fees'] = fees
-                        partial_trade['realized_slippage'] = slippage_amt
-                        partial_trade['total_slippage'] = slippage_amt
+                        actions.append("tp2_trail_tighten")
                         try:
-                            log_trade_result(
-                                partial_trade,
-                                outcome="tp2_partial",
-                                exit_price=target_price,
-                                exit_time=exit_time,
-                                fees=fees,
-                                slippage=slippage_amt,
+                            send_email(
+                                f"🔒 Trail tightened: {symbol}",
+                                (
+                                    "Price extended to management level 2. "
+                                    f"Stop distance now {TRAIL_TIGHT_ATR:.2f}×ATR."
+                                ),
                             )
-                        except Exception as error:
-                            logger.error("Failed to log TP2 partial for %s: %s", symbol, error)
-                        remaining_qty = max(0.0, qty - sell_qty)
-                        trade['position_size'] = remaining_qty
-                        if entry_price_val is not None:
-                            trade['size'] = remaining_qty * entry_price_val
+                        except Exception:
+                            logger.debug("Failed to send TP2 tighten email for %s", symbol, exc_info=True)
+                elif label == "tp3" and direction == "long":
+                    if status_flags.get("tp3") or target_price is None:
+                        continue
+                    status_flags["tp3"] = True
+                    if _adjust_trailing_multiplier(trade, TRAIL_FINAL_ATR):
                         _persist_active_snapshot(updated_trades, active_trades, index)
-                        desired_sl: Optional[float] = None
-                        current_sl = _to_float(trade.get('sl'))
-                        if trade.get('profit_riding') and target_price is not None:
-                            desired_sl = target_price
-                        elif tp1 is not None:
-                            desired_sl = tp1
-                        if (
-                            desired_sl is not None
-                            and (current_sl is None or desired_sl > current_sl)
-                        ):
-                            _update_stop_loss(trade, desired_sl)
-                            _persist_active_snapshot(updated_trades, active_trades, index)
-                            if trade.get('profit_riding'):
-                                logger.info(
-                                    "%s 🚀 TP4 prep — SL raised to %.6f",
-                                    symbol,
-                                    desired_sl,
-                                )
-                            else:
-                                logger.info(
-                                    "%s hit TP2 — sold 30%% and raised SL to %.6f",
-                                    symbol,
-                                    desired_sl,
-                                )
-                        else:
-                            logger.info("%s hit TP2 — sold 30%%", symbol)
-                        send_email(
-                            f"✅ TP2 Partial: {symbol}",
-                            f"Partial exit qty: {sell_qty:.6f} @ {target_price} (PnL: {trade.get('pnl_tp2', 0.0):.4f})\n\n"
-                            f"Narrative:\n{trade.get('narrative', 'N/A')}",
+                        logger.info(
+                            "%s TP3 threshold — final trailing distance %.2f ATR",
+                            symbol,
+                            TRAIL_FINAL_ATR,
                         )
-                        actions.append("tp2_partial")
-                    elif label == "tp3":
-                        if status_flags.get("tp3") or target_price is None:
-                            continue
-                        status_flags["tp3"] = True
-                        qty = _to_float(trade.get('position_size', trade.get('initial_size', 1)))
-                        if qty is None or qty <= 0:
-                            qty = _to_float(trade.get('initial_size', 1)) or 0.0
-                        exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                        execute_exit_trade(
-                            trade,
-                            exit_price=target_price,
-                            reason="tp3_hit",
-                            outcome="tp3",
-                            quantity=qty,
-                            exit_time=exit_time,
-                        )
-                        _persist_active_snapshot(
-                            updated_trades, active_trades, index, include_current=False
-                        )
-                        _update_rl(trade, target_price)
-                        send_email(
-                            f"✅ TP3 Exit: {symbol}",
-                            f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
-                        )
-                        actions.append("tp3_exit")
-                        trade_closed = True
-                        break
-                    elif label == "stop_loss":
-                        if target_price is None:
-                            continue
-                        qty = _to_float(trade.get('position_size', 1)) or 0.0
-                        exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                        outcome_label = "tp4_sl" if trade.get("profit_riding") else "sl"
-                        reason_text = (
-                            "Trailing stop loss"
-                            if trade.get("profit_riding")
-                            else "Stop loss hit"
-                        )
-                        execute_exit_trade(
-                            trade,
-                            exit_price=target_price,
-                            reason=reason_text,
-                            outcome=outcome_label,
-                            quantity=qty,
-                            exit_time=exit_time,
-                        )
-                        _persist_active_snapshot(
-                            updated_trades, active_trades, index, include_current=False
-                        )
-                        _update_rl(trade, target_price)
-                        send_email(
-                            f" Stop Loss Hit: {symbol}",
-                            f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
-                        )
-                        actions.append("stop_loss")
-                        trade_closed = True
-                        break
-            if trade_closed:
-                logger.debug("%s actions: %s", symbol, actions)
-                continue
-            # Refresh SL reference in case partial exits modified it
-            sl = _to_float(trade.get('sl'))
-            # Trailing logic after TP1 before entering TP4 mode
-            if (
-                trade['status'].get('tp1')
-                and not trade.get('profit_riding')
-                and current_price is not None
-            ):
-                trail_multiplier = 0.5 if adx < 15 or macd_hist < 0 else 1.0
-                trail_candidate = current_price - atr * trail_multiplier
-                base_price = entry if entry is not None else current_price
-                if base_price is None:
-                    base_price = trail_candidate
-                trail_sl = round(max(base_price, trail_candidate), 6)
-                current_sl = sl if sl is not None else _to_float(trade.get('sl'))
-                if current_sl is None or trail_sl > current_sl:
-                    _update_stop_loss(trade, trail_sl)
-                    sl = trail_sl
-                    _persist_active_snapshot(updated_trades, active_trades, index)
-                    logger.info("%s TP1 trail: SL moved to %s", symbol, trail_sl)
-                    actions.append("trail_sl")
-            # TP4 profit riding logic
-            if trade.get('profit_riding'):
-                trail_pct = trade.get('trail_tp_pct')
-                if trail_pct:
-                    next_tp = trade.get('next_trail_tp')
-                    if not next_tp:
-                        next_tp = current_price * (1 + trail_pct)
-                        trade['next_trail_tp'] = next_tp
-                        _persist_active_snapshot(updated_trades, active_trades, index)
-                    if recent_high >= next_tp:
-                        qty = float(trade.get('position_size', 1))
-                        sell_qty = qty * 0.1
-                        commission_rate = estimate_commission(symbol, quantity=sell_qty, maker=False)
-                        fees = next_tp * sell_qty * commission_rate
-                        slip_price = simulate_slippage(next_tp, direction=direction)
-                        slippage_amt = abs(slip_price - next_tp)
-                        exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                        pct_reason = (
-                            f"{trail_pct * 100:.1f}% trail"
-                            if isinstance(trail_pct, (int, float))
-                            else "Trail target"
-                        )
-                        _record_partial_exit(
-                            trade,
-                            "trail",
-                            exit_price=next_tp,
-                            quantity=sell_qty,
-                            fees=fees,
-                            slippage=slippage_amt,
-                            exit_time=exit_time,
-                        )
-                        current_sl = _to_float(trade.get('sl'))
-                        new_sl = max(current_sl or 0, next_tp)
-                        _update_stop_loss(trade, new_sl)
-                        _persist_active_snapshot(updated_trades, active_trades, index)
-                        logger.info("%s 🚀 TP4 trail: SL moved to %s", symbol, new_sl)
-                        remaining_qty = qty - sell_qty
-                        trade['position_size'] = remaining_qty
-                        if entry is not None:
-                            trade['size'] = remaining_qty * entry
-                        trade['next_trail_tp'] = next_tp * (1 + trail_pct)
-                        _persist_active_snapshot(updated_trades, active_trades, index)
-                        send_email(
-                            f"✅ TP Trail: {symbol}",
-                            f"Trailing partial qty: {sell_qty:.6f} @ {next_tp} (PnL: {trade.get('last_trail_partial_pnl', 0.0):.4f})\n\n"
-                            f"Narrative:\n{trade.get('narrative', 'N/A')}",
-                        )
-
-                adx_drop = adx < 20 and adx < adx_prev
-                macd_cross = macd_line_prev > macd_signal_prev and macd_line_last < macd_signal_last
-                price_below_kc = current_price < kc_lower_val
-                if current_price is not None and adx_drop and (macd_cross or price_below_kc):
-                    logger.warning("%s 🚨 TP4 trailing exit triggered", symbol)
+                        actions.append("tp3_trail_final")
+                        try:
+                            send_email(
+                                f"🔒 Trail tightened: {symbol}",
+                                (
+                                    "Momentum extended to management level 3. "
+                                    f"Stop distance now {TRAIL_FINAL_ATR:.2f}×ATR."
+                                ),
+                            )
+                        except Exception:
+                            logger.debug("Failed to send TP3 tighten email for %s", symbol, exc_info=True)
+                elif label == "stop_loss":
+                    if target_price is None:
+                        continue
                     qty = _to_float(trade.get('position_size', 1)) or 0.0
                     exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    trailing_flag = bool(trade.get("trailing_active"))
+                    outcome_label = "trailing_sl" if trailing_flag else "sl"
+                    reason_text = "Trailing stop hit" if trailing_flag else "Stop loss hit"
                     execute_exit_trade(
                         trade,
-                        exit_price=current_price,
-                        reason="TP4 trailing exit",
-                        outcome="tp4",
+                        exit_price=target_price,
+                        reason=reason_text,
+                        outcome=outcome_label,
                         quantity=qty,
                         exit_time=exit_time,
                     )
                     _persist_active_snapshot(
                         updated_trades, active_trades, index, include_current=False
                     )
-                    _update_rl(trade, current_price)
+                    _update_rl(trade, target_price)
                     send_email(
-                        f"✅ TP4 Exit: {symbol}",
+                        f" Stop Loss Hit: {symbol}",
                         f"{trade}\n\n Narrative:\n{trade.get('narrative', 'N/A')}",
                     )
-                    actions.append("tp4_exit")
-                    logger.debug("%s actions: %s", symbol, actions)
-                    continue
-                trail_multiplier = 0.7 if adx < 15 else 1.0
-                trail_sl = round(current_price - atr * trail_multiplier, 6)
-                if trail_sl > trade['sl']:
-                    _update_stop_loss(trade, trail_sl)
-                    _persist_active_snapshot(updated_trades, active_trades, index)
-                    logger.info("%s 🚀 TP4 ride: SL trailed to %s", symbol, trail_sl)
-                    actions.append("tp4_trail_sl")
+                    actions.append("stop_loss")
+                    trade_closed = True
+                    break
+        if trade_closed:
+            logger.debug("%s actions: %s", symbol, actions)
+            continue
+
+        sl = _to_float(trade.get('sl'))
+        trailing_active_now = bool(trade.get("trailing_active"))
+        if trailing_active_now:
+            atr_value: Optional[float]
+            if hasattr(atr, 'iloc'):
+                atr_value = float(atr.iloc[-1])
+            else:
+                atr_value = _to_float(atr)
+            if atr_value is None or not math.isfinite(atr_value) or atr_value <= 0:
+                atr_value = _get_trade_atr(trade)
+
+            if atr_value is not None and atr_value > 0:
+                anchor = _to_float(trade.get("trail_high"))
+                if anchor is None:
+                    anchor = _to_float(trade.get("tp1"))
+                if current_price is not None:
+                    if direction == "long":
+                        anchor = max(anchor or current_price, current_price)
+                    else:
+                        anchor = min(anchor or current_price, current_price)
+                if anchor is not None:
+                    trade["trail_high"] = anchor
+                    multiplier = _to_float(trade.get("trail_multiplier"))
+                    if multiplier is None or multiplier <= 0:
+                        multiplier = TRAIL_INITIAL_ATR
+                        trade["trail_multiplier"] = multiplier
+                    candidate = None
+                    if direction == "long":
+                        candidate = anchor - atr_value * multiplier
+                        lock_price = _to_float(trade.get("locked_profit_price"))
+                        if lock_price is not None:
+                            candidate = max(candidate, lock_price)
+                        if candidate is not None:
+                            current_sl = sl
+                            if current_sl is None or candidate > current_sl + 1e-6:
+                                _update_stop_loss(trade, round(candidate, 6))
+                                sl = candidate
+                                _persist_active_snapshot(updated_trades, active_trades, index)
+                                logger.info(
+                                    "%s trailing SL advanced to %.6f (anchor %.6f, ATR %.4f, mult %.2f)",
+                                    symbol,
+                                    candidate,
+                                    anchor,
+                                    atr_value,
+                                    multiplier,
+                                )
+                                actions.append("trail_sl")
+
+            orderflow_weak = False
+            if flow_analysis is not None:
+                if flow_analysis.state == "sellers in control":
+                    orderflow_weak = True
+                if cvd_strength is not None and cvd_strength < 0:
+                    orderflow_weak = True
+                imbalance_val = _to_float(flow_features.get("trade_imbalance"))
+                if imbalance_val is not None and imbalance_val < -0.15:
+                    orderflow_weak = True
+            momentum_soft = (
+                (adx is not None and adx < 15)
+                or (macd_hist < 0)
+                or (macd_line_last < macd_signal_last)
+            )
+            tighten_needed = orderflow_weak or momentum_soft
+            if tighten_needed and _adjust_trailing_multiplier(trade, TRAIL_FINAL_ATR):
+                _persist_active_snapshot(updated_trades, active_trades, index)
+                logger.info(
+                    "%s momentum waning — trailing multiplier tightened to %.2f ATR",
+                    symbol,
+                    TRAIL_FINAL_ATR,
+                )
+                actions.append("trail_tight_flow")
         # Add the trade back to the updated list if still active
         logger.debug("%s actions: %s", symbol, actions if actions else "none")
         updated_trades.append(trade)

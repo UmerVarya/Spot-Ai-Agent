@@ -347,6 +347,8 @@ from sequence_model import (
 )
 from drawdown_guard import is_trading_blocked
 import numpy as np
+
+from trade_constants import ATR_STOP_MULTIPLIER, TP_ATR_MULTIPLIERS
 from rl_policy import RLPositionSizer
 from trade_utils import get_rl_state
 from microstructure import plan_execution
@@ -2180,10 +2182,10 @@ def run_agent_loop() -> None:
                         atr_val = None
                     trade_usd = calculate_dynamic_trade_size(final_conf, ml_prob, score)
                     if atr_val is not None and not np.isnan(atr_val) and atr_val > 0:
-                        sl_dist = atr_val * 2.0
+                        base_atr = float(atr_val)
                     else:
-                        atr_val = entry_price * 0.02
-                        sl_dist = atr_val * 2.0
+                        base_atr = entry_price * 0.02
+                    sl_dist = base_atr * ATR_STOP_MULTIPLIER
                     state = get_rl_state(sym_vol_pct)
                     mult = 1.0
                     if USE_RL_POSITION_SIZER and rl_sizer is not None:
@@ -2220,10 +2222,13 @@ def run_agent_loop() -> None:
                         if touched_lvn is not None and math.isfinite(touched_lvn):
                             lvn_entry_value = round(float(touched_lvn), 6)
                     sl = round(entry_price - sl_dist, 6)
-                    tp1 = round(entry_price + atr_val * 1.0, 6)
-                    tp2 = round(entry_price + atr_val * 2.0, 6)
-                    tp3 = round(entry_price + atr_val * 3.0, 6)
-                    use_volume_tp = False
+                    tp_candidates: list[Optional[float]] = []
+                    for multiplier in TP_ATR_MULTIPLIERS:
+                        tp_value = round(entry_price + base_atr * multiplier, 6)
+                        tp_candidates.append(tp_value)
+                    while len(tp_candidates) < 3:
+                        tp_candidates.append(None)
+                    tp1, tp2, tp3 = tp_candidates[:3]
                     if volume_profile_result is not None:
                         failed_low = volume_profile_result.metadata.get("failed_low")
                         if failed_low is not None and math.isfinite(failed_low):
@@ -2237,11 +2242,7 @@ def run_agent_loop() -> None:
                                 lvn_stop_price = sl
                         if poc_price is not None and math.isfinite(poc_price):
                             if poc_price > entry_price * 1.0005:
-                                tp1 = round(poc_price, 6)
-                                tp2 = None
-                                tp3 = None
-                                use_volume_tp = True
-                                poc_target_price = tp1
+                                poc_target_price = round(poc_price, 6)
                     if lvn_entry_value is None and isinstance(lvn_level, (int, float)) and math.isfinite(lvn_level):
                         lvn_entry_value = round(float(lvn_level), 6)
                     if volume_profile_result is not None and lvn_stop_price is None:
@@ -2268,6 +2269,8 @@ def run_agent_loop() -> None:
                         "tp1": tp1,
                         "tp2": tp2,
                         "tp3": tp3,
+                        "atr_at_entry": round(base_atr, 6),
+                        "trailing_active": False,
                         "position_size": position_size,
                         "size": trade_usd,
                         "initial_size": position_size,
@@ -2321,7 +2324,7 @@ def run_agent_loop() -> None:
                         "poc_target": poc_target_price,
                         "auction_state": auction_state,
                         "orderflow_analysis": orderflow_metadata,
-                        "take_profit_strategy": "volume_poc" if use_volume_tp else "atr_multiples",
+                        "take_profit_strategy": "atr_trailing",
                     }
                     if micro_plan:
                         logger.debug("Microstructure plan for %s: %s", symbol, micro_plan)

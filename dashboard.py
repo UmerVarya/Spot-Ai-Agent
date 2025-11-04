@@ -1906,7 +1906,7 @@ def render_live_tab() -> None:
             "tp1_partial": "Exited 50% at TP1",
             "tp2_partial": "Exited additional 30% at TP2",
             "tp4": "Final Exit (TP4 ride)",
-            "tp4_sl": "Stopped out after TP3",
+            "trailing_sl": "Trailing stop hit",
             "sl": "Stopped Out (SL)",
             "early_exit": "Early Exit",
             # Fallbacks for other potential outcomes
@@ -1922,7 +1922,7 @@ def render_live_tab() -> None:
             "tp3",
             "tp4",
         }
-        loss_codes = {"tp4_sl", "sl", "early_exit"}
+        loss_codes = {"trailing_sl", "sl", "early_exit"}
         if "outcome" in hist_df.columns:
             hist_df["Outcome Description"] = hist_df["outcome"].map(
                 lambda x: outcome_descriptions.get(str(x), str(x))
