@@ -1021,13 +1021,33 @@ def summarise_technical_score(
     return round(max(0.0, min(score, 10.0)), 2)
 
 
+_TOP_SYMBOLS_CACHE: Dict[str, Any] = {"symbols": [], "timestamp": 0.0}
+_TOP_SYMBOLS_REFRESH_SECONDS = max(1, int(os.getenv("TOP_SYMBOLS_REFRESH_SECONDS", "60")))
+
+
 def get_top_symbols(limit: int = 30) -> list:
     """Return the top quote-volume symbols trading against USDT."""
+    now = time.monotonic()
+    cached_symbols = _TOP_SYMBOLS_CACHE.get("symbols", [])
+    cache_timestamp = _TOP_SYMBOLS_CACHE.get("timestamp", 0.0)
+    if (
+        cached_symbols
+        and now - cache_timestamp < _TOP_SYMBOLS_REFRESH_SECONDS
+        and len(cached_symbols) >= limit
+    ):
+        return cached_symbols[:limit]
+
     client = _get_binance_client()
     if client is None:
-        logger.warning("Binance client unavailable; get_top_symbols returning empty list.")
-        return []
-    tickers = client.get_ticker()
+        logger.warning("Binance client unavailable; get_top_symbols returning cached symbols.")
+        return cached_symbols[:limit]
+
+    try:
+        tickers = client.get_ticker()
+    except Exception:
+        logger.exception("Failed to fetch top symbols from Binance; using cached symbols.")
+        return cached_symbols[:limit]
+
     sorted_tickers = sorted(tickers, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
     symbols = [x['symbol'] for x in sorted_tickers if x['symbol'].endswith("USDT") and not x['symbol'].endswith("BUSD")]
     exclude = {
@@ -1037,6 +1057,9 @@ def get_top_symbols(limit: int = 30) -> list:
     }
     if exclude:
         symbols = [sym for sym in symbols if sym.upper() not in exclude]
+
+    _TOP_SYMBOLS_CACHE["symbols"] = symbols
+    _TOP_SYMBOLS_CACHE["timestamp"] = now
     return symbols[:limit]
 
 def _extract_trade_returns(df: pd.DataFrame) -> pd.Series:
