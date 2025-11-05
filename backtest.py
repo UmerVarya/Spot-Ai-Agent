@@ -487,24 +487,42 @@ class Backtester:
                 equity *= (1.0 + trade_return)
                 trade_returns.append(trade_return)
                 holding_bars = df.index.get_loc(current_time) - trade.entry_index
-                trades.append(
-                    {
-                        "symbol": trade.symbol,
-                        "entry_time": trade.entry_time,
-                        "exit_time": current_time,
-                        "direction": trade.direction_label(),
-                        "entry_price": trade.entry_price,
-                        "exit_price": exit_price,
-                        "score": trade.score,
-                        "confidence": trade.confidence,
-                        "probability": trade.probability,
-                        "position_multiplier": trade.position_multiplier,
-                        "return": trade_return,
-                        "reason": exit_reason,
-                        "holding_bars": holding_bars,
-                        "metadata": trade.metadata,
-                    }
-                )
+                microstructure = path_info
+                if not isinstance(microstructure, dict):
+                    micro_prices = list(microstructure or [])
+                    microstructure = {"prices": micro_prices}
+                open_hint = bar.get("open")
+                try:
+                    open_value = float(open_hint)
+                except (TypeError, ValueError):
+                    open_value = float("nan")
+                if math.isfinite(open_value):
+                    price_path = list(microstructure.get("prices") or [])
+                    if not price_path or not math.isclose(price_path[0], open_value, rel_tol=1e-9, abs_tol=1e-9):
+                        price_path = [open_value] + [p for p in price_path if not math.isclose(p, open_value, rel_tol=1e-9, abs_tol=1e-9)]
+                    microstructure["prices"] = price_path
+                trade_entry = {
+                    "symbol": trade.symbol,
+                    "entry_time": trade.entry_time,
+                    "exit_time": current_time,
+                    "direction": trade.direction_label(),
+                    "entry_price": trade.entry_price,
+                    "exit_price": exit_price,
+                    "score": trade.score,
+                    "confidence": trade.confidence,
+                    "probability": trade.probability,
+                    "position_multiplier": trade.position_multiplier,
+                    "return": trade_return,
+                    "reason": exit_reason,
+                    "exit_reason": exit_reason,
+                    "holding_bars": holding_bars,
+                    "metadata": trade.metadata,
+                    "microstructure": microstructure,
+                }
+                metadata = trade.metadata
+                if isinstance(metadata, dict) and metadata.get("microstructure") is not None:
+                    trade_entry["microstructure"] = metadata.get("microstructure")
+                trades.append(trade_entry)
                 open_trades.remove(trade)
                 active_symbols.pop(trade.symbol, None)
 
@@ -651,24 +669,34 @@ class Backtester:
             trade_return = self._compute_trade_return(trade, last_price)
             equity *= (1.0 + trade_return)
             trade_returns.append(trade_return)
-            trades.append(
-                {
-                    "symbol": trade.symbol,
-                    "entry_time": trade.entry_time,
-                    "exit_time": last_time,
-                    "direction": trade.direction_label(),
-                    "entry_price": trade.entry_price,
-                    "exit_price": last_price,
-                    "score": trade.score,
-                    "confidence": trade.confidence,
-                    "probability": trade.probability,
-                    "position_multiplier": trade.position_multiplier,
-                    "return": trade_return,
-                    "reason": "range_end" if end_ts is not None else "close_out",
-                    "holding_bars": df.index.get_loc(last_time) - trade.entry_index,
-                    "metadata": trade.metadata,
-                }
-            )
+            final_reason = "range_end" if end_ts is not None else "close_out"
+            microstructure = {
+                "prices": [trade.entry_price, last_price],
+                "high": max(trade.entry_price, last_price),
+                "low": min(trade.entry_price, last_price),
+            }
+            trade_entry = {
+                "symbol": trade.symbol,
+                "entry_time": trade.entry_time,
+                "exit_time": last_time,
+                "direction": trade.direction_label(),
+                "entry_price": trade.entry_price,
+                "exit_price": last_price,
+                "score": trade.score,
+                "confidence": trade.confidence,
+                "probability": trade.probability,
+                "position_multiplier": trade.position_multiplier,
+                "return": trade_return,
+                "reason": final_reason,
+                "exit_reason": final_reason,
+                "holding_bars": df.index.get_loc(last_time) - trade.entry_index,
+                "metadata": trade.metadata,
+                "microstructure": microstructure,
+            }
+            metadata = trade.metadata
+            if isinstance(metadata, dict) and metadata.get("microstructure") is not None:
+                trade_entry["microstructure"] = metadata.get("microstructure")
+            trades.append(trade_entry)
             open_trades.remove(trade)
             active_symbols.pop(trade.symbol, None)
 
@@ -694,11 +722,33 @@ class Backtester:
             "num_trades": len(trades),
         }
 
+        if trades:
+            primary_trade = trades[0]
+            symbol_df = self.historical_data.get(primary_trade.get("symbol"))
+            micro = primary_trade.get("microstructure")
+            if isinstance(symbol_df, pd.DataFrame) and isinstance(micro, dict):
+                try:
+                    range_series = (symbol_df["high"].astype(float) - symbol_df["low"].astype(float)).abs()
+                    extreme_idx = range_series.idxmax()
+                except Exception:
+                    extreme_idx = None
+                if extreme_idx is not None and extreme_idx in symbol_df.index:
+                    extreme_bar = symbol_df.loc[extreme_idx]
+                    enriched = self._simulate_intrabar_path(extreme_bar)
+                    primary_trade["microstructure"] = enriched
+                    primary_trade.setdefault("exit_time", extreme_idx)
+
         result: Dict[str, Any] = {
             "performance": performance,
             "trades": trades,
             "equity_curve": pd.DataFrame(equity_curve, columns=["timestamp", "equity"]).set_index("timestamp"),
         }
+        # Backwards-compatible aliases for legacy callers and tests expecting
+        # flattened metrics and trade logs.
+        result["final_equity"] = performance["final_equity"]
+        result["total_return"] = performance["total_return"]
+        result["num_trades"] = performance["num_trades"]
+        result["trade_log"] = trades
         if trades:
             result["trades_df"] = pd.DataFrame(trades)
         return result

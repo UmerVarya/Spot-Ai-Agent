@@ -65,14 +65,16 @@ SIZE_AS_NOTIONAL = os.getenv("SIZE_AS_NOTIONAL", "true").lower() == "true"
 # labels are stored alongside each logged trade so downstream CSV exports do not
 # have to map shorthand codes to friendly text.
 OUTCOME_DESCRIPTIONS = {
-    "tp1_partial": "Exited 50% at TP1",
+    "tp_partial": "Exited at TP",
+    "tp1_partial": "Exited 50% at TP",
     "tp2_partial": "Exited additional 30% at TP2",
     "tp4": "Final Exit (TP4 ride)",
     "trailing_sl": "Trailing stop hit",
     "sl": "Stopped Out (SL)",
     "early_exit": "Early Exit",
     # Fallbacks for other potential outcomes
-    "tp1": "Take Profit 1",
+    "tp": "Take Profit",
+    "tp1": "Take Profit",
     "tp2": "Take Profit 2",
     "tp3": "Take Profit 3",
     "time_exit": "Time-based Exit",
@@ -326,10 +328,20 @@ ACTIVE_TRADES_FILE = (
     or _active_default
 )
 # Primary live-trade history configuration
+_alias_override = os.environ.get("COMPLETED_TRADES_FILE", "").split("#", 1)[0].strip()
+_history_override = os.environ.get("TRADE_HISTORY_FILE", "").split("#", 1)[0].strip()
+if _alias_override and not _history_override:
+    alias_path = os.path.expanduser(os.path.expandvars(_alias_override))
+    if alias_path:
+        TRADE_HISTORY_FILE = alias_path
+        _HISTORY_ENV_OVERRIDE = True
+    else:
+        _HISTORY_ENV_OVERRIDE = TRADE_HISTORY_ENV_OVERRIDE
+else:
+    _HISTORY_ENV_OVERRIDE = TRADE_HISTORY_ENV_OVERRIDE
 # Backwards-compatible aliases
 COMPLETED_TRADES_FILE = TRADE_HISTORY_FILE
 TRADE_LOG_FILE = TRADE_HISTORY_FILE
-_HISTORY_ENV_OVERRIDE = TRADE_HISTORY_ENV_OVERRIDE
 
 # Legacy trade history files that may still contain data from earlier
 # deployments where the CSV lived alongside the source tree. These are read in
