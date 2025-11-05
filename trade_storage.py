@@ -303,6 +303,7 @@ ACTIVE_TRADES_FILE = (
     os.environ.get("ACTIVE_TRADES_FILE", _active_default).split("#", 1)[0].strip()
     or _active_default
 )
+# Primary live-trade history configuration
 _history_default = os.path.join(DATA_DIR, "historical_trades.csv")
 _history_override = os.environ.get("TRADE_HISTORY_FILE")
 if _history_override is None:
@@ -310,6 +311,15 @@ if _history_override is None:
 _history_override = (_history_override or "").split("#", 1)[0].strip()
 _HISTORY_ENV_OVERRIDE = bool(_history_override)
 TRADE_HISTORY_FILE = _history_override or _history_default
+
+# Backtest trade history configuration mirrors the live setup so simulated
+# trades never mingle with the production log.  Keeping the files separate
+# prevents duplicate timestamps from triggering pandas reindex errors when the
+# dashboard reloads history.
+_backtest_default = os.path.join(DATA_DIR, "backtest_trades.csv")
+_backtest_override = os.environ.get("BACKTEST_TRADE_HISTORY_FILE", "")
+_backtest_override = _backtest_override.split("#", 1)[0].strip()
+BACKTEST_TRADE_HISTORY_FILE = _backtest_override or _backtest_default
 # Backwards-compatible aliases
 COMPLETED_TRADES_FILE = TRADE_HISTORY_FILE
 TRADE_LOG_FILE = TRADE_HISTORY_FILE
@@ -333,6 +343,32 @@ _EXPECTED_HISTORY_KEYS = ("timestamp", "entry_time", "exit_time", "symbol")
 ensure_symlink(ACTIVE_TRADES_FILE, os.path.join(_REPO_ROOT, "active_trades.json"))
 ensure_symlink(TRADE_HISTORY_FILE, os.path.join(_REPO_ROOT, "historical_trades.csv"))
 ensure_symlink(TRADE_HISTORY_FILE, os.path.join(_REPO_ROOT, "completed_trades.csv"))
+ensure_symlink(
+    BACKTEST_TRADE_HISTORY_FILE,
+    os.path.join(_REPO_ROOT, "backtest_trades.csv"),
+)
+
+
+def _resolve_history_path(
+    trade: Mapping[str, object] | dict, explicit_path: Optional[str]
+) -> str:
+    """Select the correct CSV destination for ``trade``."""
+
+    if explicit_path:
+        return explicit_path
+
+    destination = str(trade.get("log_destination", "")).strip().lower()
+    if destination in {"backtest", "backtesting"}:
+        return BACKTEST_TRADE_HISTORY_FILE
+
+    if trade.get("is_backtest"):
+        return BACKTEST_TRADE_HISTORY_FILE
+
+    strategy = str(trade.get("strategy", "")).strip().lower()
+    if "backtest" in strategy and BACKTEST_TRADE_HISTORY_FILE:
+        return BACKTEST_TRADE_HISTORY_FILE
+
+    return TRADE_HISTORY_FILE
 
 
 def load_active_trades() -> list:
@@ -470,6 +506,7 @@ def log_trade_result(
     outcome: str,
     exit_price: float,
     *,
+    log_file: Optional[str] = None,
     exit_time: Optional[str] = None,
     fees: float = 0.0,
     slippage: float = 0.0,
@@ -489,6 +526,10 @@ def log_trade_result(
         A human-readable outcome label (e.g., "tp1", "tp2", "sl", "manual exit").
     exit_price : float
         The price at which the trade was closed.
+    log_file : str, optional
+        Alternate CSV destination. When omitted the function automatically
+        routes backtest-labelled trades to :data:`BACKTEST_TRADE_HISTORY_FILE`
+        and all other records to :data:`TRADE_HISTORY_FILE`.
     exit_time : str, optional
         ISO timestamp when the trade exited.  Defaults to the current UTC time.
     fees : float, default 0.0
@@ -496,8 +537,12 @@ def log_trade_result(
     slippage : float, default 0.0
         Slippage incurred on exit.
     """
+    history_path = _resolve_history_path(trade, log_file)
+
     # Normalise any timestamp fields that may appear in the incoming trade
     trade = trade.copy()
+    trade.pop("log_destination", None)
+    trade.pop("is_backtest", None)
     for ts_field in ("open_time", "close"):
         if ts_field in trade and trade[ts_field]:
             dt = pd.to_datetime(trade[ts_field], errors="coerce", utc=True)
@@ -981,18 +1026,18 @@ def log_trade_result(
     # as the header, effectively hiding it from the dashboard.  We treat
     # an empty file the same as a missing file so the header is written
     # on the next append.
-    file_exists = os.path.exists(TRADE_HISTORY_FILE) and os.path.getsize(
-        TRADE_HISTORY_FILE
+    file_exists = os.path.exists(history_path) and os.path.getsize(
+        history_path
     ) > 0
 
     header_needed = True
     if file_exists:
         try:
-            with open(TRADE_HISTORY_FILE, "r", encoding="utf-8") as f:
+            with open(history_path, "r", encoding="utf-8") as f:
                 first_line = f.readline()
         except OSError as exc:  # pragma: no cover - filesystem specific
             logger.warning(
-                "Unable to inspect trade history header %s: %s", TRADE_HISTORY_FILE, exc
+                "Unable to inspect trade history header %s: %s", history_path, exc
             )
             first_line = ""
         if _header_is_compatible(first_line, headers, require_essential=True):
@@ -1014,13 +1059,13 @@ def log_trade_result(
                 ]
                 if missing_required:
                     try:
-                        _consolidate_trade_history_file()
+                        _consolidate_trade_history_file(history_path)
                     except Exception:  # pragma: no cover - best effort upgrade
                         logger.exception(
-                            "Failed to expand trade history columns in %s", TRADE_HISTORY_FILE
+                            "Failed to expand trade history columns in %s", history_path
                         )
                     try:
-                        with open(TRADE_HISTORY_FILE, "r", encoding="utf-8") as f:
+                        with open(history_path, "r", encoding="utf-8") as f:
                             first_line = f.readline()
                     except OSError:
                         first_line = ""
@@ -1036,19 +1081,19 @@ def log_trade_result(
                         }
                 if "pattern" not in canonical_headers:
                     try:
-                        _consolidate_trade_history_file()
+                        _consolidate_trade_history_file(history_path)
                     except Exception:  # pragma: no cover - best effort repair
                         logger.exception(
-                            "Failed to backfill missing pattern column in %s", TRADE_HISTORY_FILE
+                            "Failed to backfill missing pattern column in %s", history_path
                         )
                     else:
                         try:
-                            with open(TRADE_HISTORY_FILE, "r", encoding="utf-8") as f:
+                            with open(history_path, "r", encoding="utf-8") as f:
                                 first_line = f.readline()
                         except OSError as exc:  # pragma: no cover - filesystem specific
                             logger.warning(
                                 "Unable to re-read trade history header %s after consolidation: %s",
-                                TRADE_HISTORY_FILE,
+                                history_path,
                                 exc,
                             )
                             first_line = ""
@@ -1065,14 +1110,14 @@ def log_trade_result(
                         else:
                             canonical_headers = set()
                     if "pattern" not in canonical_headers:
-                        backup_path = _archive_legacy_history_file(TRADE_HISTORY_FILE)
+                        backup_path = _archive_legacy_history_file(history_path)
                         if backup_path is None:
                             try:
-                                with open(TRADE_HISTORY_FILE, "w", encoding="utf-8") as f:
+                                with open(history_path, "w", encoding="utf-8") as f:
                                     f.truncate(0)
                             except OSError as exc:  # pragma: no cover - filesystem specific
                                 logger.exception(
-                                    "Failed to reset legacy trade log %s: %s", TRADE_HISTORY_FILE, exc
+                                    "Failed to reset legacy trade log %s: %s", history_path, exc
                                 )
                                 raise
                         file_exists = False
@@ -1081,14 +1126,14 @@ def log_trade_result(
                         existing_headers = []
                         header_rename_map = {}
         else:
-            backup_path = _archive_legacy_history_file(TRADE_HISTORY_FILE)
+            backup_path = _archive_legacy_history_file(history_path)
             if backup_path is None:
                 try:
-                    with open(TRADE_HISTORY_FILE, "w", encoding="utf-8") as f:
+                    with open(history_path, "w", encoding="utf-8") as f:
                         f.truncate(0)
                 except OSError as exc:  # pragma: no cover - filesystem specific
                     logger.exception(
-                        "Failed to reset legacy trade log %s: %s", TRADE_HISTORY_FILE, exc
+                        "Failed to reset legacy trade log %s: %s", history_path, exc
                     )
                     raise
             file_exists = False
@@ -1104,7 +1149,9 @@ def log_trade_result(
     if not header_rename_map:
         header_rename_map = {col: col for col in headers}
 
-    os.makedirs(os.path.dirname(TRADE_HISTORY_FILE), exist_ok=True)
+    target_dir = os.path.dirname(history_path)
+    if target_dir:
+        os.makedirs(target_dir, exist_ok=True)
     final_row: dict[str, object] = {}
     for column in headers:
         canonical = header_rename_map.get(column, column)
@@ -1130,20 +1177,21 @@ def log_trade_result(
     df_row = pd.DataFrame(
         [{col: final_row.get(col, MISSING_VALUE) for col in headers}], columns=headers
     )
-    with _history_file_lock():
+    with _history_file_lock(history_path):
         df_row.to_csv(
-            TRADE_HISTORY_FILE,
+            history_path,
             mode="a",
             header=header_needed,
             index=False,
             quoting=csv.QUOTE_MINIMAL,
         )
         try:
-            _consolidate_trade_history_file()
+            _consolidate_trade_history_file(history_path)
         except Exception:  # pragma: no cover - consolidation best effort
             logger.exception("Failed to consolidate trade history after append")
 
-    _maybe_send_llm_performance_email()
+    if os.path.abspath(history_path) == os.path.abspath(TRADE_HISTORY_FILE):
+        _maybe_send_llm_performance_email()
 
 
 def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:

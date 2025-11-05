@@ -493,6 +493,7 @@ from trade_storage import (
     load_active_trades,
     log_trade_result,
     TRADE_HISTORY_FILE,
+    BACKTEST_TRADE_HISTORY_FILE,
     ACTIVE_TRADES_FILE,
     _deduplicate_history,
 )
@@ -2166,15 +2167,18 @@ def render_backtest_tab() -> None:
                     "size": 1.0,
                     "strategy": "upload_backtest",
                     "session": "unknown",
+                    "log_destination": "backtest",
+                    "is_backtest": True,
                 }
                 log_trade_result(
                     trade_info,
                     t["outcome"],
                     t["exit"],
+                    log_file=BACKTEST_TRADE_HISTORY_FILE,
                     exit_time=t["exit_time"].strftime("%Y-%m-%d %H:%M:%S"),
                 )
             st.success(
-                f"Backtest generated {len(trades)} trades; results appended to {TRADE_HISTORY_FILE}"
+                f"Backtest generated {len(trades)} trades; results saved to {BACKTEST_TRADE_HISTORY_FILE}"
             )
             train_model()
             st.info("Model training complete. Check logs for details.")
