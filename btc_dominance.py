@@ -1,83 +1,104 @@
-"""
-Utility to fetch Bitcoin dominance from CoinGecko with graceful fallback.
+"""Utilities for retrieving Bitcoin dominance with graceful fallbacks."""
 
-This helper function retrieves the current Bitcoin market dominance (percentage
-of total crypto market capitalization) from the CoinGecko public API.  The
-Coingecko API occasionally changes its response structure, or network issues
-may cause missing keys.  To keep the trading system resilient, the function
-attempts multiple keys and returns a sensible default (50.0%) when data is
-unavailable.
+from __future__ import annotations
 
-Examples
---------
-
->>> dominance = get_btc_dominance()
->>> logger.info(f"BTC dominance is {dominance}%")
-
-If an error occurs or the API response is malformed, details are logged and
-the function returns 50.0 as a neutral default.
-"""
-
+import json
+import logging
+import os
 import time
+from typing import Optional
 
 import requests
-from log_utils import setup_logger
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-logger = setup_logger(__name__)
+LOG = logging.getLogger(__name__)
+
+# Cache file that survives process restarts so repeated failures still have
+# something to fall back on.
+CACHE = os.path.expanduser("/home/ubuntu/spot_data/cache/btc_dominance.json")
+
+_SESSION: Optional[requests.Session] = None
 
 
-_last_btc_dom = {"value": None, "timestamp": 0.0}
+def _session() -> requests.Session:
+    """Return a requests session configured with retries and UA headers."""
+
+    global _SESSION
+    if _SESSION is None:
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": "SpotAI/1.0 (+https://localhost)"})
+        retry = Retry(
+            total=3,
+            backoff_factor=1.5,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET"}),
+        )
+        sess.mount("https://", HTTPAdapter(max_retries=retry))
+        _SESSION = sess
+    return _SESSION
 
 
-def get_btc_dominance() -> float:
-    """
-    Fetch the current Bitcoin dominance percentage from CoinGecko.
+def _load_cached(fresh_only: bool = True) -> Optional[float]:
+    """Return the cached dominance value, optionally requiring freshness."""
 
-    Attempts to parse the dominance value from multiple possible nested keys
-    in the API response.  If the request fails or the expected keys are
-    missing, a fallback value of 50.0 is returned.
-
-    Returns
-    -------
-    float
-        Bitcoin dominance as a percentage of the global crypto market cap.
-    """
-    global _last_btc_dom
-
-    now = time.time()
-    if (
-        _last_btc_dom["value"] is not None
-        and now - _last_btc_dom["timestamp"] < 300
-    ):
-        return _last_btc_dom["value"]
-
-    url = "https://api.coingecko.com/api/v3/global"
     try:
-        response = requests.get(url, timeout=10)
+        with open(CACHE, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        age = time.time() - float(payload.get("ts", 0))
+        if not fresh_only or age < 1800:  # ~30 minutes
+            dominance = payload.get("dominance")
+            if isinstance(dominance, (int, float)):
+                return float(dominance)
+    except Exception:
+        # Cache corruption should not break callers.
+        pass
+    return None
+
+
+def _save_cached(value: float) -> None:
+    """Persist the dominance value for future fallbacks."""
+
+    try:
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        with open(CACHE, "w", encoding="utf-8") as fh:
+            json.dump({"dominance": float(value), "ts": time.time()}, fh)
+    except Exception:
+        # Persistence failures are non-fatal and deliberately ignored.
+        pass
+
+
+def get_btc_dominance(timeout: float = 10.0) -> Optional[float]:
+    """Fetch BTC dominance from CoinGecko with cached/neutral fallbacks."""
+
+    try:
+        response = _session().get(
+            "https://api.coingecko.com/api/v3/global", timeout=timeout
+        )
         response.raise_for_status()
-        data = response.json()
-        # Try the standard nested key path first
+        payload = response.json()
+
         dominance = None
-        try:
-            dominance = float(data.get("data", {}).get("market_cap_percentage", {}).get("btc"))
-        except (TypeError, ValueError):
-            dominance = None
-        # Fallback: some versions of the API return top-level keys
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, dict):
+                market_caps = data.get("market_cap_percentage")
+                if isinstance(market_caps, dict):
+                    dominance = market_caps.get("btc")
+
         if dominance is None:
-            try:
-                dominance = float(data.get("market_cap_percentage", {}).get("btc"))
-            except (TypeError, ValueError):
-                dominance = None
-        if dominance is not None:
-            dominance = round(dominance, 2)
-            _last_btc_dom = {"value": dominance, "timestamp": now}
-            return dominance
-        else:
-            logger.warning("BTC dominance data missing in API response; using default 50.0")
-            return 50.0
-    except Exception as e:
-        logger.warning("Failed to fetch BTC dominance: %s", e, exc_info=True)
-        # Use neutral fallback
-        if _last_btc_dom["value"] is not None:
-            return _last_btc_dom["value"]
-        return 50.0
+            raise ValueError("BTC dominance missing from response payload")
+
+        dominance = float(dominance)
+        _save_cached(dominance)
+        return dominance
+    except Exception as exc:  # pylint: disable=broad-except
+        LOG.warning("BTC dominance fetch failed: %s", exc)
+
+        cached = _load_cached(fresh_only=False)
+        if cached is not None:
+            LOG.info("Using cached BTC dominance value: %s", cached)
+            return cached
+
+        # Final fallback: neutral/None so downstream checks can treat it as no veto.
+        return None
