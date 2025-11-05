@@ -1372,13 +1372,6 @@ def render_live_tab() -> None:
             df_active["Position Size (USDT)"].sum() if not df_active.empty else 0.0
         )
         col5.metric("Total Position Size", f"${total_notional:,.2f}")
-        if np.isfinite(MAX_POSITION_USD) and not df_active.empty:
-            breaches_active = df_active["Position Size (USDT)"] > (MAX_POSITION_USD + 1e-6)
-            if breaches_active.any():
-                st.error(
-                    f"{breaches_active.sum()} active trade(s) exceed the configured "
-                    f"{MAX_POSITION_USD:.0f} USDT cap."
-                )
         df_display = arrow_safe_dataframe(df_active.copy())
         formatters = {
             "Entry": _fmt_price,
@@ -1540,13 +1533,6 @@ def render_live_tab() -> None:
             else:
                 notional_series = entries * quantity_series
         hist_df["Position Size (USDT)"] = pd.to_numeric(notional_series, errors="coerce").fillna(0.0)
-        if np.isfinite(MAX_POSITION_USD):
-            breaches_hist = hist_df["Position Size (USDT)"] > (MAX_POSITION_USD + 1e-6)
-            if breaches_hist.any():
-                st.error(
-                    f"{breaches_hist.sum()} completed trade(s) exceeded the configured "
-                    f"{MAX_POSITION_USD:.0f} USDT cap."
-                )
         def _numeric_series(df: pd.DataFrame, name: str) -> pd.Series:
             """Return numeric column ``name`` aligned to ``df.index``.
 
