@@ -279,7 +279,7 @@ async def run_news_fetcher_async(
         )
         return result
 
-    if successes:
+    if successes and failures == 0:
         result = {
             "ok": True,
             "items": [],
