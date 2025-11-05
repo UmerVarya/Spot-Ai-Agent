@@ -87,15 +87,31 @@ MISSING_VALUE = "N/A"
 ERROR_VALUE = "error"
 
 
+def _normalise_history_path(path: str | None) -> str:
+    """Return a canonical form for ``path`` suitable for equality checks."""
+
+    if not path:
+        return ""
+
+    expanded = os.path.expanduser(os.path.expandvars(path))
+    resolved = os.path.realpath(expanded)
+    normalised = os.path.normcase(os.path.abspath(resolved))
+    return normalised
+
+
 def _assert_backtest_routing(target_path: str) -> None:
     """Ensure backtest runs never write to the live trade log."""
 
     if os.getenv("BACKTEST_MODE") == "1":
-        normalised = (target_path or "").lower()
-        if "backtest" not in normalised:
-            raise AssertionError(
-                f"Backtest mode must not write to live history: {target_path}"
-            )
+        target_normalised = _normalise_history_path(target_path)
+        live_normalised = _normalise_history_path(TRADE_HISTORY_FILE)
+
+        if target_normalised and live_normalised:
+            if target_normalised == live_normalised:
+                raise AssertionError(
+                    "Backtest mode must not write to live history: "
+                    f"{target_path}"
+                )
 
 
 def _normalise_header_line(header_line: str) -> list[str]:
