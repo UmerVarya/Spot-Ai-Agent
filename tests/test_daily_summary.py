@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -53,3 +54,58 @@ def test_generate_daily_summary_fallback_highlights(monkeypatch) -> None:
     assert "BTCUSDT" in summary
     assert "LLM vetoed 1 setup" in summary
     assert "SOLUSDT" in summary
+
+
+def test_generate_daily_summary_uses_narrative_model(monkeypatch) -> None:
+    day = datetime(2024, 1, 5, tzinfo=timezone.utc)
+    df = pd.DataFrame.from_records(
+        [
+            {
+                "exit_time": day.isoformat(),
+                "symbol": "BTCUSDT",
+                "direction": "long",
+                "pnl": 50.0,
+            }
+        ]
+    )
+
+    captured = {}
+
+    def fake_safe_chat_completion(_client, *, model, messages, **kwargs):
+        captured["model"] = model
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="Synthetic summary")
+                )
+            ]
+        )
+
+    monkeypatch.setattr(daily_summary, "safe_chat_completion", fake_safe_chat_completion)
+    monkeypatch.setattr(daily_summary, "get_groq_client", lambda: object())
+    monkeypatch.setattr(daily_summary.config, "get_narrative_model", lambda: "narrative-model")
+
+    summary = daily_summary.generate_daily_summary(day.date(), history=df)
+
+    assert summary == "Synthetic summary"
+    assert captured["model"] == "narrative-model"
+
+
+def test_daily_summary_suppresses_llm_error_reason(monkeypatch) -> None:
+    _disable_llm(monkeypatch)
+    day = datetime(2024, 1, 6, tzinfo=timezone.utc)
+    df = pd.DataFrame.from_records(
+        [
+            {
+                "exit_time": day.isoformat(),
+                "symbol": "BTCUSDT",
+                "direction": "long",
+                "pnl": 42.0,
+                "narrative": "⚠️ Groq client unavailable for narrative generation.",
+            }
+        ]
+    )
+
+    summary = daily_summary.generate_daily_summary(day.date(), history=df)
+
+    assert "Groq client unavailable" not in summary

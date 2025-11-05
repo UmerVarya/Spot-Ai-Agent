@@ -63,7 +63,7 @@ def explain_trailing_action(
     try:
         response = safe_chat_completion(
             client,
-            model=config.get_news_model(),
+            model=config.get_narrative_model(),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},

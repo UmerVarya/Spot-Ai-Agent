@@ -150,8 +150,16 @@ def _candidate_reason(trade: Mapping[str, object]) -> str | None:
         if not value or value == "N/A":
             continue
         text = str(value).strip()
-        if text:
-            return text
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered.startswith("⚠️ groq client unavailable"):
+            continue
+        if lowered.startswith("⚠️ error generating narrative"):
+            continue
+        if lowered.startswith("llm error"):
+            continue
+        return text
     return None
 
 
@@ -278,7 +286,7 @@ def generate_daily_summary(
         try:
             response = safe_chat_completion(
                 client,
-                model=config.get_news_model(),
+                model=config.get_narrative_model(),
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.4,
                 max_tokens=600,
