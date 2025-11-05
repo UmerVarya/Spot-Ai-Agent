@@ -51,7 +51,8 @@ AlertCallback = Callable[["NewsAlert"], Any]
 
 
 async def _default_fetcher() -> Iterable[Mapping[str, Any]]:
-    return await run_news_fetcher_async()
+    payload = await run_news_fetcher_async()
+    return payload.get("items", [])
 
 
 async def _default_analyzer(events: Iterable[Mapping[str, Any]]) -> Mapping[str, Any]:
