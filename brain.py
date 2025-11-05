@@ -109,13 +109,13 @@ try:
         fetch_news_sync as fetch_symbol_news_sync,
     )  # type: ignore
 except Exception:
-    def run_news_fetcher() -> list:  # type: ignore
-        return []
+    def run_news_fetcher() -> dict:  # type: ignore
+        return {"ok": False, "items": [], "source": "neutral", "error": "unavailable"}
 
     def analyze_news_with_llm(events: list) -> Dict[str, Any]:  # type: ignore
         return {"safe": True, "reason": ""}
 
-    async def run_news_fetcher_async(path: str = "news_events.json") -> list:  # type: ignore
+    async def run_news_fetcher_async(path: str = "news_events.json") -> dict:  # type: ignore
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, run_news_fetcher)
 
@@ -380,7 +380,8 @@ async def summarize_recent_news_async() -> str:
                 _load_cached_events,
             )
         except Exception:
-            events = await run_news_fetcher_async()
+            payload = await run_news_fetcher_async()
+            events = list(payload.get("items", []))
         analysis = await analyze_news_with_llm_async(events)
         return str(analysis.get("reason", ""))
     except Exception:
@@ -399,7 +400,8 @@ def summarize_recent_news() -> str:
             with open("news_events.json", "r") as f:
                 events = json.load(f)
         except Exception:
-            events = run_news_fetcher()
+            payload = run_news_fetcher()
+            events = list(payload.get("items", []))
         analysis = analyze_news_with_llm(events)
         return str(analysis.get("reason", ""))
     except Exception:

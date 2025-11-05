@@ -286,8 +286,10 @@ except Exception as e:
 from fetch_news import (
     fetch_news,  # noqa: F401
     run_news_fetcher,  # noqa: F401
-    run_news_fetcher_async,
+    run_news_fetcher_async,  # noqa: F401
     analyze_news_with_llm_async,
+    get_news_cache,
+    trigger_news_refresh,
 )
 from news_monitor import (
     get_news_monitor,
@@ -1004,20 +1006,26 @@ def run_agent_loop() -> None:
 
     def refresh_news_state() -> None:
         try:
-            events = _run_async_task(lambda: run_news_fetcher_async())
+            trigger_news_refresh()
+            payload = get_news_cache()
+            events = list(payload.get("items", []))
             assessment = None
             next_event = minutes_until_next_event(events)
-            if events:
+            if events and payload.get("ok", False) and payload.get("source") not in {"disabled", "neutral"}:
                 try:
                     assessment = _run_async_task(lambda: analyze_news_with_llm_async(events))
                 except Exception as analysis_exc:
                     logger.debug("LLM news analysis failed: %s", analysis_exc, exc_info=True)
-            payload = {
-                "events": events,
-                "assessment": assessment,
-                "next_event_minutes": next_event,
-            }
-            state.merge_section("news", payload)
+            state.merge_section(
+                "news",
+                {
+                    "events": events,
+                    "assessment": assessment,
+                    "next_event_minutes": next_event,
+                    "source": payload.get("source"),
+                    "error": payload.get("error"),
+                },
+            )
             scan_trigger.set()
         except Exception as exc:
             logger.debug("News refresh task failed: %s", exc, exc_info=True)

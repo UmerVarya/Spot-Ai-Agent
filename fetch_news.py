@@ -1,9 +1,12 @@
 import os
 import json
 import asyncio
+import random
+import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Callable, Coroutine, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -31,6 +34,84 @@ logger = setup_logger(__name__)
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+_NEWS_CACHE_PATH_DEFAULT = "news_events.json"
+_WARN_INTERVAL_SECONDS = 120.0
+_NEWS_CACHE: Dict[str, Any] = {
+    "ok": False,
+    "items": [],
+    "source": "neutral",
+    "error": "not_loaded",
+    "timestamp": 0.0,
+}
+_NEWS_CACHE_LOCK = threading.Lock()
+_LAST_WARN_TS = 0.0
+_BACKGROUND_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_BACKGROUND_THREAD: Optional[threading.Thread] = None
+_BACKGROUND_LOCK = threading.Lock()
+_INFLIGHT_REFRESH: Optional[asyncio.Future] = None
+
+
+def _update_cache(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Merge *payload* into the shared news cache."""
+
+    with _NEWS_CACHE_LOCK:
+        _NEWS_CACHE.update(payload)
+        _NEWS_CACHE["timestamp"] = time.time()
+        snapshot = {
+            "ok": bool(_NEWS_CACHE.get("ok")),
+            "items": list(_NEWS_CACHE.get("items", [])),
+            "source": str(_NEWS_CACHE.get("source", "neutral")),
+            "error": _NEWS_CACHE.get("error"),
+        }
+    return snapshot
+
+
+def get_news_cache() -> Dict[str, Any]:
+    """Return a snapshot of the last known news payload."""
+
+    with _NEWS_CACHE_LOCK:
+        return {
+            "ok": bool(_NEWS_CACHE.get("ok")),
+            "items": list(_NEWS_CACHE.get("items", [])),
+            "source": str(_NEWS_CACHE.get("source", "neutral")),
+            "error": _NEWS_CACHE.get("error"),
+        }
+
+
+def _throttled_warning(message: str, *args: Any, **kwargs: Any) -> None:
+    """Emit a warning log no more than once every ``_WARN_INTERVAL_SECONDS``."""
+
+    global _LAST_WARN_TS
+
+    now = time.time()
+    if now - _LAST_WARN_TS >= _WARN_INTERVAL_SECONDS:
+        _LAST_WARN_TS = now
+        logger.warning(message, *args, **kwargs)
+    else:
+        logger.debug(message, *args, **kwargs)
+
+
+def _prime_cache_from_disk(path: str = _NEWS_CACHE_PATH_DEFAULT) -> None:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            items = json.load(handle)
+    except FileNotFoundError:
+        return
+    except Exception:
+        logger.debug("Unable to prime news cache from %s", path, exc_info=True)
+        return
+
+    if isinstance(items, list) and items:
+        _update_cache({
+            "ok": True,
+            "items": items,
+            "source": "cache",
+            "error": None,
+        })
+
+
+_prime_cache_from_disk()
 def _run_coroutine(coro_factory: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
     """Execute an async coroutine factory safely from synchronous code."""
 
@@ -44,41 +125,12 @@ def _run_coroutine(coro_factory: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
             loop.close()
 
 
-async def _fetch_rss(session: aiohttp.ClientSession, url: str, impact: str) -> List[Dict[str, str]]:
-    events: List[Dict[str, str]] = []
-    try:
-        async with session.get(url, timeout=10) as resp:
-            text = await resp.text()
-    except Exception as e:
-        logger.warning("Failed to fetch RSS %s: %s", url, e, exc_info=True)
-        return events
-    try:
-        soup = BeautifulSoup(text, features="xml")
-        items = soup.find_all("item")[:10]
-        for item in items:
-            events.append({
-                "event": item.title.text,
-                "datetime": datetime.utcnow().isoformat() + "Z",
-                "impact": impact,
-            })
-    except Exception as e:
-        logger.warning("RSS parse error for %s: %s", url, e, exc_info=True)
-    return events
-
-
-async def fetch_crypto_news(session: aiohttp.ClientSession) -> List[Dict[str, str]]:
-    return await _fetch_rss(session, "https://cryptopanic.com/news/rss/", "medium")
-
-
-async def fetch_macro_news(session: aiohttp.ClientSession) -> List[Dict[str, str]]:
-    return await _fetch_rss(session, "https://www.fxstreet.com/rss/news", "high")
-
-
 @asynccontextmanager
 async def _client_session(session: Optional[aiohttp.ClientSession]):
     own_session = session is None
     if own_session:
-        session = aiohttp.ClientSession()
+        timeout = aiohttp.ClientTimeout(total=6, connect=3, sock_read=3)
+        session = aiohttp.ClientSession(timeout=timeout)
     assert session is not None
     try:
         yield session
@@ -87,47 +139,221 @@ async def _client_session(session: Optional[aiohttp.ClientSession]):
             await session.close()
 
 
-async def run_news_fetcher_async(
-    path: str = "news_events.json", *, session: Optional[aiohttp.ClientSession] = None
-) -> List[Dict[str, str]]:
-    """Asynchronously fetch and cache crypto + macro news events."""
+async def fetch_source(session: aiohttp.ClientSession, url: str, attempts: int = 2) -> Tuple[bool, str, Optional[str]]:
+    """Fetch a URL with retries, returning ``(ok, text, error)``."""
 
-    try:
-        async with _client_session(session) as client:
-            results = await asyncio.gather(
-                fetch_crypto_news(client),
-                fetch_macro_news(client),
-                return_exceptions=True,
-            )
-    except Exception as exc:
-        logger.warning("News fetcher failed: %s", exc, exc_info=True)
-        return []
+    last_error: Optional[str] = None
+    for attempt in range(max(1, int(attempts))):
+        try:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    return True, await response.text(), None
+                last_error = f"HTTP {response.status}"
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        if attempt < attempts - 1:
+            await asyncio.sleep(0.4 * (2**attempt) + random.random() * 0.2)
+    return False, "", last_error
 
+
+def _parse_rss(text: str, impact: str) -> List[Dict[str, str]]:
     events: List[Dict[str, str]] = []
-    for result in results:
-        if isinstance(result, Exception):
-            logger.warning("News fetch task failed: %s", result, exc_info=True)
+    if not text.strip():
+        return events
+    soup = BeautifulSoup(text, features="xml")
+    items = soup.find_all("item")[:10]
+    now = datetime.utcnow().isoformat() + "Z"
+    for item in items:
+        title = getattr(item, "title", None)
+        if not title or not getattr(title, "text", "").strip():
             continue
-        events.extend(result)
-
-    if events:
-        save_events(events, path)
+        events.append({
+            "event": title.text.strip(),
+            "datetime": now,
+            "impact": impact,
+        })
     return events
 
 
-def run_news_fetcher(path: str = "news_events.json") -> List[Dict[str, str]]:
+async def run_news_fetcher_async(
+    path: str = _NEWS_CACHE_PATH_DEFAULT, *, session: Optional[aiohttp.ClientSession] = None
+) -> Dict[str, Any]:
+    """Fetch news items with bounded retries, updating the shared cache."""
+
+    if os.getenv("NEWS_DISABLED", "false").lower() in {"1", "true", "yes"}:
+        cached = get_news_cache()
+        result = {
+            "ok": bool(cached["items"]),
+            "items": cached["items"],
+            "source": "disabled",
+            "error": "disabled",
+        }
+        _update_cache(result)
+        return result
+
+    semaphore = asyncio.Semaphore(3)
+    start_time = time.perf_counter()
+    sources: Iterable[Tuple[str, str]] = (
+        ("https://cryptopanic.com/news/rss/", "medium"),
+        ("https://www.fxstreet.com/rss/news", "high"),
+    )
+    source_names = ["cryptopanic", "fxstreet"]
+
+    async def _run_source(url: str, impact: str) -> List[Dict[str, str]]:
+        async with semaphore:
+            ok, raw, err = await fetch_source(session_obj, url)
+            if not ok:
+                if err:
+                    _throttled_warning("News source failed: %s (%s)", url, err)
+                return []
+            try:
+                return _parse_rss(raw, impact)
+            except Exception as parse_exc:  # pragma: no cover - defensive logging
+                _throttled_warning("News parse failed for %s: %s", url, parse_exc)
+                return []
+
+    try:
+        async with _client_session(session) as session_obj:
+            tasks = [asyncio.create_task(_run_source(url, impact)) for url, impact in sources]
+            try:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+    except asyncio.CancelledError:
+        cached = get_news_cache()
+        result = {
+            "ok": bool(cached["items"]),
+            "items": cached["items"],
+            "source": "cache" if cached["items"] else "neutral",
+            "error": "cancelled",
+        }
+        _update_cache(result)
+        return result
+    except Exception as exc:
+        _throttled_warning("News fetcher failed: %s", exc)
+        cached = get_news_cache()
+        result = {
+            "ok": bool(cached["items"]),
+            "items": cached["items"],
+            "source": "cache" if cached["items"] else "neutral",
+            "error": "fetch_failed",
+        }
+        _update_cache(result)
+        return result
+
+    events: List[Dict[str, str]] = []
+    failures = 0
+    for outcome in results:
+        if isinstance(outcome, Exception):
+            failures += 1
+            _throttled_warning("News task failed: %r", outcome)
+            continue
+        if outcome:
+            events.extend(outcome)
+        else:
+            failures += 1
+
+    duration = time.perf_counter() - start_time
+
+    if events:
+        save_events(events, path)
+        result = {
+            "ok": True,
+            "items": events,
+            "source": "fxstreet",
+            "error": None,
+        }
+        _update_cache(result)
+        logger.info(
+            "news_refresh ok=1 fail=%s from=%s duration=%.2fs cached=%d",
+            failures,
+            ",".join(source_names),
+            duration,
+            len(events),
+        )
+        return result
+
+    cached = get_news_cache()
+    source = "cache" if cached["items"] else "neutral"
+    result = {
+        "ok": bool(cached["items"]),
+        "items": cached["items"],
+        "source": source,
+        "error": "fetch_failed",
+    }
+    _update_cache(result)
+    logger.info(
+        "news_refresh ok=0 fail=%s from=%s duration=%.2fs cached=%d",
+        failures,
+        ",".join(source_names),
+        duration,
+        len(result["items"]),
+    )
+    return result
+
+
+def run_news_fetcher(path: str = "news_events.json") -> Dict[str, Any]:
     """Synchronous wrapper for fetching news events."""
     try:
         return _run_coroutine(lambda: run_news_fetcher_async(path))
     except Exception as exc:
-        logger.warning("News fetcher execution failed: %s", exc, exc_info=True)
-        return []
+        _throttled_warning("News fetcher execution failed: %s", exc)
+        cached = get_news_cache()
+        return {
+            "ok": bool(cached["items"]),
+            "items": cached["items"],
+            "source": "cache" if cached["items"] else "neutral",
+            "error": "fetch_failed",
+        }
 
 
 def save_events(events: List[Dict[str, str]], path: str = "news_events.json") -> None:
     with open(path, "w") as f:
         json.dump(events, f, indent=2)
     logger.info("Saved %d events to %s", len(events), path)
+
+
+def _loop_runner(loop: asyncio.AbstractEventLoop) -> None:
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+
+def _ensure_background_loop() -> asyncio.AbstractEventLoop:
+    global _BACKGROUND_LOOP, _BACKGROUND_THREAD
+    with _BACKGROUND_LOCK:
+        loop = _BACKGROUND_LOOP
+        if loop and loop.is_running():
+            return loop
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=_loop_runner, args=(loop,), daemon=True)
+        thread.start()
+        _BACKGROUND_LOOP = loop
+        _BACKGROUND_THREAD = thread
+        return loop
+
+
+def trigger_news_refresh(path: str = _NEWS_CACHE_PATH_DEFAULT) -> None:
+    """Schedule a background refresh without blocking the caller."""
+
+    loop = _ensure_background_loop()
+
+    def _schedule() -> None:
+        global _INFLIGHT_REFRESH
+        if _INFLIGHT_REFRESH and not _INFLIGHT_REFRESH.done():
+            return
+
+        task = asyncio.create_task(run_news_fetcher_async(path))
+
+        def _clear(_: asyncio.Future) -> None:
+            global _INFLIGHT_REFRESH
+            _INFLIGHT_REFRESH = None
+
+        task.add_done_callback(_clear)
+        _INFLIGHT_REFRESH = task
+
+    loop.call_soon_threadsafe(_schedule)
 
 
 def _build_llm_payload(metrics: Dict[str, Any]) -> str:
