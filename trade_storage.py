@@ -38,6 +38,13 @@ from trade_schema import (
     build_rename_map,
     normalise_history_columns,
 )
+from config import (
+    TRADE_DATA_DIR,
+    TRADE_HISTORY_FILE,
+    BACKTEST_TRADE_HISTORY_FILE,
+    TRADE_HISTORY_ENV_OVERRIDE,
+    TRADE_DEDUP_KEYS,
+)
 
 logger = logging.getLogger(__name__)
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -78,6 +85,17 @@ OUTCOME_DESCRIPTIONS = {
 TRADE_HISTORY_HEADERS = TRADE_HISTORY_COLUMNS
 MISSING_VALUE = "N/A"
 ERROR_VALUE = "error"
+
+
+def _assert_backtest_routing(target_path: str) -> None:
+    """Ensure backtest runs never write to the live trade log."""
+
+    if os.getenv("BACKTEST_MODE") == "1":
+        normalised = (target_path or "").lower()
+        if "backtest" not in normalised:
+            raise AssertionError(
+                f"Backtest mode must not write to live history: {target_path}"
+            )
 
 
 def _normalise_header_line(header_line: str) -> list[str]:
@@ -275,22 +293,10 @@ if DATABASE_URL:
 # Storage locations
 # ---------------------------------------------------------------------------
 
-# ``DATA_DIR`` now defaults to the shared spot data directory so that trades
-# are written directly to persistent storage instead of a symlink inside the
-# repository.  This avoids ``ReadWritePaths`` restrictions in systemd and
-# ensures historical data survives service restarts.  The environment variable
-# is still honoured for flexibility.
-DEFAULT_DATA_DIR = "/home/ubuntu/spot_data/trades"
-raw_data_dir = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
-# Remove inline comments and surrounding whitespace
-raw_data_dir = raw_data_dir.split("#", 1)[0].strip() or DEFAULT_DATA_DIR
-
-try:
-    os.makedirs(raw_data_dir, exist_ok=True)
-    DATA_DIR = raw_data_dir
-except OSError:
-    DATA_DIR = DEFAULT_DATA_DIR
-    os.makedirs(DATA_DIR, exist_ok=True)
+# ``DATA_DIR`` mirrors the canonical location exported by :mod:`config`.  It
+# remains as a module-level constant for backwards compatibility with
+# components that import ``trade_storage.DATA_DIR`` directly.
+DATA_DIR = TRADE_DATA_DIR
 
 # File locations; ``ACTIVE_TRADES_FILE`` stores open trades in JSON format and
 # ``TRADE_HISTORY_FILE`` stores completed trades in CSV format.  The latter is
@@ -304,25 +310,10 @@ ACTIVE_TRADES_FILE = (
     or _active_default
 )
 # Primary live-trade history configuration
-_history_default = os.path.join(DATA_DIR, "historical_trades.csv")
-_history_override = os.environ.get("TRADE_HISTORY_FILE")
-if _history_override is None:
-    _history_override = os.environ.get("COMPLETED_TRADES_FILE")
-_history_override = (_history_override or "").split("#", 1)[0].strip()
-_HISTORY_ENV_OVERRIDE = bool(_history_override)
-TRADE_HISTORY_FILE = _history_override or _history_default
-
-# Backtest trade history configuration mirrors the live setup so simulated
-# trades never mingle with the production log.  Keeping the files separate
-# prevents duplicate timestamps from triggering pandas reindex errors when the
-# dashboard reloads history.
-_backtest_default = os.path.join(DATA_DIR, "backtest_trades.csv")
-_backtest_override = os.environ.get("BACKTEST_TRADE_HISTORY_FILE", "")
-_backtest_override = _backtest_override.split("#", 1)[0].strip()
-BACKTEST_TRADE_HISTORY_FILE = _backtest_override or _backtest_default
 # Backwards-compatible aliases
 COMPLETED_TRADES_FILE = TRADE_HISTORY_FILE
 TRADE_LOG_FILE = TRADE_HISTORY_FILE
+_HISTORY_ENV_OVERRIDE = TRADE_HISTORY_ENV_OVERRIDE
 
 # Legacy trade history files that may still contain data from earlier
 # deployments where the CSV lived alongside the source tree. These are read in
@@ -1178,6 +1169,7 @@ def log_trade_result(
         [{col: final_row.get(col, MISSING_VALUE) for col in headers}], columns=headers
     )
     with _history_file_lock(history_path):
+        _assert_backtest_routing(history_path)
         df_row.to_csv(
             history_path,
             mode="a",
@@ -1210,10 +1202,10 @@ def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.replace(MISSING_VALUE, pd.NA)
     df = df.drop_duplicates()
-    if "trade_id" in df.columns:
-        key_cols = ["trade_id"]
+    if TRADE_DEDUP_KEYS[0] in df.columns:
+        key_cols = [TRADE_DEDUP_KEYS[0]]
     else:
-        key_cols = [c for c in ["entry_time", "symbol", "strategy"] if c in df.columns]
+        key_cols = [c for c in TRADE_DEDUP_KEYS[1:] if c in df.columns]
     if not key_cols:
         return df
 
@@ -1391,6 +1383,8 @@ def _consolidate_trade_history_file(path: Optional[str] = None) -> None:
     history_path = path or TRADE_HISTORY_FILE
     if not history_path:
         return
+
+    _assert_backtest_routing(history_path)
 
     with _history_file_lock(history_path):
         df = load_trade_history_df(path=history_path)
