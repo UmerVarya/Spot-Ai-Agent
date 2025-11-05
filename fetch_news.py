@@ -199,18 +199,18 @@ async def run_news_fetcher_async(
     )
     source_names = ["cryptopanic", "fxstreet"]
 
-    async def _run_source(url: str, impact: str) -> List[Dict[str, str]]:
+    async def _run_source(url: str, impact: str) -> Tuple[bool, List[Dict[str, str]]]:
         async with semaphore:
             ok, raw, err = await fetch_source(session_obj, url)
             if not ok:
                 if err:
                     _throttled_warning("News source failed: %s (%s)", url, err)
-                return []
+                return False, []
             try:
-                return _parse_rss(raw, impact)
+                return True, _parse_rss(raw, impact)
             except Exception as parse_exc:  # pragma: no cover - defensive logging
                 _throttled_warning("News parse failed for %s: %s", url, parse_exc)
-                return []
+                return False, []
 
     try:
         async with _client_session(session) as session_obj:
@@ -245,13 +245,17 @@ async def run_news_fetcher_async(
 
     events: List[Dict[str, str]] = []
     failures = 0
+    successes = 0
     for outcome in results:
         if isinstance(outcome, Exception):
             failures += 1
             _throttled_warning("News task failed: %r", outcome)
             continue
-        if outcome:
-            events.extend(outcome)
+        success, payload = outcome
+        if success:
+            successes += 1
+            if payload:
+                events.extend(payload)
         else:
             failures += 1
 
@@ -272,6 +276,23 @@ async def run_news_fetcher_async(
             ",".join(source_names),
             duration,
             len(events),
+        )
+        return result
+
+    if successes:
+        result = {
+            "ok": True,
+            "items": [],
+            "source": ",".join(source_names),
+            "error": None,
+        }
+        _update_cache(result)
+        logger.info(
+            "news_refresh ok=1 fail=%s from=%s duration=%.2fs cached=%d",
+            failures,
+            ",".join(source_names),
+            duration,
+            len(result["items"]),
         )
         return result
 
