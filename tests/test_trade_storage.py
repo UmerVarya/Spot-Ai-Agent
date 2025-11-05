@@ -6,6 +6,27 @@ import trade_storage
 import trade_manager
 
 
+def test_assert_backtest_routing_allows_custom_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("BACKTEST_MODE", "1")
+    live_path = tmp_path / "live.csv"
+    custom_path = tmp_path / "results.csv"
+
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(live_path))
+
+    # Should not raise even though the path lacks the word "backtest".
+    trade_storage._assert_backtest_routing(str(custom_path))
+
+
+def test_assert_backtest_routing_blocks_live_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("BACKTEST_MODE", "1")
+    live_path = tmp_path / "live.csv"
+
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(live_path))
+
+    with pytest.raises(AssertionError):
+        trade_storage._assert_backtest_routing(str(live_path))
+
+
 def test_save_and_load_active_trades(tmp_path, monkeypatch):
     path = tmp_path / "active.json"
     monkeypatch.setattr(trade_storage, "ACTIVE_TRADES_FILE", str(path))
