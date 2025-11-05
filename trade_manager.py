@@ -55,6 +55,7 @@ from trade_constants import (
     TRAIL_TIGHT_ATR,
 )
 from observability import log_event
+from management_explainer import explain_trailing_action
 
 # === Constants ===
 
@@ -811,6 +812,55 @@ def _persist_active_snapshot(
         logger.exception("Failed to persist active trades snapshot")
 
 
+def _append_trailing_explanation(
+    trade: dict,
+    event: str,
+    context: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """Attach an LLM generated explanation for a trailing-stop action."""
+
+    try:
+        explanation = explain_trailing_action(event, trade, context or {})
+    except Exception:  # pragma: no cover - defensive logging
+        logger.debug("Failed to build trailing explanation for %s", event, exc_info=True)
+        explanation = ""
+
+    if not explanation:
+        return
+
+    timestamp = datetime.utcnow().isoformat(timespec="seconds")
+    safe_context: Dict[str, Any] = {}
+    if context:
+        for key, value in context.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                safe_context[key] = value
+            else:
+                safe_context[key] = repr(value)
+
+    record: Dict[str, Any] = {
+        "event": event,
+        "ts": timestamp,
+        "message": explanation,
+    }
+    if safe_context:
+        record["context"] = safe_context
+
+    history = trade.get("management_explanations")
+    if not isinstance(history, list):
+        history = []
+    history.append(record)
+    trade["management_explanations"] = history[-10:]
+
+    log_event(
+        logger,
+        "trailing_management_explanation",
+        symbol=trade.get("symbol"),
+        event=event,
+        explanation=explanation,
+        context=safe_context,
+    )
+
+
 def create_new_trade(
     trade: dict,
     *,
@@ -1434,6 +1484,16 @@ def _manage_trades_body() -> None:
         macd_signal = indicators.get('macd_signal')
         kc_lower_series = indicators.get('kc_lower')
         atr = indicators.get('atr', 0.005)
+        atr_latest: Optional[float]
+        if hasattr(atr, 'iloc'):
+            try:
+                atr_latest = float(atr.iloc[-1])
+            except Exception:
+                atr_latest = None
+        else:
+            atr_latest = _to_float(atr)
+        if atr_latest is not None and (not math.isfinite(atr_latest) or atr_latest <= 0):
+            atr_latest = None
 
         if hasattr(adx_series, 'iloc'):
             adx = adx_series.iloc[-1]
@@ -1496,6 +1556,18 @@ def _manage_trades_body() -> None:
                         )
                     except Exception:
                         logger.debug("Failed to send trailing activation email for %s", symbol, exc_info=True)
+                    _append_trailing_explanation(
+                        trade,
+                        "tp1_trailing_activate",
+                        {
+                            "trigger_price": target_price,
+                            "lock_price": lock_price,
+                            "current_price": current_price,
+                            "atr": atr_latest,
+                            "adx": float(adx) if adx is not None else None,
+                            "macd_histogram": macd_hist,
+                        },
+                    )
                 elif label == "tp2" and direction == "long":
                     if status_flags.get("tp2") or target_price is None:
                         continue
@@ -1518,6 +1590,17 @@ def _manage_trades_body() -> None:
                             )
                         except Exception:
                             logger.debug("Failed to send TP2 tighten email for %s", symbol, exc_info=True)
+                        _append_trailing_explanation(
+                            trade,
+                            "tp2_trail_tighten",
+                            {
+                                "new_multiplier": TRAIL_TIGHT_ATR,
+                                "atr": atr_latest,
+                                "adx": float(adx) if adx is not None else None,
+                                "macd_histogram": macd_hist,
+                                "orderflow_state": getattr(flow_analysis, "state", None),
+                            },
+                        )
                 elif label == "tp3" and direction == "long":
                     if status_flags.get("tp3") or target_price is None:
                         continue
@@ -1540,6 +1623,17 @@ def _manage_trades_body() -> None:
                             )
                         except Exception:
                             logger.debug("Failed to send TP3 tighten email for %s", symbol, exc_info=True)
+                        _append_trailing_explanation(
+                            trade,
+                            "tp3_trail_tighten",
+                            {
+                                "new_multiplier": TRAIL_FINAL_ATR,
+                                "atr": atr_latest,
+                                "adx": float(adx) if adx is not None else None,
+                                "macd_histogram": macd_hist,
+                                "orderflow_state": getattr(flow_analysis, "state", None),
+                            },
+                        )
                 elif label == "stop_loss":
                     if target_price is None:
                         continue
@@ -1618,6 +1712,20 @@ def _manage_trades_body() -> None:
                                     multiplier,
                                 )
                                 actions.append("trail_sl")
+                                _append_trailing_explanation(
+                                    trade,
+                                    "trail_sl_move",
+                                    {
+                                        "new_stop": round(candidate, 6) if candidate is not None else None,
+                                        "anchor": anchor,
+                                        "atr": atr_value,
+                                        "multiplier": multiplier,
+                                        "current_price": current_price,
+                                        "locked_profit_price": lock_price,
+                                        "orderflow_state": getattr(flow_analysis, "state", None),
+                                        "cvd_strength": cvd_strength,
+                                    },
+                                )
 
             orderflow_weak = False
             if flow_analysis is not None:
@@ -1642,6 +1750,20 @@ def _manage_trades_body() -> None:
                     TRAIL_FINAL_ATR,
                 )
                 actions.append("trail_tight_flow")
+                _append_trailing_explanation(
+                    trade,
+                    "trail_multiplier_tightened",
+                    {
+                        "new_multiplier": TRAIL_FINAL_ATR,
+                        "atr": atr_value,
+                        "adx": float(adx) if adx is not None else None,
+                        "macd_histogram": macd_hist,
+                        "orderflow_state": getattr(flow_analysis, "state", None),
+                        "cvd_strength": cvd_strength,
+                        "flow_imbalance": flow_imbalance,
+                        "momentum_soft": momentum_soft,
+                    },
+                )
         # Add the trade back to the updated list if still active
         logger.debug("%s actions: %s", symbol, actions if actions else "none")
         updated_trades.append(trade)
