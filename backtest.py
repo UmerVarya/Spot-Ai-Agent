@@ -456,9 +456,16 @@ class Backtester:
                 return False
             return True
 
+        last_in_range_time: Optional[pd.Timestamp] = None
+
         for current_time in timestamps:
             if not isinstance(current_time, pd.Timestamp):
                 current_time = pd.Timestamp(current_time)
+
+            if end_ts is not None and current_time > end_ts:
+                break
+
+            last_in_range_time = current_time
 
             # Update open trades first (trailing + exits)
             for trade in list(open_trades):
@@ -632,8 +639,14 @@ class Backtester:
             df = self.historical_data.get(trade.symbol)
             if df is None:
                 continue
-            last_time = df.index[-1]
-            last_price = float(df.iloc[-1]["close"])
+            if last_in_range_time is None:
+                history = df
+            else:
+                history = df.loc[:last_in_range_time]
+            if history.empty:
+                continue
+            last_time = history.index[-1]
+            last_price = float(history.iloc[-1]["close"])
             last_price = self._apply_slippage(last_price, trade.slippage_bps, -trade.direction)
             trade_return = self._compute_trade_return(trade, last_price)
             equity *= (1.0 + trade_return)
@@ -651,14 +664,26 @@ class Backtester:
                     "probability": trade.probability,
                     "position_multiplier": trade.position_multiplier,
                     "return": trade_return,
-                    "reason": "close_out",
+                    "reason": "range_end" if end_ts is not None else "close_out",
                     "holding_bars": df.index.get_loc(last_time) - trade.entry_index,
                     "metadata": trade.metadata,
                 }
             )
+            open_trades.remove(trade)
             active_symbols.pop(trade.symbol, None)
 
-        equity_curve.append((timestamps[-1] if timestamps else pd.Timestamp.utcnow(), equity))
+        final_time = last_in_range_time
+        if final_time is None:
+            if end_ts is not None:
+                final_time = end_ts
+            elif timestamps:
+                final_time = timestamps[-1]
+            else:
+                final_time = pd.Timestamp.utcnow()
+        if equity_curve and equity_curve[-1][0] == final_time:
+            equity_curve[-1] = (final_time, equity)
+        else:
+            equity_curve.append((final_time, equity))
 
         equity_series = [value for _, value in equity_curve]
         performance = {
