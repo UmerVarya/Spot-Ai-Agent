@@ -100,5 +100,6 @@ def get_btc_dominance(timeout: float = 10.0) -> Optional[float]:
             LOG.info("Using cached BTC dominance value: %s", cached)
             return cached
 
-        # Final fallback: neutral/None so downstream checks can treat it as no veto.
-        return None
+        # Final fallback: return a neutral dominance value so downstream logic
+        # does not overreact to missing data during provider outages.
+        return 50.0
