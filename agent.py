@@ -994,7 +994,7 @@ def run_agent_loop() -> None:
             btc_dom_raw = get_btc_dominance()
             fear_greed_raw = get_fear_greed_index()
             sentiment = get_macro_sentiment()
-            btc_dom = float(btc_dom_raw) if btc_dom_raw is not None else 0.0
+            btc_dom = float(btc_dom_raw) if btc_dom_raw is not None else 50.0
             fear_greed = int(fear_greed_raw) if fear_greed_raw is not None else 0
             payload = {
                 "btc_dominance": btc_dom,
