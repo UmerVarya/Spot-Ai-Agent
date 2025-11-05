@@ -489,13 +489,44 @@ except Exception:
     client = None
 
 # Import shared paths after environment variables are loaded
+import trade_storage as _trade_storage
+
 from trade_storage import (
     load_active_trades,
     log_trade_result,
     TRADE_HISTORY_FILE,
-    BACKTEST_TRADE_HISTORY_FILE,
     ACTIVE_TRADES_FILE,
     _deduplicate_history,
+)
+
+
+def _resolve_backtest_history_path() -> str:
+    """Return the best-effort path for backtest trade history.
+
+    ``trade_storage`` recently introduced :data:`BACKTEST_TRADE_HISTORY_FILE` to
+    keep simulated trades separate from the live log.  Older deployments may
+    lack the constant which causes Streamlit to crash during import.  To keep
+    the dashboard usable we replicate the fallback resolution logic from
+    ``trade_storage`` when the attribute is missing.
+    """
+
+    if hasattr(_trade_storage, "DATA_DIR"):
+        data_dir = getattr(_trade_storage, "DATA_DIR") or ""
+    else:
+        data_dir = os.environ.get("DATA_DIR", "")
+
+    data_dir = (data_dir or "/home/ubuntu/spot_data/trades").split("#", 1)[0].strip()
+    if not data_dir:
+        data_dir = "/home/ubuntu/spot_data/trades"
+
+    env_override = os.environ.get("BACKTEST_TRADE_HISTORY_FILE", "")
+    env_override = env_override.split("#", 1)[0].strip()
+
+    return env_override or os.path.join(data_dir, "backtest_trades.csv")
+
+
+BACKTEST_TRADE_HISTORY_FILE = getattr(
+    _trade_storage, "BACKTEST_TRADE_HISTORY_FILE", _resolve_backtest_history_path()
 )
 from notifier import REJECTED_TRADES_FILE
 from trade_logger import TRADE_LEARNING_LOG_FILE
