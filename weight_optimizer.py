@@ -117,7 +117,9 @@ def optimize_indicator_weights(
     that more recent trades have a larger impact while still considering a deeper
     history. If insufficient data is available, the original weights are returned.
     """
-    if not (os.path.exists(SIGNAL_LOG_FILE) and os.path.exists(TRADE_HISTORY_FILE)):
+    signal_path = os.getenv("SIGNAL_LOG_FILE", SIGNAL_LOG_FILE)
+    trade_path = os.getenv("TRADE_HISTORY_FILE", TRADE_HISTORY_FILE)
+    if not (os.path.exists(signal_path) and os.path.exists(trade_path)):
         return base_weights
     try:
         if ema_span is not None and ema_span <= 0:
@@ -128,13 +130,13 @@ def optimize_indicator_weights(
             ema_span = None
 
         signals = pd.read_csv(
-            filepath_or_buffer=SIGNAL_LOG_FILE,
+            filepath_or_buffer=signal_path,
             sep=tail(lookback),
             engine="python",
             on_bad_lines="skip",
         ).tail(lookback)
         trades = pd.read_csv(
-            filepath_or_buffer=TRADE_HISTORY_FILE,
+            filepath_or_buffer=trade_path,
             sep=tail(lookback),
             engine="python",
             on_bad_lines="skip",
@@ -210,6 +212,9 @@ def optimize_indicator_weights(
         merged["trade_type"] = _derive_trade_type(merged)
         context_group_cols = ["session", "volatility_regime", "trade_type"]
         new_weights = base_weights.copy()
+        overall_outcome_score = (
+            merged["outcome"].astype(str).str.lower() == "win"
+        ).astype(float)
         for key in base_weights.keys():
             col = f"{key}_trigger"
             if col not in merged.columns:
@@ -238,9 +243,21 @@ def optimize_indicator_weights(
                 new_weights[key] = round(base_weights[key] * weighted_factor, 3)
                 continue
 
-            fallback_factor = _win_rate_factor(outcome_score, ema_span)
-            if fallback_factor is not None:
-                new_weights[key] = round(base_weights[key] * fallback_factor, 3)
+            triggered_rate = outcome_score.mean()
+            overall_rate = overall_outcome_score.mean()
+            if len(triggered) < MIN_CONTEXT_OBSERVATIONS:
+                candidates = [
+                    rate
+                    for rate in (triggered_rate, overall_rate)
+                    if rate is not None and not pd.isna(rate)
+                ]
+                fallback_rate = max(candidates) if candidates else 0.0
+            else:
+                fallback_rate = triggered_rate
+            if fallback_rate is None or pd.isna(fallback_rate):
+                fallback_rate = 0.0
+            fallback_rate = max(0.0, min(1.0, float(fallback_rate)))
+            new_weights[key] = round(base_weights[key] * fallback_rate, 3)
         return new_weights
     except Exception as exc:
         logger.exception("Failed to optimize indicator weights: %s", exc)

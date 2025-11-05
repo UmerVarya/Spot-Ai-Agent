@@ -1078,9 +1078,6 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     direction_raw = data.get("direction")
     direction = str(direction_raw).lower() if direction_raw is not None else None
     sl = data.get("sl")
-    tp1 = data.get("tp1")
-    tp2 = data.get("tp2")
-    tp3 = data.get("tp3")
     size_field = data.get("size", data.get("position_size", 0))
     status = data.get("status", {})
     profit_riding = data.get("profit_riding", False)
@@ -1160,27 +1157,41 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     # Status flags for each take-profit level and SL
     status_flags: list[str] = []
 
-    def tp_hit(key: str, target_price) -> bool:
-        """Determine whether a TP level has been reached or executed."""
+    def _resolve_tp_value() -> tuple[str | None, object | None]:
+        """Return the canonical take-profit key and value if present."""
+
+        tp_candidates = [
+            "tp",
+            "take_profit",
+            "tp_target",
+            "tp1",
+        ]
+        for candidate in tp_candidates:
+            value = data.get(candidate)
+            if value not in (None, ""):
+                return candidate, value
+        return None, None
+
+    def tp_hit(target_price, *, status_keys: tuple[str, ...]) -> bool:
+        """Determine whether the take-profit level has been executed."""
 
         if target_price in (None, ""):
             return False
+        # Explicit flags have priority over inferred price checks so that the
+        # UI remains green after a logged execution even if the market retraces.
+        for s_key in status_keys:
+            if s_key and to_bool(status.get(s_key)):
+                return True
+        partial_flags = (
+            data.get("tp_partial"),
+            data.get("tp1_partial"),
+        )
+        if any(to_bool(flag) for flag in partial_flags if flag is not None):
+            return True
         try:
             target_value = float(target_price)
         except Exception:
-            # Fall back to the stored status flag when the target price cannot
-            # be parsed (should not normally happen but keeps the UI resilient)
-            return to_bool(status.get(key))
-        # Explicit status/partial flags take precedence so the indicator stays
-        # green once a partial execution is logged even if price retraces.
-        if to_bool(status.get(key)):
-            return True
-        partial_flag = data.get(f"{key}_partial")
-        if partial_flag is not None and to_bool(partial_flag):
-            return True
-        # Use the current price to infer live status when no explicit flag is
-        # present.  A small tolerance keeps float precision noise from causing
-        # flickering indicators.
+            return False
         if current_price is None:
             return False
         try:
@@ -1193,15 +1204,24 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
         return price_value <= target_value + tolerance
 
     def tp_flag(hit: bool | None, label: str) -> str:
-        """Return an emoji tag indicating whether a TP level was hit."""
+        """Return an emoji tag indicating whether the TP level was hit."""
 
         return ("🟢" if hit else "🔵") + f" {label}"
 
-    for key, label in [("tp1", "TP1"), ("tp2", "TP2"), ("tp3", "TP3")]:
-        # Only show flags for targets that exist in the trade data
-        if data.get(key) is not None:
-            hit = tp_hit(key, data.get(key))
-            status_flags.append(tp_flag(hit, label))
+    tp_key, tp_value = _resolve_tp_value()
+    if tp_value not in (None, ""):
+        status_aliases = tuple(
+            key
+            for key in {
+                tp_key,
+                "tp",
+                "tp1",
+                "take_profit",
+                "tp_target",
+            }
+            if key
+        )
+        status_flags.append(tp_flag(tp_hit(tp_value, status_keys=status_aliases), "TP"))
 
     if to_bool(status.get("sl")):
         status_flags.append("🔴 SL")
@@ -1244,9 +1264,7 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
         "Entry": round(entry_price, 4),
         "Price": round(current_price, 4),
         "SL": round(sl, 4) if sl else None,
-        "TP1": round(tp1, 4) if tp1 else None,
-        "TP2": round(tp2, 4) if tp2 else None,
-        "TP3": round(tp3, 4) if tp3 else None,
+        "TP": round(tp_value, 4) if tp_value else None,
         "Quantity": round(qty, 6),
         "Position Size (USDT)": round(notional, 2),
         "PnL ($)": round(pnl_dollars, 2),
@@ -1405,9 +1423,7 @@ def render_live_tab() -> None:
             "Entry": _fmt_price,
             "Price": _fmt_price,
             "SL": _fmt_price,
-            "TP1": _fmt_price,
-            "TP2": _fmt_price,
-            "TP3": _fmt_price,
+            "TP": _fmt_price,
             "LVN Entry": _fmt_price,
             "LVN Stop": _fmt_price,
             "POC Target": _fmt_price,
@@ -1441,12 +1457,16 @@ def render_live_tab() -> None:
                 entry_val = float(entry_source)
             except Exception:
                 entry_val = 0.0
+            tp_chart_value = None
+            for key in ("tp", "take_profit", "tp_target", "tp1"):
+                candidate = trade_info.get(key)
+                if candidate not in (None, ""):
+                    tp_chart_value = candidate
+                    break
             levels = {
                 "Entry": entry_val,
                 "SL": trade_info.get("sl"),
-                "TP1": trade_info.get("tp1"),
-                "TP2": trade_info.get("tp2"),
-                "TP3": trade_info.get("tp3"),
+                "TP": tp_chart_value,
                 "LVN Entry": trade_info.get("lvn_entry_level"),
                 "LVN Stop": trade_info.get("lvn_stop"),
                 "POC Target": trade_info.get("poc_target"),
@@ -1917,18 +1937,21 @@ def render_live_tab() -> None:
             )
         # Map outcome codes to friendly descriptions
         outcome_descriptions = {
-            "tp1_partial": "Exited 50% at TP1",
+            "tp_partial": "Exited at TP",
+            "tp1_partial": "Exited 50% at TP",
             "tp2_partial": "Exited additional 30% at TP2",
+            "tp": "Take Profit",
+            "tp1": "Take Profit",
+            "tp2": "Take Profit 2",
+            "tp3": "Take Profit 3",
             "tp4": "Final Exit (TP4 ride)",
             "trailing_sl": "Trailing stop hit",
             "sl": "Stopped Out (SL)",
             "early_exit": "Early Exit",
-            # Fallbacks for other potential outcomes
-            "tp1": "Take Profit 1",
-            "tp2": "Take Profit 2",
-            "tp3": "Take Profit 3",
         }
         profit_codes = {
+            "tp",
+            "tp_partial",
             "tp1",
             "tp1_partial",
             "tp2",
@@ -1942,17 +1965,11 @@ def render_live_tab() -> None:
                 lambda x: outcome_descriptions.get(str(x), str(x))
             )
         # Display historical trades table including per-stage metrics when available
-        stage_map = {
-            "pnl_tp1": "PnL TP1 ($)",
-            "pnl_tp2": "PnL TP2 ($)",
-            "pnl_tp3": "PnL TP3 ($)",
-            "size_tp1": "Size TP1",
-            "size_tp2": "Size TP2",
-            "size_tp3": "Size TP3",
-            "notional_tp1": "Notional TP1 ($)",
-            "notional_tp2": "Notional TP2 ($)",
-            "notional_tp3": "Notional TP3 ($)",
-        }
+        stage_candidates = [
+            (("pnl_tp", "pnl_tp1"), "Take Profit PnL ($)"),
+            (("size_tp", "size_tp1"), "Take Profit Size"),
+            (("notional_tp", "notional_tp1"), "Take Profit Notional ($)"),
+        ]
         hist_display = pd.DataFrame(index=hist_df.index)
         base_columns = [
             ("trade_id", "Trade ID"),
@@ -1997,20 +2014,16 @@ def render_live_tab() -> None:
         if "Outcome Description" in hist_df.columns:
             hist_display["Outcome Description"] = hist_df["Outcome Description"]
         stage_display_order: list[str] = []
-        for key in (
-            "pnl_tp1",
-            "size_tp1",
-            "notional_tp1",
-            "pnl_tp2",
-            "size_tp2",
-            "notional_tp2",
-            "pnl_tp3",
-            "size_tp3",
-            "notional_tp3",
-        ):
-            if key in hist_df.columns:
-                label = stage_map[key]
-                hist_display[label] = numcol(hist_df, key)
+        for raw_options, label in stage_candidates:
+            selected_series = None
+            for key in raw_options:
+                if key in hist_df.columns:
+                    series = numcol(hist_df, key)
+                    if series.notna().any() and not (series.fillna(0).abs() < 1e-9).all():
+                        selected_series = series
+                        break
+            if selected_series is not None:
+                hist_display[label] = selected_series
                 stage_display_order.append(label)
         for dt_col in ("Entry Time", "Exit Time"):
             if dt_col in hist_display.columns:
@@ -2070,7 +2083,7 @@ def render_live_tab() -> None:
         for col in ("Entry Price", "Exit Price"):
             if col in hist_display.columns:
                 formatters[col] = _fmt_price
-        for col in ("Quantity", "Size TP1", "Size TP2"):
+        for col in ("Quantity", "Take Profit Size"):
             if col in hist_display.columns:
                 formatters[col] = _fmt_quantity
         money_cols = [
@@ -2079,10 +2092,8 @@ def render_live_tab() -> None:
             "Net PnL (USDT)",
             "Fees (USDT)",
             "Slippage (USDT)",
-            "PnL TP1 ($)",
-            "PnL TP2 ($)",
-            "Notional TP1 ($)",
-            "Notional TP2 ($)",
+            "Take Profit PnL ($)",
+            "Take Profit Notional ($)",
         ]
         for col in money_cols:
             if col in hist_display.columns:
@@ -2105,6 +2116,9 @@ def render_live_tab() -> None:
                 _highlight_position_limit, subset=["Position Size (USDT)"]
             )
         st.dataframe(hist_display_style, use_container_width=True)
+        with st.expander("Show raw trade history columns", expanded=False):
+            raw_preview = arrow_safe_dataframe(hist_df.copy())
+            st.dataframe(raw_preview, use_container_width=True)
         # CSV download button
         csv_data = hist_df.to_csv(index=False).encode("utf-8")
         st.download_button(
