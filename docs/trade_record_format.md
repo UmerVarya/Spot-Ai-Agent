@@ -98,7 +98,7 @@ The `outcome` field uses the following codes:
 | `tp1_partial` | Exited 50% at TP1 |
 | `tp2_partial` | Exited additional 30% at TP2 |
 | `tp4` | Final Exit (TP4 ride) |
-| `tp4_sl` | Stopped out after TP3 |
+| `trailing_sl` | Trailing stop hit |
 | `sl` | Stopped Out (SL) |
 | `early_exit` | Early Exit |
 | `tp1` | Take Profit 1 |

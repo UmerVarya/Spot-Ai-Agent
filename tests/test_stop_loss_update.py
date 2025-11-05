@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pytest
 
+from trade_constants import TRAIL_INITIAL_ATR, TRAIL_TIGHT_ATR, TRAIL_LOCK_IN_RATIO
+
 
 def test_update_stop_loss_calls_util(monkeypatch):
     calls = {}
@@ -19,11 +21,20 @@ def test_update_stop_loss_calls_util(monkeypatch):
 
     monkeypatch.setattr(trade_manager, 'update_stop_loss_order', fake_update)
     monkeypatch.setattr(trade_manager, 'send_email', fake_email)
-    trade = {'symbol': 'BTCUSDT', 'position_size': 1, 'size': 100, 'sl': 100, 'tp1': 110, 'status': {'tp1': False}}
+    trade = {
+        'symbol': 'BTCUSDT',
+        'position_size': 1,
+        'size': 100,
+        'sl': 100,
+        'tp1': 110,
+        'status': {'tp1': False},
+        'take_profit_strategy': 'atr_trailing',
+        'trailing_active': False,
+    }
     trade_manager._update_stop_loss(trade, 90)
     assert trade['sl'] == 90
     assert trade['sl_order_id'] == '123'
-    assert calls['args'] == ('BTCUSDT', 1.0, 90, None, 110)
+    assert calls['args'] == ('BTCUSDT', 1.0, 90, None, None)
     assert emails['args'][0] == 'SL Updated: BTCUSDT'
     assert emails['args'][1]['new_sl'] == 90
 
@@ -53,21 +64,26 @@ def test_update_stop_loss_order_places_and_cancels(monkeypatch):
     assert dummy.oco_kwargs['stopPrice'] == 25000.0
 
 
-def test_profit_riding_trails_stop_loss(monkeypatch):
+def test_trailing_activation_moves_stop_to_lock_price(monkeypatch):
+    now = datetime.utcnow()
+    entry = 100.0
+    tp1 = 115.0
+    atr_value = 5.0
+    lock_price = entry + (tp1 - entry) * TRAIL_LOCK_IN_RATIO
     trade = {
         'symbol': 'BTCUSDT',
         'direction': 'long',
-        'entry': 100.0,
+        'entry': entry,
         'position_size': 1.0,
-        'sl': 120.0,
-        'tp1': 110.0,
+        'sl': entry - 10.0,
+        'tp1': tp1,
         'tp2': 120.0,
         'tp3': 130.0,
-        'status': {'tp1': True, 'tp2': True, 'tp3': True},
-        'profit_riding': True,
-        'trail_tp_pct': 0.05,
-        'next_trail_tp': 150.0,
-        'entry_time': datetime.utcnow().isoformat() + 'Z',
+        'status': {'tp1': False, 'tp2': False, 'tp3': False},
+        'take_profit_strategy': 'atr_trailing',
+        'trailing_active': False,
+        'atr_at_entry': atr_value,
+        'entry_time': (now - timedelta(minutes=5)).isoformat(),
     }
 
     def fake_load():
@@ -79,10 +95,9 @@ def test_profit_riding_trails_stop_loss(monkeypatch):
         saved['trades'] = trades
 
     def fake_price_data(symbol):
-        now = datetime.utcnow()
         idx = pd.DatetimeIndex([now - timedelta(minutes=1)])
         return pd.DataFrame(
-            {'close': [151.0], 'high': [151.0], 'low': [151.0]}, index=idx
+            {'close': [116.0], 'high': [116.0], 'low': [112.0]}, index=idx
         )
 
     def fake_commission(symbol, quantity, maker):
@@ -92,7 +107,13 @@ def test_profit_riding_trails_stop_loss(monkeypatch):
         return price
 
     def fake_calc_indicators(price_data):
-        return {'adx': 25, 'macd': 0, 'macd_signal': 0, 'kc_lower': 0, 'atr': 1}
+        return {
+            'adx': 25,
+            'macd': 0.4,
+            'macd_signal': 0.1,
+            'kc_lower': 0,
+            'atr': atr_value,
+        }
 
     def fake_macro():
         return {'bias': 'neutral', 'confidence': 0}
@@ -110,9 +131,9 @@ def test_profit_riding_trails_stop_loss(monkeypatch):
     monkeypatch.setattr(trade_manager, 'simulate_slippage', fake_slippage)
     monkeypatch.setattr(trade_manager, 'calculate_indicators', fake_calc_indicators)
     monkeypatch.setattr(trade_manager, 'analyze_macro_sentiment', fake_macro)
-    monkeypatch.setattr(trade_manager, 'log_trade_result', lambda *args, **kwargs: None)
     monkeypatch.setattr(trade_manager, '_update_stop_loss', fake_update_sl)
     monkeypatch.setattr(trade_manager, '_update_rl', lambda *args, **kwargs: None)
+    monkeypatch.setattr(trade_manager, 'log_trade_result', lambda *args, **kwargs: None)
     monkeypatch.setattr(trade_manager, 'send_email', lambda *args, **kwargs: None)
     monkeypatch.setattr(trade_manager, 'get_order_book', lambda *args, **kwargs: None)
     monkeypatch.setattr(trade_manager, 'plan_execution', lambda *args, **kwargs: None)
@@ -121,28 +142,39 @@ def test_profit_riding_trails_stop_loss(monkeypatch):
 
     trade_manager.manage_trades()
 
-    assert sl_calls['new_sl'] == pytest.approx(150.0)
+    expected_lock = pytest.approx(lock_price, rel=1e-6)
+    assert sl_calls['new_sl'] == expected_lock
     saved_trade = saved['trades'][0]
-    assert saved_trade['sl'] == pytest.approx(150.0)
-    assert saved_trade['next_trail_tp'] == pytest.approx(150.0 * 1.05)
+    assert saved_trade['sl'] == expected_lock
+    assert saved_trade['trailing_active'] is True
+    assert saved_trade['trail_multiplier'] == pytest.approx(TRAIL_INITIAL_ATR)
 
 
-def test_tp2_partial_raises_stop_to_tp2_when_profit_riding(monkeypatch):
+def test_tp2_threshold_tightens_trailing_multiplier(monkeypatch):
     now = datetime.utcnow()
+    entry = 100.0
+    tp1 = 115.0
+    tp2 = 120.0
+    atr_value = 5.0
+    lock_price = entry + (tp1 - entry) * TRAIL_LOCK_IN_RATIO
     trade = {
         'symbol': 'BTCUSDT',
         'direction': 'long',
-        'entry': 100.0,
+        'entry': entry,
         'position_size': 0.5,
         'initial_size': 0.5,
-        'sl': 95.0,
-        'tp1': 105.0,
-        'tp2': 110.0,
+        'sl': lock_price,
+        'tp1': tp1,
+        'tp2': tp2,
         'tp3': 130.0,
         'status': {'tp1': True, 'tp2': False, 'tp3': False},
-        'profit_riding': True,
-        'trail_tp_pct': 0.05,
-        'entry_time': (now - timedelta(minutes=10)).isoformat() + 'Z',
+        'take_profit_strategy': 'atr_trailing',
+        'trailing_active': True,
+        'trail_multiplier': TRAIL_INITIAL_ATR,
+        'trail_high': tp1,
+        'locked_profit_price': lock_price,
+        'atr_at_entry': atr_value,
+        'entry_time': (now - timedelta(minutes=15)).isoformat(),
     }
 
     def fake_load():
@@ -156,7 +188,7 @@ def test_tp2_partial_raises_stop_to_tp2_when_profit_riding(monkeypatch):
     def fake_price_data(symbol):
         idx = pd.DatetimeIndex([now - timedelta(minutes=1)])
         return pd.DataFrame(
-            {'close': [111.0], 'high': [111.0], 'low': [108.0]}, index=idx
+            {'close': [121.0], 'high': [121.0], 'low': [118.0]}, index=idx
         )
 
     def fake_commission(symbol, quantity, maker):
@@ -167,20 +199,20 @@ def test_tp2_partial_raises_stop_to_tp2_when_profit_riding(monkeypatch):
 
     def fake_calc_indicators(price_data):
         return {
-            'adx': 25,
-            'macd': 0.2,
-            'macd_signal': 0.1,
+            'adx': 28,
+            'macd': 0.5,
+            'macd_signal': 0.2,
             'kc_lower': 0,
-            'atr': 1.0,
+            'atr': atr_value,
         }
 
     def fake_macro():
         return {'bias': 'neutral', 'confidence': 0}
 
-    sl_updates = {}
+    sl_calls = {}
 
     def fake_update_sl(tr, new_sl):
-        sl_updates['new_sl'] = new_sl
+        sl_calls['new_sl'] = new_sl
         tr['sl'] = new_sl
 
     monkeypatch.setattr(trade_manager, 'load_active_trades', fake_load)
@@ -201,6 +233,6 @@ def test_tp2_partial_raises_stop_to_tp2_when_profit_riding(monkeypatch):
 
     trade_manager.manage_trades()
 
-    assert sl_updates['new_sl'] == pytest.approx(110.0)
     saved_trade = saved['trades'][0]
-    assert saved_trade['sl'] == pytest.approx(110.0)
+    assert saved_trade['status']['tp2'] is True
+    assert saved_trade['trail_multiplier'] == pytest.approx(TRAIL_TIGHT_ATR)

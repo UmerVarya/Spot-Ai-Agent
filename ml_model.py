@@ -485,7 +485,7 @@ def _extract_features(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
     """Extract feature matrix X and label vector y from the learning log."""
 
     session_map = {"Asia": 0, "Europe": 1, "US": 2, "New York": 2, "unknown": 3}
-    success_outcomes = {"tp1", "tp2", "tp3", "tp4", "tp4_sl", "win"}
+    success_outcomes = {"tp1", "tp2", "tp3", "tp4", "trailing_sl", "win"}
     feature_order = [
         'score', 'confidence', 'session_id', 'btc_dom', 'fear_greed', 'sent_conf',
         'sent_bias', 'pattern_len', 'volatility', 'htf_trend', 'order_imbalance',
@@ -1383,7 +1383,7 @@ def predict_success_probability(
     history = load_trade_history_df()
     time_since_last = 0.0
     recent_win_rate = 0.5
-    success_outcomes = {"tp1", "tp2", "tp3", "tp4", "tp4_sl", "win"}
+    success_outcomes = {"tp1", "tp2", "tp3", "tp4", "trailing_sl", "win"}
     if not history.empty:
         try:
             if "exit_time" in history.columns:
