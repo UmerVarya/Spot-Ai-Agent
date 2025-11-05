@@ -86,7 +86,7 @@ Write a short, confident explanation justifying the trade in plain English. End 
     try:
         response = safe_chat_completion(
             client,
-            model=config.get_news_model(),
+            model=config.get_narrative_model(),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=500,

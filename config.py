@@ -49,8 +49,12 @@ def get_macro_groq_model() -> str:
     return os.getenv("MACRO_GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 
 
+def get_news_groq_model() -> str:
+    return os.getenv("NEWS_GROQ_MODEL", "llama-3.1-8b-instant")
+
+
 def get_narrative_groq_model() -> str:
-    return os.getenv("NARRATIVE_GROQ_MODEL", "llama-3.1-8b-instant")
+    return os.getenv("NARRATIVE_GROQ_MODEL", get_news_groq_model())
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +79,8 @@ def get(key: str, default: str | None = None) -> str | None:
 #   when other endpoints are rate limited or unavailable.
 DEFAULT_GROQ_MODEL = get_default_groq_model()
 DEFAULT_MACRO_MODEL = get_macro_groq_model()
-DEFAULT_NEWS_MODEL = get_narrative_groq_model()
+DEFAULT_NEWS_MODEL = get_news_groq_model()
+DEFAULT_NARRATIVE_MODEL = get_narrative_groq_model()
 DEFAULT_OVERFLOW_MODEL = "llama-3.3-70b-versatile"
 
 # Groq periodically retires older Llama releases (for example the
@@ -131,7 +136,16 @@ def get_macro_model() -> str:
 def get_news_model() -> str:
     """Return the lightweight model for news filters and summaries."""
 
-    return _resolve_model("NEWS_LLM_MODEL", DEFAULT_NEWS_MODEL)
+    return _resolve_model(("NEWS_LLM_MODEL", "NEWS_GROQ_MODEL"), DEFAULT_NEWS_MODEL)
+
+
+def get_narrative_model() -> str:
+    """Return the model dedicated to narrative and recap generation."""
+
+    return _resolve_model(
+        ("NARRATIVE_LLM_MODEL", "NARRATIVE_GROQ_MODEL", "NEWS_LLM_MODEL"),
+        DEFAULT_NARRATIVE_MODEL,
+    )
 
 
 def get_overflow_model() -> str:
@@ -325,7 +339,7 @@ def get_macro_groq_model() -> str:
 def get_narrative_groq_model() -> str:
     """Return the Groq model for narrative/news generation workloads."""
 
-    return get_news_model()
+    return get_narrative_model()
 
 
 __all__ = [
@@ -333,6 +347,7 @@ __all__ = [
     "get_groq_model",
     "get_macro_model",
     "get_news_model",
+    "get_narrative_model",
     "get_overflow_model",
     "get_default_groq_model",
     "get_macro_groq_model",
