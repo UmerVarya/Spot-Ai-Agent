@@ -43,6 +43,39 @@ except Exception:  # pragma: no cover
     alt = None
 
 
+def _resolve_paths() -> tuple[str, str]:
+    """Return the live and backtest trade history paths."""
+
+    try:
+        from config import TRADE_HISTORY_FILE, BACKTEST_TRADE_HISTORY_FILE
+
+        return TRADE_HISTORY_FILE, BACKTEST_TRADE_HISTORY_FILE
+    except Exception:
+        pass
+
+    try:
+        from trade_storage import (
+            TRADE_HISTORY_FILE as LIVE_F,
+            BACKTEST_TRADE_HISTORY_FILE as BT_F,
+        )
+
+        return LIVE_F, BT_F
+    except Exception:
+        pass
+
+    return (
+        "data/live/historical_trades.csv",
+        "backtests/out/historical_trades.csv",
+    )
+
+
+TRADE_HISTORY_FILE, BACKTEST_TRADE_HISTORY_FILE = _resolve_paths()
+if TRADE_HISTORY_FILE:
+    os.makedirs(os.path.dirname(TRADE_HISTORY_FILE) or ".", exist_ok=True)
+if BACKTEST_TRADE_HISTORY_FILE:
+    os.makedirs(os.path.dirname(BACKTEST_TRADE_HISTORY_FILE) or ".", exist_ok=True)
+
+
 def numcol(df: pd.DataFrame, name: str, default=np.nan) -> pd.Series:
     """Return numeric Series for column `name` (or an aligned NaN Series if missing)."""
 
@@ -56,9 +89,6 @@ def numcol(df: pd.DataFrame, name: str, default=np.nan) -> pd.Series:
     # sanitize weird values without using .replace on a scalar
     s = s.where(np.isfinite(s))  # turn inf/-inf into NaN
     return s
-
-# Ensure environment variables are loaded once
-import config
 
 # Optional Binance client for live prices
 try:
@@ -488,45 +518,11 @@ try:
 except Exception:
     client = None
 
-# Import shared paths after environment variables are loaded
-import trade_storage as _trade_storage
-
 from trade_storage import (
     load_active_trades,
     log_trade_result,
-    TRADE_HISTORY_FILE,
     ACTIVE_TRADES_FILE,
     _deduplicate_history,
-)
-
-
-def _resolve_backtest_history_path() -> str:
-    """Return the best-effort path for backtest trade history.
-
-    ``trade_storage`` recently introduced :data:`BACKTEST_TRADE_HISTORY_FILE` to
-    keep simulated trades separate from the live log.  Older deployments may
-    lack the constant which causes Streamlit to crash during import.  To keep
-    the dashboard usable we replicate the fallback resolution logic from
-    ``trade_storage`` when the attribute is missing.
-    """
-
-    if hasattr(_trade_storage, "DATA_DIR"):
-        data_dir = getattr(_trade_storage, "DATA_DIR") or ""
-    else:
-        data_dir = os.environ.get("DATA_DIR", "")
-
-    data_dir = (data_dir or "/home/ubuntu/spot_data/trades").split("#", 1)[0].strip()
-    if not data_dir:
-        data_dir = "/home/ubuntu/spot_data/trades"
-
-    env_override = os.environ.get("BACKTEST_TRADE_HISTORY_FILE", "")
-    env_override = env_override.split("#", 1)[0].strip()
-
-    return env_override or os.path.join(data_dir, "backtest_trades.csv")
-
-
-BACKTEST_TRADE_HISTORY_FILE = getattr(
-    _trade_storage, "BACKTEST_TRADE_HISTORY_FILE", _resolve_backtest_history_path()
 )
 from notifier import REJECTED_TRADES_FILE
 from trade_logger import TRADE_LEARNING_LOG_FILE

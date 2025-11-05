@@ -12,6 +12,22 @@ load_dotenv()
 import os
 
 
+def _clean_path(value: str | None) -> str:
+    """Return ``value`` without inline comments or surrounding whitespace."""
+
+    if not value:
+        return ""
+    return value.split("#", 1)[0].strip()
+
+
+def _ensure_parent_dir(path: str) -> None:
+    """Create the parent directory for ``path`` when possible."""
+
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+
 # ---------------------------------------------------------------------------
 # LLM routing feature flags
 # ---------------------------------------------------------------------------
@@ -159,6 +175,54 @@ def _env_int(name: str, default: int) -> int:
         return int(float(raw))
     except (TypeError, ValueError):
         return int(default)
+
+
+# ---------------------------------------------------------------------------
+# Trade storage locations
+# ---------------------------------------------------------------------------
+
+DEFAULT_TRADE_DATA_DIR = "/home/ubuntu/spot_data/trades"
+
+
+def _resolve_trade_data_dir() -> str:
+    candidate = _clean_path(os.getenv("DATA_DIR")) or DEFAULT_TRADE_DATA_DIR
+    try:
+        os.makedirs(candidate, exist_ok=True)
+        return candidate
+    except OSError:
+        os.makedirs(DEFAULT_TRADE_DATA_DIR, exist_ok=True)
+        return DEFAULT_TRADE_DATA_DIR
+
+
+def _resolve_history_override() -> tuple[str, bool]:
+    override = _clean_path(os.getenv("TRADE_HISTORY_FILE"))
+    if not override:
+        override = _clean_path(os.getenv("COMPLETED_TRADES_FILE"))
+    return override, bool(override)
+
+
+def _resolve_backtest_override() -> str:
+    return _clean_path(os.getenv("BACKTEST_TRADE_HISTORY_FILE"))
+
+
+def _resolve_history_path(default_path: str, override: str) -> str:
+    path = override or default_path
+    if path:
+        _ensure_parent_dir(path)
+    return path
+
+
+TRADE_DATA_DIR = _resolve_trade_data_dir()
+_TRADE_HISTORY_OVERRIDE, TRADE_HISTORY_ENV_OVERRIDE = _resolve_history_override()
+TRADE_HISTORY_FILE = _resolve_history_path(
+    os.path.join(TRADE_DATA_DIR, "historical_trades.csv"), _TRADE_HISTORY_OVERRIDE
+)
+BACKTEST_TRADE_HISTORY_FILE = _resolve_history_path(
+    os.path.join(TRADE_DATA_DIR, "backtest_trades.csv"), _resolve_backtest_override()
+)
+
+# Keys used to collapse duplicate rows in trade history consolidation.
+TRADE_DEDUP_KEYS = ("trade_id", "entry_time", "symbol", "strategy")
 
 
 @dataclass(frozen=True)
