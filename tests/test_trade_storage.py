@@ -402,3 +402,34 @@ def test_store_trade_respects_global_cap(tmp_path, monkeypatch):
     assert trade_storage.store_trade(second) is False
     trades = trade_storage.load_active_trades()
     assert len(trades) == 1
+
+
+def test_backtest_trades_written_to_separate_file(tmp_path, monkeypatch):
+    live_path = tmp_path / "live.csv"
+    backtest_path = tmp_path / "backtest.csv"
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(live_path))
+    monkeypatch.setattr(trade_storage, "BACKTEST_TRADE_HISTORY_FILE", str(backtest_path))
+
+    trade = {
+        "symbol": "BTCUSDT",
+        "direction": "long",
+        "entry": 100.0,
+        "size": 100.0,
+        "position_size": 1.0,
+        "strategy": "upload_backtest",
+        "session": "unknown",
+        "entry_time": "2025-01-01 00:00:00",
+        "log_destination": "backtest",
+        "is_backtest": True,
+    }
+
+    trade_storage.log_trade_result(trade, outcome="tp1", exit_price=110.0)
+
+    assert not live_path.exists()
+    with open(backtest_path, newline="") as fh:
+        rows = list(csv.DictReader(fh))
+
+    assert rows, "expected a backtest trade to be recorded"
+    assert rows[0]["strategy"] == "upload_backtest"
+    assert "log_destination" not in rows[0]
+    assert "is_backtest" not in rows[0]
