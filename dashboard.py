@@ -326,6 +326,51 @@ def _relaxed_split(line: str) -> list[str]:
     return fields
 
 
+def _mangle_duplicate_columns(columns: list[str]) -> list[str]:
+    """Return ``columns`` with duplicates suffixed to remain unique."""
+
+    seen: dict[str, int] = {}
+    result: list[str] = []
+    for col in columns:
+        # ``Streamlit``/Arrow expects JSON serialisable column labels.  When the
+        # CSV header repeats the canonical schema (for example due to a bad
+        # merge) pandas will happily load the frame but Arrow will later raise a
+        # ``ValueError`` complaining about the duplicate column names.  Mirror
+        # pandas' ``mangle_dupe_cols`` behaviour so that both the fast path and
+        # the manual recovery code paths end up with deterministic, unique
+        # labels (``pnl``, ``pnl.1``, ``pnl.2`` ...).
+        name = str(col)
+        count = seen.get(name, 0)
+        if count == 0:
+            result.append(name)
+        else:
+            candidate = f"{name}.{count}"
+            # Guard against pathological cases where the header already
+            # contains suffixed variants (``pnl.1``).  Keep incrementing until a
+            # free slot is found and track the generated name as well so that we
+            # do not accidentally re-use it for the next duplicate.
+            while candidate in seen:
+                count += 1
+                candidate = f"{name}.{count}"
+            result.append(candidate)
+            seen[candidate] = 0
+        seen[name] = count + 1
+    return result
+
+
+def _ensure_unique_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Return ``df`` with duplicate column names mangled for Arrow safety."""
+
+    if df.empty:
+        return df
+    columns = list(df.columns)
+    mangled = _mangle_duplicate_columns(columns)
+    if mangled != columns:
+        df = df.copy()
+        df.columns = mangled
+    return df
+
+
 def _read_csv_with_recovery(path: Path) -> tuple[pd.DataFrame, int]:
     """Read ``path`` tolerating malformed rows.
 
@@ -359,6 +404,7 @@ def _read_csv_with_recovery(path: Path) -> tuple[pd.DataFrame, int]:
             engine="python",
             on_bad_lines=on_bad_lines,
         )
+        df = _ensure_unique_columns(df)
     except pd.errors.ParserError:
         if not headers:
             return pd.DataFrame(), recovered_rows
@@ -391,8 +437,10 @@ def _manual_csv_recovery(path: Path, headers: list[str]) -> tuple[pd.DataFrame, 
             manual_recovered += 1
             rows.append(_repair_bad_row(parsed, headers))
     if not rows:
-        return pd.DataFrame(columns=headers), manual_recovered
-    return pd.DataFrame(rows, columns=headers), manual_recovered
+        return pd.DataFrame(columns=_mangle_duplicate_columns(headers)), manual_recovered
+    frame = pd.DataFrame(rows, columns=headers)
+    frame = _ensure_unique_columns(frame)
+    return frame, manual_recovered
 
 
 @st.cache_data(ttl=30)
