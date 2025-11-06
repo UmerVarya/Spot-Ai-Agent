@@ -353,7 +353,10 @@ def _mangle_duplicate_columns(columns: list[str]) -> list[str]:
                 count += 1
                 candidate = f"{name}.{count}"
             result.append(candidate)
-            seen[candidate] = 0
+            # ``candidate`` has now been used once; mark it as such so that if the
+            # original header already contained the suffixed name (``pnl.1``) the
+            # subsequent appearance is treated as a duplicate and further mangled.
+            seen[candidate] = 1
         seen[name] = count + 1
     return result
 
