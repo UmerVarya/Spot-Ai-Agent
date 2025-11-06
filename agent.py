@@ -1258,6 +1258,20 @@ def run_agent_loop() -> None:
                             len(kicked),
                             kicked,
                         )
+                        try:
+                            scan_trigger.set()
+                        except Exception:
+                            logger.debug(
+                                "Failed to set scan trigger after WS fallback",
+                                exc_info=True,
+                            )
+                        try:
+                            _trigger_scan("ws_gap_fallback")
+                        except Exception:
+                            logger.debug(
+                                "Failed to notify scan after WS fallback",
+                                exc_info=True,
+                            )
                         last_rest_backfill = now
             guard_stop.wait(guard_interval)
 

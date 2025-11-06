@@ -282,8 +282,11 @@ def _combined_urls(
     if not streams:
         return []
 
-    limit = STREAMS_PER_CONN if chunk is None else int(chunk)
-    limit = max(1, min(200, limit))
+    if chunk is None:
+        limit_source = min(STREAMS_PER_CONN, MAX_STREAMS_PER_COMBINED)
+    else:
+        limit_source = int(chunk)
+    limit = max(1, min(200, limit_source))
     prefix = _streams_prefix(COMBINED_BASE)
 
     return [
