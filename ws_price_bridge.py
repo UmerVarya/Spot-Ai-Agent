@@ -57,22 +57,74 @@ WS_RECONNECT_BASE_DELAY_SECS = max(
 logger = logging.getLogger(__name__)
 
 
-def _is_gap(now: float, last_k: float, last_t: float, last_b: float) -> bool:
-    stale_k = (now - last_k) > int(os.getenv("WS_EXPECT_KLINE_HEARTBEAT_SECS", "75"))
-    stale_t = (now - last_t) > int(os.getenv("WS_EXPECT_TICKER_HEARTBEAT_SECS", "30"))
-    stale_b = (now - last_b) > int(os.getenv("WS_EXPECT_BOOK_HEARTBEAT_SECS", "15"))
+def _is_gap(
+    now: float,
+    last_k: float,
+    last_t: float,
+    last_b: float,
+    *,
+    expect_kline: bool = True,
+    expect_ticker: bool = True,
+    expect_book: bool = False,
+) -> bool:
+    stale_k = False
+    stale_t = False
+    stale_b = False
+    if expect_kline:
+        stale_k = (now - last_k) > int(os.getenv("WS_EXPECT_KLINE_HEARTBEAT_SECS", "75"))
+    if expect_ticker:
+        stale_t = (now - last_t) > int(os.getenv("WS_EXPECT_TICKER_HEARTBEAT_SECS", "30"))
+    if expect_book:
+        stale_b = (now - last_b) > int(os.getenv("WS_EXPECT_BOOK_HEARTBEAT_SECS", "15"))
+
     require_all = (
         os.getenv("WS_GAP_REQUIRE_ALL_TOPICS", "false").lower() == "true"
     )
-    return (stale_k and stale_t and stale_b) if require_all else (stale_k and stale_t)
+
+    expected_topics = [
+        flag
+        for flag, include in (
+            (stale_k, expect_kline),
+            (stale_t, expect_ticker),
+            (stale_b, expect_book),
+        )
+        if include
+    ]
+    if not expected_topics:
+        return False
+
+    if require_all:
+        return all(expected_topics)
+
+    if expect_kline and expect_ticker and not expect_book:
+        return stale_k and stale_t
+
+    return any(expected_topics)
 
 
 _last_gap_log = 0.0
 
 
-def _maybe_log_gap(now: float, last_k: float, last_t: float, last_b: float) -> None:
+def _maybe_log_gap(
+    now: float,
+    last_k: float,
+    last_t: float,
+    last_b: float,
+    *,
+    expect_kline: bool = True,
+    expect_ticker: bool = True,
+    expect_book: bool = False,
+) -> None:
     global _last_gap_log
-    if _is_gap(now, last_k, last_t, last_b):
+    if _is_gap(
+        now,
+        last_k,
+        last_t,
+        last_b,
+        expect_kline=expect_kline,
+        expect_ticker=expect_ticker,
+        expect_book=expect_book,
+    ):
         min_gap = int(os.getenv("WS_GAP_MIN_LOG_INTERVAL", "300"))
         if now - _last_gap_log > min_gap:
             logger.info(
@@ -898,9 +950,25 @@ class _WebsocketsPriceBridge:
                 last_k = self._last_kline_msg_ts if self._expect_kline else now
                 last_t = self._last_ticker_msg_ts if self._expect_ticker else now
                 last_b = self._last_book_msg_ts if self._expect_book else now
-                if not _is_gap(now, last_k, last_t, last_b):
+                if not _is_gap(
+                    now,
+                    last_k,
+                    last_t,
+                    last_b,
+                    expect_kline=self._expect_kline,
+                    expect_ticker=self._expect_ticker,
+                    expect_book=self._expect_book,
+                ):
                     continue
-                _maybe_log_gap(now, last_k, last_t, last_b)
+                _maybe_log_gap(
+                    now,
+                    last_k,
+                    last_t,
+                    last_b,
+                    expect_kline=self._expect_kline,
+                    expect_ticker=self._expect_ticker,
+                    expect_book=self._expect_book,
+                )
                 worst_batch, worst_gap = max(stale_batches, key=lambda item: item[1])
                 log_event(
                     logger,
@@ -1406,9 +1474,25 @@ if WS_BACKEND == "wsclient":
                     last_k = self._last_kline_msg_ts if self._expect_kline else now
                     last_t = self._last_ticker_msg_ts if self._expect_ticker else now
                     last_b = self._last_book_msg_ts if self._expect_book else now
-                    if not _is_gap(now, last_k, last_t, last_b):
+                    if not _is_gap(
+                        now,
+                        last_k,
+                        last_t,
+                        last_b,
+                        expect_kline=self._expect_kline,
+                        expect_ticker=self._expect_ticker,
+                        expect_book=self._expect_book,
+                    ):
                         return False
-                    _maybe_log_gap(now, last_k, last_t, last_b)
+                    _maybe_log_gap(
+                        now,
+                        last_k,
+                        last_t,
+                        last_b,
+                        expect_kline=self._expect_kline,
+                        expect_ticker=self._expect_ticker,
+                        expect_book=self._expect_book,
+                    )
                     self._notify_stale(gap)
                     self._schedule_reconnect()
                     return True
