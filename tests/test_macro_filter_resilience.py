@@ -15,23 +15,27 @@ def _reload_module():
 def test_macro_context_returns_live_values(monkeypatch):
     module = _reload_module()
 
-    monkeypatch.setattr(module, "get_btc_dominance", lambda: 47.5)
+    monkeypatch.setattr(module, "get_btc_dominance", lambda timeout=None: 47.5)
     monkeypatch.setattr(module, "get_fear_greed_index", lambda: 65)
 
+    module.refresh_macro_context_now()
     context = module.get_macro_context()
 
     assert context["btc_dominance"] == 47.5
     assert context["fear_greed"] == 65
     assert context["macro_sentiment"] == "risk_on"
     assert context["stale"] is False
+    assert context["penalty"] == 0.0
+    assert context["reason"] == "live"
 
 
 def test_macro_context_uses_last_good_on_failure(monkeypatch):
     module = _reload_module()
 
-    monkeypatch.setattr(module, "get_btc_dominance", lambda: 48.1)
+    monkeypatch.setattr(module, "get_btc_dominance", lambda timeout=None: 48.1)
     monkeypatch.setattr(module, "get_fear_greed_index", lambda: 40)
 
+    module.refresh_macro_context_now()
     first = module.get_macro_context()
 
     def _raise_dom():
@@ -41,9 +45,12 @@ def test_macro_context_uses_last_good_on_failure(monkeypatch):
     monkeypatch.setattr(module, "get_fear_greed_index", lambda: None)
 
     time.sleep(0.01)
+    module.refresh_macro_context_now()
     second = module.get_macro_context()
 
     assert second["btc_dominance"] == first["btc_dominance"]
     assert second["fear_greed"] == first["fear_greed"]
     assert second["stale"] is True
     assert second["timestamp"] >= first["timestamp"]
+    assert second["reason"] in {"stale_from_cache", "macro_missing_neutral"}
+    assert second["penalty"] == module.MACRO_STALE_PENALTY
