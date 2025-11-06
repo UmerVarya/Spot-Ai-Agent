@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import random
 from contextlib import suppress
 import threading
 import time
@@ -45,8 +46,43 @@ WS_MAX_RECONNECTS = int(os.getenv("WS_MAX_RECONNECTS", "20"))
 WS_RECONNECT_BASE_MS = int(os.getenv("WS_RECONNECT_BASE_MS", "400"))
 WS_RECONNECT_MAX_MS = int(os.getenv("WS_RECONNECT_MAX_MS", "8000"))
 WS_SILENCE_SEC = float(os.getenv("WS_SILENCE_SEC", "10.0"))
+STREAMS_PER_CONN = max(1, int(os.getenv("WS_STREAMS_PER_CONN", "60")))
+WS_PING_INTERVAL_SECS = max(1, int(os.getenv("WS_PING_INTERVAL_SECS", "20")))
+WS_PING_TIMEOUT_SECS = max(1, int(os.getenv("WS_PING_TIMEOUT_SECS", "10")))
+WS_RECONNECT_JITTER_SECS = max(0.0, float(os.getenv("WS_RECONNECT_JITTER_SECS", "5")))
+WS_RECONNECT_BASE_DELAY_SECS = max(
+    0.25, float(os.getenv("WS_RECONNECT_BASE_DELAY_SECS", "1.5"))
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _is_gap(now: float, last_k: float, last_t: float, last_b: float) -> bool:
+    stale_k = (now - last_k) > int(os.getenv("WS_EXPECT_KLINE_HEARTBEAT_SECS", "75"))
+    stale_t = (now - last_t) > int(os.getenv("WS_EXPECT_TICKER_HEARTBEAT_SECS", "30"))
+    stale_b = (now - last_b) > int(os.getenv("WS_EXPECT_BOOK_HEARTBEAT_SECS", "15"))
+    require_all = (
+        os.getenv("WS_GAP_REQUIRE_ALL_TOPICS", "false").lower() == "true"
+    )
+    return (stale_k and stale_t and stale_b) if require_all else (stale_k and stale_t)
+
+
+_last_gap_log = 0.0
+
+
+def _maybe_log_gap(now: float, last_k: float, last_t: float, last_b: float) -> None:
+    global _last_gap_log
+    if _is_gap(now, last_k, last_t, last_b):
+        min_gap = int(os.getenv("WS_GAP_MIN_LOG_INTERVAL", "300"))
+        if now - _last_gap_log > min_gap:
+            logger.info(
+                {
+                    "event": "ws_gap_fallback",
+                    "gap_seconds": now - min(last_k, last_t, last_b),
+                    "stale_flag": True,
+                }
+            )
+            _last_gap_log = now
 
 
 def make_streams(
@@ -194,7 +230,7 @@ def _combined_urls(
     if not streams:
         return []
 
-    limit = MAX_STREAMS_PER_COMBINED if chunk is None else int(chunk)
+    limit = STREAMS_PER_CONN if chunk is None else int(chunk)
     limit = max(1, min(200, limit))
     prefix = _streams_prefix(COMBINED_BASE)
 
@@ -271,6 +307,13 @@ class _WebsocketsPriceBridge:
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._conn_lock: Optional[asyncio.Lock] = None
+        now = time.monotonic()
+        self._last_kline_msg_ts = now
+        self._last_ticker_msg_ts = now
+        self._last_book_msg_ts = now
+        self._expect_kline = True
+        self._expect_ticker = True
+        self._expect_book = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -561,8 +604,11 @@ class _WebsocketsPriceBridge:
         interval = (self._kline_interval or "1m").strip().lower() or "1m"
         has_external_callbacks = self._has_external_callbacks()
         want_kline = self._on_kline is not None or has_external_callbacks
-        want_ticker = bool(flags.get("want_ticker"))
         want_book = bool(flags.get("want_book"))
+        want_ticker = bool(flags.get("want_ticker")) or not want_book
+        self._expect_kline = want_kline
+        self._expect_ticker = want_ticker
+        self._expect_book = want_book
         if interval == "1m" and flags.get("want_kline_1m", False):
             streams = make_streams(
                 symbols,
@@ -573,9 +619,11 @@ class _WebsocketsPriceBridge:
                 ticker_stream="ticker",
             )
             self.logger.warning(
-                "WS BRIDGE MARK v3 | streams=%d | chunk=200", len(streams)
+                "WS BRIDGE MARK v3 | streams=%d | chunk=%d",
+                len(streams),
+                STREAMS_PER_CONN,
             )
-            urls = list(self._combined_urls(streams, chunk=200))
+            urls = list(self._combined_urls(streams, chunk=STREAMS_PER_CONN))
             self.logger.warning(
                 "WS BRIDGE MARK v3 | combined urls=%d | mode=kline_1m",
                 len(urls),
@@ -593,9 +641,11 @@ class _WebsocketsPriceBridge:
         if not names:
             return []
         self.logger.warning(
-            "WS BRIDGE MARK v3 | streams=%d | chunk=200", len(names)
+            "WS BRIDGE MARK v3 | streams=%d | chunk=%d",
+            len(names),
+            STREAMS_PER_CONN,
         )
-        urls = list(self._combined_urls(names, chunk=200))
+        urls = list(self._combined_urls(names, chunk=STREAMS_PER_CONN))
         self.logger.warning(
             "WS BRIDGE MARK v3 | combined urls=%d | mode=mix",
             len(urls),
@@ -634,10 +684,10 @@ class _WebsocketsPriceBridge:
         total: int,
     ) -> None:
         def _reconnect_delay(attempt: int) -> float:
-            step = max(1, attempt)
-            base = min(30.0, 1.5 * (2 ** (step - 1)))
-            jitter = 0.2 * (step % 3)
-            return base + jitter
+            retries = max(0, attempt - 1)
+            base = WS_RECONNECT_BASE_DELAY_SECS * (2 ** retries)
+            delay = base + random.uniform(0.0, WS_RECONNECT_JITTER_SECS)
+            return min(delay, 30.0)
 
         payload = ""
         if "streams=" in url:
@@ -656,7 +706,8 @@ class _WebsocketsPriceBridge:
                 )
                 async with session.ws_connect(
                     url,
-                    heartbeat=30,
+                    heartbeat=WS_PING_INTERVAL_SECS,
+                    timeout=WS_PING_TIMEOUT_SECS,
                     max_msg_size=0,
                     receive_timeout=IDLE_RECV_TIMEOUT,
                 ) as ws:
@@ -736,6 +787,13 @@ class _WebsocketsPriceBridge:
             return
         now = time.monotonic()
         self._last_messages = {index: now for index in range(1, total_batches + 1)}
+        self._reset_topic_heartbeats(now)
+
+    def _reset_topic_heartbeats(self, now: Optional[float] = None) -> None:
+        timestamp = now if now is not None else time.monotonic()
+        self._last_kline_msg_ts = timestamp
+        self._last_ticker_msg_ts = timestamp
+        self._last_book_msg_ts = timestamp
 
     def _on_message(self, raw: str, batch_index: Optional[int] = None) -> None:
         self._handle_msg(raw, batch_index)
@@ -778,6 +836,7 @@ class _WebsocketsPriceBridge:
                 self._dispatch_kline(kline)
 
     def _dispatch_kline(self, kline: Mapping[str, Any]) -> None:
+        self._last_kline_msg_ts = time.monotonic()
         symbol = str(kline.get("s") or "").upper()
         interval = str(kline.get("i") or "")
         if not symbol:
@@ -793,6 +852,7 @@ class _WebsocketsPriceBridge:
             self._schedule_market_event(symbol, "kline_close")
 
     def _dispatch_ticker(self, payload: Mapping[str, Any]) -> None:
+        self._last_ticker_msg_ts = time.monotonic()
         symbol = str(payload.get("s") or "").upper()
         if not symbol:
             return
@@ -808,10 +868,11 @@ class _WebsocketsPriceBridge:
             self._schedule_market_event(symbol, "ticker")
 
     def _dispatch_book_ticker(self, payload: Mapping[str, Any]) -> None:
-        if self._on_book_ticker is None:
-            return
         symbol = str(payload.get("s") or "").upper()
         if not symbol:
+            return
+        self._last_book_msg_ts = time.monotonic()
+        if self._on_book_ticker is None:
             return
         try:
             self._on_book_ticker(symbol, dict(payload))
@@ -834,6 +895,12 @@ class _WebsocketsPriceBridge:
                 ]
                 if not stale_batches:
                     continue
+                last_k = self._last_kline_msg_ts if self._expect_kline else now
+                last_t = self._last_ticker_msg_ts if self._expect_ticker else now
+                last_b = self._last_book_msg_ts if self._expect_book else now
+                if not _is_gap(now, last_k, last_t, last_b):
+                    continue
+                _maybe_log_gap(now, last_k, last_t, last_b)
                 worst_batch, worst_gap = max(stale_batches, key=lambda item: item[1])
                 log_event(
                     logger,
@@ -1025,6 +1092,13 @@ if WS_BACKEND == "wsclient":
                 self._silence_threshold = max(
                     float(self._heartbeat_timeout), float(WS_SILENCE_SEC), 1.0
                 )
+                now = time.monotonic()
+                self._last_kline_msg_ts = now
+                self._last_ticker_msg_ts = now
+                self._last_book_msg_ts = now
+                self._expect_kline = True
+                self._expect_ticker = True
+                self._expect_book = False
 
             # ------------------------------------------------------------------
             # Public API
@@ -1065,6 +1139,7 @@ if WS_BACKEND == "wsclient":
                         index: now for index in range(1, len(clients) + 1)
                     }
                     self._last_msg_mono = now
+                    self._reset_topic_heartbeats(now)
                     self._running = bool(clients)
                 for client in clients:
                     try:
@@ -1166,8 +1241,11 @@ if WS_BACKEND == "wsclient":
                 interval = (self._kline_interval or "1m").strip().lower() or "1m"
                 has_external_callbacks = self._has_external_callbacks()
                 want_kline = self._on_kline is not None or has_external_callbacks
-                want_ticker = self._on_ticker is not None
                 want_book = self._on_book_ticker is not None
+                want_ticker = self._on_ticker is not None or not want_book
+                self._expect_kline = want_kline
+                self._expect_ticker = want_ticker
+                self._expect_book = want_book
                 streams = make_streams(
                     symbols,
                     kline_interval=interval,
@@ -1182,7 +1260,7 @@ if WS_BACKEND == "wsclient":
                 batches = list(
                     _chunk_stream_batches(
                         streams,
-                        max_streams=MAX_STREAMS_PER_COMBINED,
+                        max_streams=STREAMS_PER_CONN,
                         max_url_len=MAX_COMBINED_URL_LEN,
                         prefix=prefix,
                         log=self.logger,
@@ -1196,6 +1274,12 @@ if WS_BACKEND == "wsclient":
                     )
                     batches = batches[:MAX_CONNS]
                 return [batch for batch in batches if batch]
+
+            def _reset_topic_heartbeats(self, now: Optional[float] = None) -> None:
+                timestamp = now if now is not None else time.monotonic()
+                self._last_kline_msg_ts = timestamp
+                self._last_ticker_msg_ts = timestamp
+                self._last_book_msg_ts = timestamp
 
             def _make_handler(self, batch_index: int) -> Callable[[str], None]:
                 def _handler(msg: str, _idx: int = batch_index) -> None:
@@ -1245,6 +1329,7 @@ if WS_BACKEND == "wsclient":
                         self._dispatch_kline(kline)
 
             def _dispatch_kline(self, kline: Mapping[str, Any]) -> None:
+                self._last_kline_msg_ts = time.monotonic()
                 symbol = str(kline.get("s") or "").upper()
                 interval = str(kline.get("i") or "")
                 if not symbol:
@@ -1260,6 +1345,7 @@ if WS_BACKEND == "wsclient":
                     self._fire_market_event(symbol, "kline_close")
 
             def _dispatch_ticker(self, payload: Mapping[str, Any]) -> None:
+                self._last_ticker_msg_ts = time.monotonic()
                 symbol = str(payload.get("s") or "").upper()
                 if not symbol:
                     return
@@ -1275,10 +1361,11 @@ if WS_BACKEND == "wsclient":
                     self._fire_market_event(symbol, "ticker")
 
             def _dispatch_book_ticker(self, payload: Mapping[str, Any]) -> None:
-                if self._on_book_ticker is None:
-                    return
                 symbol = str(payload.get("s") or "").upper()
                 if not symbol:
+                    return
+                self._last_book_msg_ts = time.monotonic()
+                if self._on_book_ticker is None:
                     return
                 try:
                     self._on_book_ticker(symbol, dict(payload))
@@ -1316,10 +1403,13 @@ if WS_BACKEND == "wsclient":
                 now = time.monotonic()
                 gap = now - self._last_msg_mono
                 if gap > self._silence_threshold:
+                    last_k = self._last_kline_msg_ts if self._expect_kline else now
+                    last_t = self._last_ticker_msg_ts if self._expect_ticker else now
+                    last_b = self._last_book_msg_ts if self._expect_book else now
+                    if not _is_gap(now, last_k, last_t, last_b):
+                        return False
+                    _maybe_log_gap(now, last_k, last_t, last_b)
                     self._notify_stale(gap)
-                    self.logger.info(
-                        {"event": "ws_gap_fallback", "gap_seconds": round(gap, 3)}
-                    )
                     self._schedule_reconnect()
                     return True
                 return False
@@ -1335,14 +1425,18 @@ if WS_BACKEND == "wsclient":
                     return
 
                 self._reconnects += 1
-                delay_ms = min(self._reconnect_backoff_ms, WS_RECONNECT_MAX_MS)
+                base_delay = min(self._reconnect_backoff_ms, WS_RECONNECT_MAX_MS) / 1000.0
+                delay = min(
+                    base_delay + random.uniform(0.0, WS_RECONNECT_JITTER_SECS),
+                    30.0,
+                )
                 self.logger.warning(
-                    "Reconnecting WS (attempt %s/%s) in %sms ...",
+                    "Reconnecting WS (attempt %s/%s) in %.2fs ...",
                     self._reconnects,
                     self._max_reconnects,
-                    delay_ms,
+                    delay,
                 )
-                time.sleep(delay_ms / 1000.0)
+                time.sleep(delay)
 
                 try:
                     self._restart_clients()
