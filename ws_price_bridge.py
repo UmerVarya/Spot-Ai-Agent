@@ -15,7 +15,6 @@ import logging
 import math
 import os
 import random
-from contextlib import suppress
 import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
@@ -23,9 +22,8 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 # Commented out legacy threaded stream import; we now use WSPriceBridge instead.
 # from binance import ThreadedWebsocketManager
 
-import aiohttp
 import requests
-from aiohttp import __version__ as AIOHTTP_VERSION
+import websockets
 
 from observability import log_event, record_metric
 
@@ -325,9 +323,8 @@ class _WebsocketsPriceBridge:
     ) -> None:
         self.logger = logger
         self.logger.warning(
-            "WS BRIDGE MARK v3 | backend=aiohttp | file=%s | aiohttp_version=%s",
+            "WS BRIDGE MARK v3 | backend=websockets | file=%s",
             __file__,
-            AIOHTTP_VERSION,
         )
         self._symbols: List[str] = self._normalise_symbols(symbols)
         self._kline_interval = str(kline_interval or "1m").strip()
@@ -359,8 +356,7 @@ class _WebsocketsPriceBridge:
         self._tasks: List[asyncio.Task] = []
         self._urls: List[str] = []
         self._combined_base = _streams_prefix(COMBINED_BASE)
-        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._ws: Optional[Any] = None
         self._conn_lock: Optional[asyncio.Lock] = None
         now = time.monotonic()
         self._last_kline_msg_ts = now
@@ -369,6 +365,7 @@ class _WebsocketsPriceBridge:
         self._expect_kline = True
         self._expect_ticker = True
         self._expect_book = False
+        self._last_heartbeat_log = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -385,7 +382,7 @@ class _WebsocketsPriceBridge:
         self.logger.info(
             "WS BRIDGE MARK v3 | WSPriceBridge: starting with %d streams | backend=%s",
             stream_count,
-            "aiohttp",
+            "websockets",
         )
         self._stop.clear()
         self._thread = threading.Thread(
@@ -603,16 +600,21 @@ class _WebsocketsPriceBridge:
                 )
                 urls = urls[:MAX_CONNS]
 
-            total_batches = len(urls)
+            stream_batches = [
+                self._extract_streams_from_url(url) for url in urls if url
+            ]
+            stream_batches = [batch for batch in stream_batches if batch]
+            if not stream_batches:
+                self.logger.warning(
+                    "WSPriceBridge: derived empty stream batches from urls; retrying",
+                )
+                await asyncio.sleep(1.0)
+                continue
+
+            total_batches = len(stream_batches)
             self._initialise_batch_heartbeats(total_batches)
             if self._conn_lock is None:
                 self._conn_lock = asyncio.Lock()
-            timeout_cfg = aiohttp.ClientTimeout(
-                total=None,
-                sock_connect=15,
-                sock_read=IDLE_RECV_TIMEOUT,
-            )
-            session = aiohttp.ClientSession(timeout=timeout_cfg)
             try:
                 async with self._conn_lock:
                     if self._tasks:
@@ -621,24 +623,19 @@ class _WebsocketsPriceBridge:
                                 task.cancel()
                     self._tasks = []
                     self._urls = urls
-                    self._session = session
 
-                    for index, url in enumerate(urls, start=1):
+                    for index, streams in enumerate(stream_batches, start=1):
                         self._tasks.append(
                             asyncio.create_task(
-                                self._run_connection(session, url, index, total_batches)
+                                self._run_connection(streams, index, total_batches)
                             )
                         )
 
                 await asyncio.gather(*self._tasks, return_exceptions=True)
             finally:
-                if self._session is session:
-                    self._session = None
                 self._tasks = []
                 self._urls = []
                 self._last_messages.clear()
-                with suppress(Exception):
-                    await session.close()
 
             if self._stop.is_set():
                 break
@@ -731,108 +728,79 @@ class _WebsocketsPriceBridge:
             )
             yield url
 
+    def _extract_streams_from_url(self, url: str) -> List[str]:
+        if not url:
+            return []
+        if "streams=" not in url:
+            return []
+        payload = url.split("streams=", 1)[1]
+        return [token for token in payload.split("/") if token]
+
     async def _run_connection(
         self,
-        session: aiohttp.ClientSession,
-        url: str,
+        streams: List[str],
         batch_index: int,
         total: int,
     ) -> None:
-        def _reconnect_delay(attempt: int) -> float:
-            retries = max(0, attempt - 1)
-            base = WS_RECONNECT_BASE_DELAY_SECS * (2 ** retries)
-            delay = base + random.uniform(0.0, WS_RECONNECT_JITTER_SECS)
-            return min(delay, 30.0)
-
-        payload = ""
-        if "streams=" in url:
-            payload = url.split("streams=", 1)[1]
-        stream_count = len([token for token in payload.split("/") if token]) or 1
+        backoff = [5, 10, 20, 30, 60, 120]
         attempt = 0
 
         while not self._stop.is_set() and not self._resubscribe.is_set():
             try:
-                self.logger.warning(
-                    "WS BRIDGE MARK v3 | aiohttp=%s | url=%s | n_streams=%d | url_len=%d",
-                    AIOHTTP_VERSION,
-                    url,
+                stream_count = len(streams)
+                self.logger.info(
+                    "WS BRIDGE MARK v3 | connecting | batch=%d/%d | streams=%d",
+                    batch_index,
+                    total,
                     stream_count,
-                    len(url),
                 )
-                async with session.ws_connect(
-                    url,
-                    heartbeat=WS_PING_INTERVAL_SECS,
-                    timeout=WS_PING_TIMEOUT_SECS,
-                    max_msg_size=0,
-                    receive_timeout=IDLE_RECV_TIMEOUT,
+                async with websockets.connect(
+                    BINANCE_WS,
+                    ping_interval=WS_PING_INTERVAL_SECS,
+                    ping_timeout=WS_PING_TIMEOUT_SECS,
+                    close_timeout=5,
+                    max_queue=64,
                 ) as ws:
                     self._ws = ws
                     attempt = 0
-                    self._last_messages[batch_index] = time.monotonic()
-                    self.logger.warning(
-                        "WS BRIDGE MARK v3 | connected | batch=%d/%d | streams=%d | url_len=%d",
-                        batch_index,
-                        total,
-                        stream_count,
-                        len(url),
+                    now = time.monotonic()
+                    self._last_messages[batch_index] = now
+                    self.logger.info("✅ Connected to Binance WS (batch %d/%d)", batch_index, total)
+                    self.logger.info(
+                        "Subscribing to %d Binance streams…", stream_count
                     )
-                    async for msg in ws:
+                    payload = json.dumps(
+                        {"method": "SUBSCRIBE", "params": streams, "id": batch_index}
+                    )
+                    await ws.send(payload)
+                    async for raw in ws:
                         if self._stop.is_set() or self._resubscribe.is_set():
                             break
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            self._last_messages[batch_index] = time.monotonic()
-                            self._on_message(msg.data, batch_index)
-                        elif msg.type == aiohttp.WSMsgType.ERROR:
-                            exc = ws.exception()
-                            raise exc if exc is not None else RuntimeError("WS error")
-                        elif msg.type in (
-                            aiohttp.WSMsgType.CLOSE,
-                            aiohttp.WSMsgType.CLOSED,
-                        ):
-                            break
+                        if isinstance(raw, (bytes, bytearray)):
+                            message = raw.decode()
                         else:
-                            continue
-
-                if self._stop.is_set() or self._resubscribe.is_set():
-                    break
-                attempt += 1
-                delay = _reconnect_delay(attempt)
-                self.logger.warning(
-                    "WS BRIDGE MARK v3 | socket ended | batch=%d/%d | reconnect in %.1fs",
-                    batch_index,
-                    total,
-                    delay,
-                )
-                await asyncio.sleep(delay)
+                            message = str(raw)
+                        self._last_messages[batch_index] = time.monotonic()
+                        self._log_ws_heartbeat(message)
+                        self._on_message(message, batch_index)
             except asyncio.CancelledError:
                 break
-            except asyncio.TimeoutError:
-                if self._stop.is_set() or self._resubscribe.is_set():
-                    break
-                attempt += 1
-                delay = _reconnect_delay(attempt)
-                self.logger.warning(
-                    "WS BRIDGE MARK v3 | idle timeout | batch=%d/%d | reconnect in %.1fs",
-                    batch_index,
-                    total,
-                    delay,
-                )
-                await asyncio.sleep(delay)
             except Exception as exc:
                 if self._stop.is_set() or self._resubscribe.is_set():
                     break
+                wait = backoff[min(attempt, len(backoff) - 1)]
                 attempt += 1
-                delay = _reconnect_delay(attempt)
+                self.logger.warning(
+                    "WS reconnecting in %ss after error: %r (batch %d/%d)",
+                    wait,
+                    exc,
+                    batch_index,
+                    total,
+                )
                 try:
-                    logger.warning(
-                        "WS reconnect (%s) in %.1fs | url_len=%d",
-                        type(exc).__name__,
-                        delay,
-                        len(url),
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(delay)
+                    await asyncio.sleep(wait)
+                except asyncio.CancelledError:
+                    break
             finally:
                 self._ws = None
 
@@ -889,6 +857,19 @@ class _WebsocketsPriceBridge:
             kline = data.get("k")
             if isinstance(kline, dict):
                 self._dispatch_kline(kline)
+
+    def _log_ws_heartbeat(self, msg: str) -> None:
+        try:
+            payload = str(msg)
+        except Exception:
+            return
+        if '"k"' not in payload and '"s"' not in payload:
+            return
+        now = time.time()
+        if now - self._last_heartbeat_log < 5.0:
+            return
+        self._last_heartbeat_log = now
+        self.logger.debug("WS heartbeat ok at %.3f", now)
 
     def _dispatch_kline(self, kline: Mapping[str, Any]) -> None:
         self._last_kline_msg_ts = time.monotonic()
