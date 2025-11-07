@@ -80,6 +80,8 @@ _scan_event: Optional[threading.Event] = None
 _last_scan_fire = 0.0
 _scan_lock = threading.Lock()
 _scan_tick_thread: Optional[threading.Thread] = None
+_scan_heartbeat_lock = threading.Lock()
+_last_scan_heartbeat = 0.0
 
 
 def attach_scan_event(ev: threading.Event) -> None:
@@ -108,6 +110,28 @@ async def notify_scan(reason: str = "market") -> None:
     """Coroutine-compatible helper to wake the scan loop."""
 
     _trigger_scan(reason)
+
+
+def _mark_scan_heartbeat(ts: Optional[float] = None) -> None:
+    """Record the wall-clock time of the most recent scan."""
+
+    global _last_scan_heartbeat
+    if ts is None:
+        ts = time.time()
+    with _scan_heartbeat_lock:
+        _last_scan_heartbeat = ts
+
+
+def _scan_idle_seconds(now: Optional[float] = None) -> float:
+    """Return the number of seconds since the last completed scan."""
+
+    with _scan_heartbeat_lock:
+        last = _last_scan_heartbeat
+    if last <= 0:
+        return float("inf")
+    if now is None:
+        now = time.time()
+    return max(0.0, now - last)
 
 
 def _ensure_periodic_tick(interval: float = 5.0) -> None:
@@ -834,6 +858,7 @@ def run_agent_loop() -> None:
         signal_cache.use_streams = ENABLE_WS_BRIDGE
 
     signal_cache.start()
+    _mark_scan_heartbeat()
     debounce_overrides = {
         symbol: override.debounce_ms
         for symbol, override in runtime_settings.symbol_overrides.items()
@@ -1077,6 +1102,15 @@ def run_agent_loop() -> None:
     manual_cache_primes: dict[str, float] = {}
     guard_interval = float(os.getenv("GUARD_INTERVAL", "0.75"))
     guard_interval = max(0.5, min(1.0, guard_interval))
+    watchdog_idle_threshold = float(
+        os.getenv(
+            "SCAN_WATCHDOG_THRESHOLD",
+            str(max(20.0, scan_interval * 4.0)),
+        )
+    )
+    watchdog_idle_threshold = max(0.0, watchdog_idle_threshold)
+    watchdog_cooldown = max(guard_interval, scan_interval)
+    watchdog_last_trigger = 0.0
     macro_task = ScheduledTask("macro", min_interval=60.0, max_interval=300.0)
     news_task = ScheduledTask("news", min_interval=300.0, max_interval=900.0)
     macro_task.next_run = 0.0
@@ -1204,6 +1238,7 @@ def run_agent_loop() -> None:
 
     def guard_loop() -> None:
         nonlocal last_rest_backfill
+        nonlocal watchdog_last_trigger
         while not guard_stop.is_set():
             now = time.time()
             if macro_task.due(now):
@@ -1273,6 +1308,21 @@ def run_agent_loop() -> None:
                                 exc_info=True,
                             )
                         last_rest_backfill = now
+            if watchdog_idle_threshold > 0.0:
+                idle = _scan_idle_seconds(now)
+                if idle > watchdog_idle_threshold and (
+                    now - watchdog_last_trigger
+                ) >= watchdog_cooldown:
+                    watchdog_last_trigger = now
+                    logger.warning(
+                        "Scan watchdog detected %.1fs of inactivity; forcing scan.",
+                        idle,
+                    )
+                    try:
+                        _trigger_scan("watchdog_idle")
+                    except Exception:
+                        logger.debug("Failed to trigger watchdog scan", exc_info=True)
+                    scan_trigger.set()
             guard_stop.wait(guard_interval)
 
     threading.Thread(target=guard_loop, daemon=True).start()
@@ -1300,6 +1350,7 @@ def run_agent_loop() -> None:
                 continue
             scan_trigger.clear()
             last_scan_time = now
+            _mark_scan_heartbeat(now)
             logger.debug("=== Scan @ %s ===", time.strftime('%Y-%m-%d %H:%M:%S'))
             try:
                 btc_bars_len = signal_cache.bars_len("BTCUSDT")
