@@ -27,7 +27,8 @@ import websockets
 
 from observability import log_event, record_metric
 
-BINANCE_WS = "wss://stream.binance.com:9443/stream"
+# Use the interactive subscription endpoint so SUBSCRIBE payloads are honoured.
+BINANCE_WS = "wss://stream.binance.com:9443/ws"
 MAX_STREAMS_PER_COMBINED = max(
     1, min(200, int(os.getenv("BINANCE_MAX_STREAMS", "200")))
 )
