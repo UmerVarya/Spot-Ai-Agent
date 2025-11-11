@@ -154,7 +154,14 @@ def arrow_safe_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     if df is None:
         return df
-    safe = df.copy()
+    # ``Streamlit`` delegates rendering to ``pyarrow`` which requires column
+    # labels to be unique.  ``normalise_history_columns`` can legitimately map
+    # multiple legacy aliases onto the same canonical name (``Outcome`` →
+    # ``outcome``), so enforce uniqueness up front to avoid Arrow raising a
+    # ``ValueError`` during display.
+    safe = _ensure_unique_columns(df)
+    if safe is df:
+        safe = df.copy()
     if isinstance(safe.columns, pd.MultiIndex):
         tuples = [
             tuple(_arrow_safe_scalar(level) for level in labels)
