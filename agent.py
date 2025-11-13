@@ -1610,6 +1610,7 @@ def run_agent_loop() -> None:
                         logger.warning("Skipping %s due to insufficient data.", symbol)
                         continue
                     score = cached_signal.score
+                    raw_score = float(score)
                     direction = cached_signal.direction
                     position_size = cached_signal.position_size
                     pattern_name = cached_signal.pattern
@@ -1678,6 +1679,69 @@ def run_agent_loop() -> None:
                             float(alt_features.get("onchain_score") or 0.0),
                             alt_adjustment,
                         )
+                    adjusted_score = float(score)
+                    try:
+                        entry_cutoff = float(signal_snapshot.get("activation_threshold", 0.0))
+                        if not math.isfinite(entry_cutoff) or entry_cutoff <= 0.0:
+                            raise ValueError
+                    except Exception:
+                        entry_cutoff = 5.0
+                    should_log_decision = raw_score >= entry_cutoff
+                    volume_ok = position_size > 0
+                    macro_veto_flag = not bool(macro_news_assessment.get("safe", True))
+                    news_veto_flag = bool(
+                        monitor_state and bool(monitor_state.get("halt_trading"))
+                    )
+                    cooldown_active = False
+
+                    decision_logged = False
+
+                    def _compute_skip_reason() -> str:
+                        if adjusted_score < entry_cutoff:
+                            return "alt_adj below cutoff"
+                        if not volume_ok:
+                            return "volume gate failed"
+                        if macro_veto_flag:
+                            return "macro veto"
+                        if news_veto_flag:
+                            return "news veto"
+                        if cooldown_active:
+                            return "cooldown in effect"
+                        return "other guard"
+
+                    def _log_decision(decision_type: str) -> None:
+                        nonlocal decision_logged
+                        if decision_logged or not should_log_decision:
+                            return
+                        if decision_type == "skip":
+                            reason_text = _compute_skip_reason()
+                            logger.info(
+                                "[DECISION] SKIP %s | raw=%.2f alt_adj=%.2f cutoff=%.2f size=%.1f dir=%s | "
+                                "volume_ok=%s macro_veto=%s news_veto=%s cooldown=%s reason=%s",
+                                symbol,
+                                raw_score,
+                                adjusted_score,
+                                entry_cutoff,
+                                position_size,
+                                direction,
+                                volume_ok,
+                                macro_veto_flag,
+                                news_veto_flag,
+                                cooldown_active,
+                                reason_text,
+                            )
+                        else:
+                            logger.info(
+                                "[DECISION] ENTER_TRADE %s | raw=%.2f alt_adj=%.2f cutoff=%.2f size=%.1f dir=%s",
+                                symbol,
+                                raw_score,
+                                adjusted_score,
+                                entry_cutoff,
+                                position_size,
+                                direction,
+                            )
+                        decision_logged = True
+
                     pattern_lower = (pattern_name or "").lower()
                     setup_lower = (setup_type or "").lower() if isinstance(setup_type, str) else ""
                     is_breakout_setup = False
@@ -1692,6 +1756,7 @@ def run_agent_loop() -> None:
                             pattern_name or "none",
                             setup_type or "unknown",
                         )
+                        _log_decision("skip")
                         continue
                     logger.info(
                         "%s: Score=%.2f (alt_adj=%.2f), Direction=%s, Pattern=%s, PosSize=%s, AuctionState=%s (age=%.2fs)",
@@ -1727,6 +1792,7 @@ def run_agent_loop() -> None:
                             else:
                                 skip_reasons.append("direction not long")
                         if position_size <= 0:
+                            volume_ok = False
                             skip_reasons.append("zero position (low confidence)")
                         reason_text = " and ".join(skip_reasons) if skip_reasons else "not eligible"
                         logger.info(
@@ -1737,6 +1803,7 @@ def run_agent_loop() -> None:
                             reason_text,
                             score,
                         )
+                        _log_decision("skip")
                         continue
                     flow_analysis = detect_aggression(
                         price_data,
@@ -1762,6 +1829,7 @@ def run_agent_loop() -> None:
                                 "[SKIP] %s: unable to derive impulse-leg LVNs for trend continuation.",
                                 symbol,
                             )
+                            _log_decision("skip")
                             continue
                         lvn_touch = volume_profile_result.touched_lvn(
                             close=last_close or 0.0,
@@ -1774,6 +1842,7 @@ def run_agent_loop() -> None:
                                 symbol,
                                 auction_state,
                             )
+                            _log_decision("skip")
                             continue
                         if flow_status != "buyers in control":
                             logger.info(
@@ -1781,6 +1850,7 @@ def run_agent_loop() -> None:
                                 symbol,
                                 flow_status,
                             )
+                            _log_decision("skip")
                             continue
                     elif auction_state in {"out_of_balance_revert", "balanced"}:
                         volume_profile_result = compute_reversion_leg_volume_profile(price_data)
@@ -1790,6 +1860,7 @@ def run_agent_loop() -> None:
                                 symbol,
                                 auction_state,
                             )
+                            _log_decision("skip")
                             continue
                         lvn_touch = volume_profile_result.touched_lvn(
                             close=last_close or 0.0,
@@ -1801,6 +1872,7 @@ def run_agent_loop() -> None:
                                 "[SKIP] %s: reclaim leg not pulling back into an LVN.",
                                 symbol,
                             )
+                            _log_decision("skip")
                             continue
                         if flow_status != "buyers in control":
                             logger.info(
@@ -1808,6 +1880,7 @@ def run_agent_loop() -> None:
                                 symbol,
                                 flow_status,
                             )
+                            _log_decision("skip")
                             continue
                     else:
                         if flow_status == "sellers in control":
@@ -1815,6 +1888,7 @@ def run_agent_loop() -> None:
                                 "Bearish order flow detected in %s. Proceeding with caution (penalized score handled in evaluate_signal).",
                                 symbol,
                             )
+                    _log_decision("enter")
                     potential_trades.append(
                         {
                             "symbol": symbol,
