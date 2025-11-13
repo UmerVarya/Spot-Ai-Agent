@@ -2,18 +2,18 @@
 
 This module aggregates on-chain activity and social sentiment so the
 trading agent can factor non-price data into its decisions.  The design
-favours graceful degradation: when APIs or heavy NLP models are
-unavailable the functions fall back to neutral defaults so the wider
-system keeps running.
+favours graceful degradation: when APIs or the Groq LLM are unavailable
+the functions fall back to neutral defaults so the wider system keeps
+running.
 
 Usage
 -----
 Call :func:`get_alternative_data` with a trading symbol (e.g.
 ``"BTCUSDT"``) to receive an :class:`AlternativeDataBundle`.  The bundle
 contains on-chain metrics summarised into a composite score plus social
-sentiment derived from FinLlama/FinGPT via :mod:`fused_sentiment`.  A
-``score_adjustment`` helper translates the alternative signals into a
-small numeric tweak that can be added to the technical score.
+sentiment generated through the Groq LLM.  A ``score_adjustment`` helper
+translates the alternative signals into a small numeric tweak that can be
+added to the technical score.
 
 Environment
 -----------
@@ -34,19 +34,16 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-try:  # Optional dependency – FinLlama/FinGPT sentiment fusion
-    from fused_sentiment import analyze_headlines
-except Exception:  # pragma: no cover - best-effort fallback
-    analyze_headlines = None
-    logger.warning(
-        "fused_sentiment unavailable; social sentiment will default to neutral"
-    )
+try:  # Optional Groq-powered alt data fusion
+    from groq_alt_data import analyze_alt_data as groq_fetch_alt_data
+except Exception:  # pragma: no cover - best effort fallback
+    groq_fetch_alt_data = None
 
 GLASSNODE_API_KEY = os.getenv("GLASSNODE_API_KEY", "")
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
@@ -144,6 +141,171 @@ class AlternativeDataBundle:
 
 
 _alt_cache: Dict[str, Tuple[AlternativeDataBundle, float]] = {}
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalise_models(value: Any) -> Tuple[str, ...]:
+    if isinstance(value, (list, tuple, set)):
+        models = [str(item) for item in value if isinstance(item, (str, bytes))]
+        return tuple(models)
+    if isinstance(value, str):
+        return (value,)
+    return tuple()
+
+
+def _onchain_snapshot(metrics: Optional["OnChainMetrics"]) -> Mapping[str, Any]:
+    if metrics is None:
+        return {}
+    return {
+        "exchange_inflow": metrics.exchange_inflow,
+        "exchange_outflow": metrics.exchange_outflow,
+        "whale_inflow": metrics.whale_inflow,
+        "whale_outflow": metrics.whale_outflow,
+        "net_exchange_flow": metrics.net_exchange_flow,
+        "large_holder_netflow": metrics.large_holder_netflow,
+        "whale_ratio": metrics.whale_ratio,
+        "composite_score": metrics.composite_score,
+    }
+
+
+def _groq_social(
+    payload: Mapping[str, Any], *, posts_hint: Optional[int] = None
+) -> SocialSentiment:
+    bias = str(
+        payload.get("bias")
+        or payload.get("sentiment")
+        or payload.get("label")
+        or "neutral"
+    )
+    score = _safe_float(payload.get("score"))
+    if score is None:
+        score = _safe_float(payload.get("score_normalized"))
+    if score is None and payload.get("score_percent") is not None:
+        score = _safe_float(payload.get("score_percent"))
+        if score is not None:
+            score = score / 100.0
+    confidence = _safe_float(payload.get("confidence"))
+    if confidence is None and payload.get("confidence_percent") is not None:
+        confidence = _safe_float(payload.get("confidence_percent"))
+        if confidence is not None:
+            confidence = confidence / 100.0
+    posts = _safe_int(
+        payload.get("posts")
+        or payload.get("count")
+        or payload.get("samples")
+        or payload.get("sample_size")
+    )
+    if posts in (None, 0) and posts_hint is not None:
+        posts = posts_hint
+    models = _normalise_models(
+        payload.get("models") or payload.get("sources") or payload.get("model")
+    )
+    if models:
+        models = tuple(dict.fromkeys(models + ("groq",)))
+    else:
+        models = ("groq",)
+    return SocialSentiment(
+        bias=bias,
+        score=float(max(-1.0, min(1.0, score or 0.0))),
+        confidence=float(max(0.0, min(1.0, confidence or 0.0))),
+        posts_analyzed=posts or 0,
+        source_models=models,
+        raw_output=dict(payload),
+    )
+
+
+def _groq_onchain(
+    payload: Mapping[str, Any],
+    *,
+    fallback: Optional[OnChainMetrics] = None,
+) -> OnChainMetrics:
+    def clamp(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def with_fallback(primary: Optional[float], attr: str) -> Optional[float]:
+        if primary is not None:
+            return primary
+        if fallback is None:
+            return None
+        return getattr(fallback, attr)
+
+    inflow = _safe_float(payload.get("exchange_inflow"))
+    outflow = _safe_float(payload.get("exchange_outflow"))
+    whale_in = _safe_float(payload.get("whale_inflow"))
+    whale_out = _safe_float(payload.get("whale_outflow"))
+    whale_ratio = _safe_float(
+        payload.get("whale_ratio") or payload.get("whale_exchange_ratio")
+    )
+    net_flow = _safe_float(
+        payload.get("net_exchange_flow") or payload.get("exchange_netflow")
+    )
+    large_holder = _safe_float(
+        payload.get("large_holder_netflow")
+        or payload.get("whale_netflow")
+        or payload.get("large_holder_ratio")
+    )
+    composite = _safe_float(
+        payload.get("composite_score")
+        or payload.get("score")
+        or payload.get("composite")
+    )
+    sources = _normalise_models(payload.get("sources") or payload.get("models"))
+    if sources:
+        sources = tuple(dict.fromkeys(sources + ("groq",)))
+    else:
+        sources = ("groq",)
+    metrics = OnChainMetrics(
+        exchange_inflow=with_fallback(inflow, "exchange_inflow"),
+        exchange_outflow=with_fallback(outflow, "exchange_outflow"),
+        whale_inflow=with_fallback(whale_in, "whale_inflow"),
+        whale_outflow=with_fallback(whale_out, "whale_outflow"),
+        whale_ratio=clamp(whale_ratio)
+        if whale_ratio is not None
+        else with_fallback(None, "whale_ratio"),
+        net_exchange_flow=clamp(net_flow)
+        if net_flow is not None
+        else with_fallback(None, "net_exchange_flow"),
+        large_holder_netflow=clamp(large_holder)
+        if large_holder is not None
+        else with_fallback(None, "large_holder_netflow"),
+        composite_score=float(
+            max(
+                -1.0,
+                min(
+                    1.0,
+                    (
+                        composite
+                        if composite is not None
+                        else (fallback.composite_score if fallback else 0.0)
+                    ),
+                ),
+            )
+        ),
+        sources=sources,
+    )
+    return metrics
 
 
 def _symbol_to_asset(symbol: str) -> str:
@@ -312,46 +474,71 @@ def fetch_social_posts(symbol: str, limit: int = 60) -> List[str]:
     return [post for post in posts if isinstance(post, str) and post.strip()]
 
 
+_POSITIVE_HINTS = {
+    "bullish",
+    "buying",
+    "accumulating",
+    "moon",
+    "pump",
+    "surge",
+    "rally",
+    "strong",
+    "uptrend",
+}
+
+_NEGATIVE_HINTS = {
+    "bearish",
+    "selling",
+    "dump",
+    "crash",
+    "collapse",
+    "selloff",
+    "weak",
+    "downtrend",
+    "fear",
+}
+
+
 def analyze_social_sentiment(posts: Sequence[str]) -> SocialSentiment:
-    """Analyse social media posts using FinGPT/FinLlama fusion."""
+    """Analyse social media posts with a lightweight lexical heuristic."""
 
     cleaned = [post.strip() for post in posts if isinstance(post, str) and post.strip()]
     if not cleaned:
-        return SocialSentiment()
-    if analyze_headlines is None:
-        return SocialSentiment()
-    sample = cleaned[:100]
-    try:
-        analysis = analyze_headlines(sample)
-    except Exception as exc:  # pragma: no cover - best effort
-        logger.debug("Sentiment fusion failed: %s", exc)
-        return SocialSentiment()
-    fused = analysis.get("fused", {}) if isinstance(analysis, Mapping) else {}
-    score = fused.get("score", 0.0)
-    bias = fused.get("bias", "neutral")
-    confidence = fused.get("confidence", 0.0)
-    try:
-        score = float(score)
-    except (TypeError, ValueError):
+        return SocialSentiment(source_models=("heuristic",))
+
+    positive_hits = 0
+    negative_hits = 0
+    for text in cleaned:
+        lowered = text.lower()
+        if any(token in lowered for token in _POSITIVE_HINTS):
+            positive_hits += 1
+        if any(token in lowered for token in _NEGATIVE_HINTS):
+            negative_hits += 1
+
+    total_hits = positive_hits + negative_hits
+    if total_hits == 0:
         score = 0.0
+    else:
+        score = (positive_hits - negative_hits) / float(total_hits)
     score = max(-1.0, min(1.0, score))
-    try:
-        confidence = float(confidence)
-    except (TypeError, ValueError):
-        confidence = 0.0
-    confidence = max(0.0, min(1.0, confidence))
-    models = [
-        name
-        for name in ("finbert", "finllama", "fingpt")
-        if isinstance(analysis, Mapping) and name in analysis
-    ]
+
+    confidence = min(1.0, len(cleaned) / 20.0)
+
+    if total_hits == 0:
+        bias = "neutral"
+    elif score > 0.05:
+        bias = "bullish"
+    elif score < -0.05:
+        bias = "bearish"
+    else:
+        bias = "neutral"
+
     return SocialSentiment(
-        bias=str(bias),
+        bias=bias,
         score=score,
         confidence=confidence,
-        posts_analyzed=len(sample),
-        source_models=tuple(models),
-        raw_output=analysis if isinstance(analysis, Mapping) else None,
+        posts_analyzed=len(cleaned),
+        source_models=("heuristic",),
     )
 
 
@@ -370,20 +557,69 @@ def get_alternative_data(
         bundle, timestamp = cached
         if now - timestamp <= max(0.0, ttl):
             return bundle
-    onchain = fetch_onchain_metrics(symbol)
+    fallback_onchain = fetch_onchain_metrics(symbol)
     social_posts = fetch_social_posts(symbol)
-    social = analyze_social_sentiment(social_posts)
+
+    groq_social_section: Optional[Mapping[str, Any]] = None
+    groq_onchain_section: Optional[Mapping[str, Any]] = None
+    groq_sources: List[str] = []
+
+    if groq_fetch_alt_data is not None:
+        try:
+            groq_payload = groq_fetch_alt_data(
+                symbol=symbol,
+                onchain_snapshot=_onchain_snapshot(fallback_onchain),
+                social_posts=social_posts,
+            )
+        except Exception as exc:  # pragma: no cover - defensive guardrail
+            logger.debug("Groq alt-data analysis failed: %s", exc)
+            groq_payload = None
+        if isinstance(groq_payload, Mapping):
+            social_candidate = groq_payload.get("social")
+            if isinstance(social_candidate, Mapping):
+                groq_social_section = social_candidate
+            onchain_candidate = groq_payload.get("onchain")
+            if isinstance(onchain_candidate, Mapping):
+                groq_onchain_section = onchain_candidate
+            raw_sources = groq_payload.get("sources")
+            if isinstance(raw_sources, (list, tuple, set)):
+                groq_sources = [
+                    str(src)
+                    for src in raw_sources
+                    if isinstance(src, (str, bytes)) and str(src).strip()
+                ]
+            elif isinstance(raw_sources, (str, bytes)):
+                groq_sources = [str(raw_sources)]
+
+    if groq_onchain_section is not None:
+        onchain = _groq_onchain(groq_onchain_section, fallback=fallback_onchain)
+    else:
+        onchain = fallback_onchain
+
+    if groq_social_section is not None:
+        social = _groq_social(
+            groq_social_section,
+            posts_hint=len(social_posts or []),
+        )
+    else:
+        social = analyze_social_sentiment(social_posts)
+
     sources: List[str] = []
     if onchain.sources:
-        sources.extend(onchain.sources)
-    if TWITTER_BEARER_TOKEN and any(
-        src for src in social.source_models if src.lower() == "fingpt"
-    ):
+        sources.extend(str(src) for src in onchain.sources)
+    if social.source_models:
+        sources.extend(str(model) for model in social.source_models)
+    if groq_sources:
+        sources.extend(str(src) for src in groq_sources)
+    if TWITTER_BEARER_TOKEN and social.posts_analyzed:
         sources.append("twitter")
-    if ENABLE_REDDIT_SCRAPE:
+    if ENABLE_REDDIT_SCRAPE and social.posts_analyzed:
         sources.append("reddit")
+    if groq_social_section or groq_onchain_section:
+        sources.append("groq")
     if not sources:
         sources.append("fallback")
+
     bundle = AlternativeDataBundle(
         onchain=onchain,
         social=social,

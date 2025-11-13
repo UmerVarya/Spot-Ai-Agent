@@ -25,6 +25,8 @@ Set the following environment variables as needed:
   generation, risk reviews and news analysis.
 - `GROQ_API_URL` – optional override for the Groq REST endpoint. Defaults to the
   public SaaS endpoint.
+- `GROQ_ALT_DATA_MAX_POSTS` / `GROQ_ALT_DATA_MAX_TOKENS` – optional caps for the
+  Groq alternative-data summariser (defaults: 12 posts, 400 response tokens).
 
 ## Sentiment Fusion
 
@@ -46,6 +48,12 @@ macro-news validation set to refresh these weights as new models (e.g. Llama 3�
 financial fine-tunes or Mistral-FinRL variants) become available.  The fused
 sentiment and rationale bundle is still passed to the Groq LLM for macro context
 and final arbitration.
+
+When the Groq API is configured the alternative-data module now asks the Groq
+LLM to interpret recent social posts and on-chain metrics before falling back to
+the local Glassnode/Twitter/Reddit heuristics.  This keeps realtime adjustments
+available even if the Groq request fails, albeit with a simpler lexical
+sentiment heuristic.
 
 ### Persistent data
 
