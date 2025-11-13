@@ -592,7 +592,7 @@ logger.info(
     TRADE_LEARNING_LOG_FILE,
 )
 
-logger.info("News halt mode = %s", os.getenv("NEWS_HALT_MODE", "halt"))
+logger.info("News halt mode = %s", os.getenv("NEWS_HALT_MODE", "soft"))
 
 
 def _default_macro_payload() -> Dict[str, Any]:
