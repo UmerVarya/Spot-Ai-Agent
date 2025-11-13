@@ -175,6 +175,25 @@ def train_sequence_model(df: pd.DataFrame, window_size: int = 10) -> Optional[Se
     if X.size == 0:
         logger.warning("Failed to construct sequences from data.")
         return None
+    # Clean NaNs before training to avoid scikit-learn errors
+    X_df = pd.DataFrame(X)
+    y_series = pd.Series(y)
+    mask = ~X_df.isna().any(axis=1) & ~y_series.isna()
+    X_df = X_df[mask]
+    y_series = y_series[mask]
+    if len(X_df) < 10:
+        logger.warning(
+            "Sequence model training skipped: not enough non-NaN samples (%d valid rows after cleaning).",
+            len(X_df),
+        )
+        return None
+    if len(X_df) != len(X):
+        logger.info(
+            "Sequence model training: dropped %d rows containing NaNs before fitting.",
+            len(X) - len(X_df),
+        )
+    X = X_df.to_numpy()
+    y = y_series.to_numpy()
     split_idx = max(window_size, int(len(X) * 0.8))
     split_idx = min(split_idx, len(X) - 1)
     if split_idx <= 0:
