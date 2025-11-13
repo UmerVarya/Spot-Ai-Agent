@@ -21,6 +21,15 @@ import pandas as pd
 from typing import Callable, Dict, List
 
 
+def _tz_naive_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a DataFrame whose index is timezone-naive."""
+
+    if df.index.tz is not None:
+        df = df.copy()
+        df.index = df.index.tz_localize(None)
+    return df
+
+
 def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     """
     Resample a lower‑frequency OHLCV DataFrame to a higher timeframe.
@@ -87,7 +96,13 @@ def multi_timeframe_confluence(
         resampled = resample_ohlcv(df.copy(), tf)
         if tf == '1H' and hourly_override is not None and not hourly_override.empty:
             resampled = resampled[resampled.index != hourly_override.index[0]]
-            resampled = pd.concat([resampled, hourly_override]).sort_index()
+            frames: List[pd.DataFrame] = []
+            for frame in [resampled, hourly_override]:
+                if frame is None:
+                    continue
+                frames.append(_tz_naive_index(frame))
+            if frames:
+                resampled = pd.concat(frames).sort_index()
         if len(resampled) < 2:
             continue
         results[tf] = float(indicator_func(resampled['close']))
@@ -133,7 +148,13 @@ def multi_timeframe_indicator_alignment(
         resampled = resample_ohlcv(df.copy(), tf)
         if tf == '1H' and hourly_override is not None and not hourly_override.empty:
             resampled = resampled[resampled.index != hourly_override.index[0]]
-            resampled = pd.concat([resampled, hourly_override]).sort_index()
+            frames = []
+            for frame in [resampled, hourly_override]:
+                if frame is None:
+                    continue
+                frames.append(_tz_naive_index(frame))
+            if frames:
+                resampled = pd.concat(frames).sort_index()
         if len(resampled) < 2:
             continue
         tf_vals: Dict[str, float] = {}
