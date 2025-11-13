@@ -17,9 +17,13 @@ added to the technical score.
 
 Environment
 -----------
-``GLASSNODE_API_KEY``
-    Optional API key for the Glassnode REST endpoints used to retrieve
-    exchange flows and whale balances.
+``BITQUERY_API_KEY``
+    Optional API key for the Bitquery GraphQL endpoint used to retrieve
+    basic Bitcoin on-chain activity statistics.
+``ONCHAIN_PROVIDER``
+    When set to ``"BITQUERY"`` the module will attempt to fetch on-chain
+    activity from Bitquery.  The default behaviour is to auto-enable the
+    integration when a Bitquery API key is available.
 ``TWITTER_BEARER_TOKEN``
     Optional bearer token for the Twitter v2 recent search endpoint.
 ``ENABLE_REDDIT_SCRAPE``
@@ -45,12 +49,12 @@ try:  # Optional Groq-powered alt data fusion
 except Exception:  # pragma: no cover - best effort fallback
     groq_fetch_alt_data = None
 
-GLASSNODE_API_KEY = os.getenv("GLASSNODE_API_KEY", "")
+BITQUERY_API_KEY = os.getenv("BITQUERY_API_KEY", "")
+ONCHAIN_PROVIDER = os.getenv("ONCHAIN_PROVIDER", "").strip().upper()
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 ENABLE_REDDIT_SCRAPE = os.getenv("ENABLE_REDDIT_SCRAPE", "0") == "1"
 REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "spot-ai-agent/1.0")
 
-_GLASSNODE_BASE = "https://api.glassnode.com/v1/metrics"
 _TWITTER_ENDPOINT = "https://api.twitter.com/2/tweets/search/recent"
 _REDDIT_SEARCH_ENDPOINT = "https://www.reddit.com/search.json"
 
@@ -68,6 +72,9 @@ class OnChainMetrics:
     large_holder_netflow: Optional[float] = None
     composite_score: float = 0.0
     sources: Tuple[str, ...] = field(default_factory=tuple)
+    total_transfers: Optional[float] = None
+    total_volume_btc: Optional[float] = None
+    window_hours: Optional[int] = None
 
     def availability(self) -> float:
         """Return the fraction of populated metrics (0-1)."""
@@ -80,6 +87,8 @@ class OnChainMetrics:
             self.whale_ratio,
             self.net_exchange_flow,
             self.large_holder_netflow,
+            self.total_transfers,
+            self.total_volume_btc,
         ]
         available = sum(1 for value in values if value is not None)
         return available / len(values)
@@ -129,6 +138,9 @@ class AlternativeDataBundle:
             "onchain_net_flow": self.onchain.net_exchange_flow,
             "onchain_whale_ratio": self.onchain.whale_ratio,
             "onchain_large_holder_netflow": self.onchain.large_holder_netflow,
+            "onchain_total_transfers": self.onchain.total_transfers,
+            "onchain_total_volume_btc": self.onchain.total_volume_btc,
+            "onchain_window_hours": self.onchain.window_hours,
             "social_bias": self.social.bias,
             "social_score": self.social.score,
             "social_confidence": self.social.confidence,
@@ -182,6 +194,9 @@ def _onchain_snapshot(metrics: Optional["OnChainMetrics"]) -> Mapping[str, Any]:
         "large_holder_netflow": metrics.large_holder_netflow,
         "whale_ratio": metrics.whale_ratio,
         "composite_score": metrics.composite_score,
+        "total_transfers": metrics.total_transfers,
+        "total_volume_btc": metrics.total_volume_btc,
+        "window_hours": metrics.window_hours,
     }
 
 
@@ -271,6 +286,9 @@ def _groq_onchain(
         or payload.get("score")
         or payload.get("composite")
     )
+    total_transfers = _safe_float(payload.get("total_transfers"))
+    total_volume_btc = _safe_float(payload.get("total_volume_btc"))
+    window_hours = _safe_int(payload.get("window_hours"))
     sources = _normalise_models(payload.get("sources") or payload.get("models"))
     if sources:
         sources = tuple(dict.fromkeys(sources + ("groq",)))
@@ -304,6 +322,11 @@ def _groq_onchain(
             )
         ),
         sources=sources,
+        total_transfers=with_fallback(total_transfers, "total_transfers"),
+        total_volume_btc=with_fallback(total_volume_btc, "total_volume_btc"),
+        window_hours=window_hours
+        if window_hours is not None
+        else (fallback.window_hours if fallback else None),
     )
     return metrics
 
@@ -317,81 +340,62 @@ def _symbol_to_asset(symbol: str) -> str:
     return sym
 
 
-def _glassnode_latest(endpoint: str, asset: str) -> Optional[float]:
-    if not GLASSNODE_API_KEY:
-        return None
-    url = f"{_GLASSNODE_BASE}/{endpoint}"
-    params = {"a": asset, "api_key": GLASSNODE_API_KEY}
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code != 200:
-            logger.debug(
-                "Glassnode endpoint %s returned %s", endpoint, response.status_code
-            )
-            return None
-        payload = response.json()
-        if isinstance(payload, list) and payload:
-            latest = payload[-1]
-            value = latest.get("v") if isinstance(latest, Mapping) else None
-            if value is None and isinstance(latest, Mapping):
-                value = latest.get("value")
-            if value is None:
-                return None
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return None
-    except Exception as exc:  # pragma: no cover - network best effort
-        logger.debug("Glassnode request failed: %s", exc)
-    return None
-
-
 def fetch_onchain_metrics(symbol: str) -> OnChainMetrics:
-    """Fetch on-chain metrics for ``symbol`` using Glassnode when available."""
+    """Fetch on-chain metrics for ``symbol`` using the configured provider."""
 
+    provider = ONCHAIN_PROVIDER or ("BITQUERY" if BITQUERY_API_KEY else "")
     asset = _symbol_to_asset(symbol)
-    sources: List[str] = []
-    inflow = _glassnode_latest("transactions/transfers_volume_to_exchanges", asset)
-    outflow = _glassnode_latest("transactions/transfers_volume_from_exchanges", asset)
-    whale_in = _glassnode_latest(
-        "transactions/transfers_volume_whales_to_exchanges", asset
-    )
-    whale_out = _glassnode_latest(
-        "transactions/transfers_volume_whales_from_exchanges", asset
-    )
-    whale_balance = _glassnode_latest("supply/supply_balance_whales", asset)
-    exchange_balance = _glassnode_latest("supply/supply_on_exchanges", asset)
-    if GLASSNODE_API_KEY:
-        sources.append("glassnode")
-    net_exchange_flow = None
-    if inflow is not None and outflow is not None and inflow + outflow > 0:
-        net_exchange_flow = (outflow - inflow) / (inflow + outflow)
-    large_holder_net = None
-    if whale_in is not None and whale_out is not None and whale_in + whale_out > 0:
-        large_holder_net = (whale_out - whale_in) / (whale_in + whale_out)
-    whale_ratio = None
-    if whale_balance is not None and exchange_balance not in (None, 0):
+
+    if provider == "BITQUERY":
+        if asset != "BTC":
+            logger.debug(
+                "Bitquery on-chain data currently supports BTC only (requested %s)",
+                asset,
+            )
+            return OnChainMetrics()
         try:
-            whale_ratio = float(whale_balance) / float(exchange_balance)
-        except Exception:
-            whale_ratio = None
-    components: List[float] = []
-    for value in (net_exchange_flow, large_holder_net, whale_ratio):
-        if value is None:
-            continue
-        components.append(max(-1.0, min(1.0, float(value))))
-    composite = sum(components) / len(components) if components else 0.0
-    return OnChainMetrics(
-        exchange_inflow=inflow,
-        exchange_outflow=outflow,
-        whale_inflow=whale_in,
-        whale_outflow=whale_out,
-        whale_ratio=whale_ratio,
-        net_exchange_flow=net_exchange_flow,
-        large_holder_netflow=large_holder_net,
-        composite_score=float(composite),
-        sources=tuple(sources) if sources else tuple(),
-    )
+            from onchain_bitquery import get_btc_onchain_signal
+        except Exception as exc:  # pragma: no cover - defensive import guard
+            logger.warning("Bitquery integration unavailable: %s", exc)
+            return OnChainMetrics()
+
+        signal = get_btc_onchain_signal()
+        if not signal or not signal.get("ok"):
+            return OnChainMetrics()
+
+        transfers = _safe_float(signal.get("total_transfers"))
+        volume = _safe_float(signal.get("total_volume_btc"))
+        window_hours = _safe_int(signal.get("window_hours")) or 24
+
+        composite = 0.0
+        net_flow = None
+        if transfers is not None and window_hours not in (None, 0):
+            baseline = 200000.0 * (window_hours / 24.0)
+            if baseline > 0:
+                net_flow = max(-1.0, min(1.0, (transfers - baseline) / baseline))
+                composite = float(net_flow)
+
+        return OnChainMetrics(
+            exchange_inflow=transfers,
+            exchange_outflow=None,
+            whale_inflow=None,
+            whale_outflow=None,
+            whale_ratio=None,
+            net_exchange_flow=net_flow,
+            large_holder_netflow=None,
+            composite_score=composite,
+            sources=("bitquery",),
+            total_transfers=transfers,
+            total_volume_btc=volume,
+            window_hours=window_hours,
+        )
+
+    if provider:
+        logger.debug(
+            "Unknown on-chain provider %s; returning neutral on-chain metrics",
+            provider,
+        )
+    return OnChainMetrics()
 
 
 def _fetch_twitter_posts(query: str, limit: int) -> List[str]:

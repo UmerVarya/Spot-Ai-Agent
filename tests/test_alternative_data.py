@@ -36,7 +36,8 @@ def test_alternative_data_score_adjustment_directional():
 
 
 def test_get_alternative_data_defaults_without_keys(monkeypatch):
-    monkeypatch.setenv("GLASSNODE_API_KEY", "")
+    monkeypatch.setenv("BITQUERY_API_KEY", "")
+    monkeypatch.setenv("ONCHAIN_PROVIDER", "")
     monkeypatch.setenv("TWITTER_BEARER_TOKEN", "")
     monkeypatch.setenv("ENABLE_REDDIT_SCRAPE", "0")
     # Ensure module-level globals reflect the patched environment
