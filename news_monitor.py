@@ -40,9 +40,15 @@ MODERATE_RELEVANCE_CEILING = 3.0
 
 
 def _get_news_halt_mode() -> str:
-    """Return the configured news halt mode (``halt`` or ``warn``)."""
+    """Return the configured news halt mode.
 
-    return os.getenv("NEWS_HALT_MODE", "halt").strip().lower()
+    The mode controls whether a high-severity assessment from the LLM should
+    translate into a trading halt.  ``hard`` enforces the halt, while
+    ``soft``/``warn``/``log``/``log_only`` merely emit warnings.  Any
+    unrecognised value defaults to the warning-only behaviour.
+    """
+
+    return os.getenv("NEWS_HALT_MODE", "soft").strip().lower()
 
 
 NewsFetcher = Callable[[], Awaitable[Iterable[Mapping[str, Any]]]]
@@ -380,15 +386,33 @@ class LLMNewsMonitor:
         warning_only = alert_triggered and (caution_mode or not halt_trading)
 
         news_halt_mode = _get_news_halt_mode()
-        if halt_trading and news_halt_mode == "warn":
-            LOGGER.warning(
-                "News flagged HIGH, but NEWS_HALT_MODE=warn → continuing (no halt)."
-            )
-            halt_trading = False
-            warning_only = True
-            halt_minutes = 0
-        else:
-            halt_minutes = 120 if halt_trading else 0
+        halt_minutes = 120 if halt_trading else 0
+
+        if halt_trading:
+            if news_halt_mode == "hard":
+                halt_until = datetime.now(timezone.utc) + timedelta(
+                    minutes=halt_minutes
+                )
+                LOGGER.warning(
+                    "NEWS HALT: LLM flagged critical news. Halting new trades until %s (mode=hard)",
+                    halt_until.isoformat(),
+                )
+            elif news_halt_mode in {"soft", "log", "warn", "log_only"}:
+                LOGGER.warning(
+                    "NEWS WARNING: LLM flagged critical news (mode=%s) – LOGGING ONLY, NO HALT APPLIED.",
+                    news_halt_mode,
+                )
+                halt_trading = False
+                warning_only = True
+                halt_minutes = 0
+            else:
+                LOGGER.warning(
+                    "NEWS WARNING: LLM flagged critical news (mode=%s unrecognized) – treating as log-only.",
+                    news_halt_mode,
+                )
+                halt_trading = False
+                warning_only = True
+                halt_minutes = 0
 
         state: dict[str, Any] = {
             "safe": safe,

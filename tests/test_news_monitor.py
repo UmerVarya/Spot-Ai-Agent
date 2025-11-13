@@ -8,7 +8,7 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def test_monitor_emits_alert_and_persists_state(tmp_path):
+def test_monitor_emits_alert_and_persists_state(tmp_path, monkeypatch):
     events = [
         {"event": "Exchange Hack", "datetime": _iso_now(), "impact": "high"},
     ]
@@ -24,6 +24,8 @@ def test_monitor_emits_alert_and_persists_state(tmp_path):
 
     def callback(alert):
         alerts.append(alert)
+
+    monkeypatch.setenv("NEWS_HALT_MODE", "hard")
 
     state_path = tmp_path / "state.json"
     monitor = LLMNewsMonitor(
@@ -90,7 +92,7 @@ def test_monitor_caps_fx_alert_without_crypto_confirmation():
     assert state["severity"] < 0.8
 
 
-def test_monitor_allows_halt_when_crypto_present_in_metadata():
+def test_monitor_allows_halt_when_crypto_present_in_metadata(monkeypatch):
     events = [
         {
             "event": "FX + Crypto Stress",
@@ -110,6 +112,8 @@ def test_monitor_allows_halt_when_crypto_present_in_metadata():
             "reason": "Cross-market stress impacting multiple venues",
         }
 
+    monkeypatch.setenv("NEWS_HALT_MODE", "hard")
+
     monitor = LLMNewsMonitor(
         interval=30,
         alert_threshold=0.5,
@@ -127,7 +131,7 @@ def test_monitor_allows_halt_when_crypto_present_in_metadata():
     assert state["warning_only"] is False
 
 
-def test_monitor_halts_for_major_macro_event():
+def test_monitor_halts_for_major_macro_event(monkeypatch):
     events = [
         {
             "event": "US CPI release",  # should map to macro:cpi
@@ -146,6 +150,8 @@ def test_monitor_halts_for_major_macro_event():
             "sensitivity": 0.96,
             "reason": "CPI print likely to trigger systemic move",
         }
+
+    monkeypatch.setenv("NEWS_HALT_MODE", "hard")
 
     monitor = LLMNewsMonitor(
         interval=30,
