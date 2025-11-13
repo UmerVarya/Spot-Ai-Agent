@@ -1679,7 +1679,7 @@ def run_agent_loop() -> None:
                             float(alt_features.get("onchain_score") or 0.0),
                             alt_adjustment,
                         )
-                    adjusted_score = float(score)
+                    adjusted_score = float(raw_score + (alt_adjustment or 0.0))
                     try:
                         entry_cutoff = float(signal_snapshot.get("activation_threshold", 0.0))
                         if not math.isfinite(entry_cutoff) or entry_cutoff <= 0.0:
@@ -1688,7 +1688,8 @@ def run_agent_loop() -> None:
                         entry_cutoff = 5.0
                     should_log_decision = raw_score >= entry_cutoff
                     volume_ok = position_size > 0
-                    macro_veto_flag = not bool(macro_news_assessment.get("safe", True))
+                    macro_state = macro_news_assessment or {}
+                    macro_veto_flag = not bool(macro_state.get("safe", True))
                     news_veto_flag = bool(
                         monitor_state and bool(monitor_state.get("halt_trading"))
                     )
