@@ -21,7 +21,7 @@ def test_alternative_data_score_adjustment_directional():
         score=0.65,
         confidence=0.8,
         posts_analyzed=42,
-        source_models=("finllama", "fingpt"),
+        source_models=("groq",),
     )
     bundle = AlternativeDataBundle(onchain=onchain, social=social, fetched_at=0.0)
     long_adj = bundle.score_adjustment("long")
