@@ -1,4 +1,6 @@
 import csv
+import json
+
 import pandas as pd
 import pytest
 
@@ -34,6 +36,75 @@ def test_save_and_load_active_trades(tmp_path, monkeypatch):
     trade_storage.save_active_trades(trades)
     loaded = trade_storage.load_active_trades()
     assert loaded == trades
+
+
+def test_active_trades_file_mirrors_db_writes(tmp_path, monkeypatch):
+    path = tmp_path / "active.json"
+    monkeypatch.setattr(trade_storage, "ACTIVE_TRADES_FILE", str(path))
+
+    class FakeCursor:
+        def __init__(self):
+            self.rows: dict[str, dict] = {}
+            self._last: tuple[str, str | None] | None = None
+
+        def execute(self, query, params=None):
+            statement = " ".join(query.split()).lower()
+            if "delete from active_trades where" in statement:
+                symbol = params[0]
+                self.rows.pop(symbol, None)
+                self._last = ("exists", symbol)
+            elif "delete from active_trades" in statement:
+                self.rows.clear()
+                self._last = ("all", None)
+            elif "insert into active_trades" in statement:
+                symbol, data = params
+                self.rows[symbol] = data
+                self._last = ("exists", symbol)
+            elif "select count" in statement:
+                self._last = ("count", None)
+            elif "select 1 from active_trades" in statement:
+                symbol = params[0]
+                self._last = ("exists", symbol)
+            elif "select data from active_trades" in statement:
+                self._last = ("all", None)
+            else:
+                self._last = None
+
+        def fetchone(self):
+            if not self._last:
+                return None
+            kind, symbol = self._last
+            if kind == "count":
+                return (len(self.rows),)
+            if kind == "exists" and symbol is not None:
+                return (1,) if symbol in self.rows else None
+            return None
+
+        def fetchall(self):
+            if self._last and self._last[0] == "all":
+                return [(data,) for data in self.rows.values()]
+            return []
+
+    fake_cursor = FakeCursor()
+    monkeypatch.setattr(trade_storage, "DB_CURSOR", fake_cursor)
+    monkeypatch.setattr(trade_storage, "Json", lambda value: value)
+
+    trades = [{"symbol": "ETHUSDT", "entry": 1000}]
+    trade_storage.save_active_trades(trades)
+
+    written = json.loads(path.read_text())
+    assert written == trades
+
+    # Store a new trade via the DB path and ensure the file mirrors it
+    new_trade = {"symbol": "BTCUSDT", "entry": 2000}
+    assert trade_storage.store_trade(new_trade) is True
+    mirrored = json.loads(path.read_text())
+    assert any(t["symbol"] == "BTCUSDT" for t in mirrored)
+
+    # Removing the trade should also update the file snapshot
+    trade_storage.remove_trade("BTCUSDT")
+    after_remove = json.loads(path.read_text())
+    assert all(t.get("symbol") != "BTCUSDT" for t in after_remove)
 
 
 def test_log_trade_result_extended_fields(tmp_path, monkeypatch):
