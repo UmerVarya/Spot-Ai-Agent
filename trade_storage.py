@@ -407,8 +407,22 @@ def load_active_trades() -> list:
     return []
 
 
+def _write_active_trades_file(trades: list) -> None:
+    """Write ``trades`` to the JSON backing file used by the dashboard."""
+
+    directory = os.path.dirname(ACTIVE_TRADES_FILE)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    try:
+        with open(ACTIVE_TRADES_FILE, "w") as f:
+            json.dump(trades, f, indent=4)
+    except Exception as exc:
+        logger.exception("Failed to write active trades file: %s", exc)
+
+
 def save_active_trades(trades: list) -> None:
     """Persist the list of active trades."""
+
     if DB_CURSOR:
         try:
             DB_CURSOR.execute("DELETE FROM active_trades")
@@ -417,13 +431,9 @@ def save_active_trades(trades: list) -> None:
                     "INSERT INTO active_trades (symbol, data) VALUES (%s, %s)",
                     (trade.get("symbol"), Json(trade)),
                 )
-            return
         except Exception as exc:
             logger.exception("Failed to save active trades to database: %s", exc)
-    # Ensure parent directory exists
-    os.makedirs(os.path.dirname(ACTIVE_TRADES_FILE), exist_ok=True)
-    with open(ACTIVE_TRADES_FILE, "w") as f:
-        json.dump(trades, f, indent=4)
+    _write_active_trades_file(trades)
 
 
 def is_trade_active(symbol: str) -> bool:
@@ -486,6 +496,7 @@ def store_trade(trade: dict) -> bool:
                 """,
                 (symbol, Json(trade)),
             )
+            _write_active_trades_file(load_active_trades())
             return True
         except Exception as exc:
             logger.exception("Failed to store trade in database: %s", exc)
@@ -512,9 +523,11 @@ def remove_trade(symbol: str) -> None:
     if DB_CURSOR:
         try:
             DB_CURSOR.execute("DELETE FROM active_trades WHERE symbol = %s", (symbol,))
-            return
         except Exception as exc:
             logger.exception("Failed to remove trade from database: %s", exc)
+        else:
+            _write_active_trades_file(load_active_trades())
+            return
     trades = load_active_trades()
     updated = [t for t in trades if t.get("symbol") != symbol]
     save_active_trades(updated)
