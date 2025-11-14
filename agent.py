@@ -581,6 +581,12 @@ DEFAULT_MACRO_SENTIMENT = {
     "confidence": 5.0,
     "summary": "Macro context unavailable.",
 }
+DEFAULT_DECISION_SENTIMENT = {
+    "bias": DEFAULT_MACRO_SENTIMENT["bias"],
+    "score": DEFAULT_MACRO_SENTIMENT["confidence"],
+    "confidence": DEFAULT_MACRO_SENTIMENT["confidence"],
+    "summary": DEFAULT_MACRO_SENTIMENT["summary"],
+}
 MACRO_CONTEXT_STALE_AFTER = float(os.getenv("MACRO_CONTEXT_STALE_AFTER", "900"))
 
 logger.info(
@@ -1411,7 +1417,10 @@ def run_agent_loop() -> None:
             sentiment_payload = macro_payload.get("sentiment") or {}
             if not isinstance(sentiment_payload, dict):
                 sentiment_payload = dict(DEFAULT_MACRO_SENTIMENT)
-            # Extract sentiment bias and confidence safely
+            # Extract sentiment bias and confidence safely.  We intentionally build a
+            # dedicated sentiment mapping for downstream consumers so that missing
+            # sentiment data never raises NameError inside the trade preparation
+            # pipeline (see prepare_trade_decision()).
             try:
                 sentiment_confidence = float(
                     sentiment_payload.get("confidence", DEFAULT_MACRO_SENTIMENT["confidence"])
@@ -1423,6 +1432,14 @@ def run_agent_loop() -> None:
             ).strip().lower()
             if not sentiment_bias:
                 sentiment_bias = DEFAULT_MACRO_SENTIMENT["bias"]
+            sentiment_summary = sentiment_payload.get("summary")
+            if not isinstance(sentiment_summary, str) or not sentiment_summary.strip():
+                sentiment_summary = DEFAULT_MACRO_SENTIMENT["summary"]
+            sentiment = dict(DEFAULT_DECISION_SENTIMENT)
+            sentiment["bias"] = sentiment_bias
+            sentiment["score"] = sentiment_confidence
+            sentiment["confidence"] = sentiment_confidence
+            sentiment["summary"] = sentiment_summary.strip()
             # Convert BTC dominance and Fear & Greed to numeric values
             try:
                 btc_d = float(btc_d)
