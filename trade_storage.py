@@ -400,8 +400,21 @@ def load_active_trades() -> list:
             logger.exception("Failed to load active trades from database: %s", exc)
     if os.path.exists(ACTIVE_TRADES_FILE):
         try:
-            with open(ACTIVE_TRADES_FILE, "r") as f:
-                return json.load(f)
+            with open(ACTIVE_TRADES_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if not content:
+                    logger.warning(
+                        "Active trades file %s is empty; treating as no open trades",
+                        ACTIVE_TRADES_FILE,
+                    )
+                    return []
+                return json.loads(content)
+        except json.JSONDecodeError as exc:
+            logger.error(
+                "Active trades file %s contains invalid JSON: %s",
+                ACTIVE_TRADES_FILE,
+                exc,
+            )
         except Exception as exc:
             logger.exception("Failed to read active trades file: %s", exc)
     return []
