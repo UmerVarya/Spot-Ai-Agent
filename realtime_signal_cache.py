@@ -76,6 +76,7 @@ import pandas as pd
 import requests  # used for mirror fallback (no proxies)
 
 from rest_prices import rest_backfill_klines, rest_fetch_latest_closed
+from trade_utils import filter_stable_symbols
 
 # python-binance (a.k.a binance-connector legacy) exceptions can vary by version.
 # Import defensively so minor packaging changes do not break the cache module.
@@ -1291,7 +1292,8 @@ class RealTimeSignalCache:
     def update_universe(self, symbols: Iterable[str]) -> None:
         """Update the symbol universe tracked by the cache."""
 
-        normalized = {self._key(sym) for sym in symbols if sym}
+        filtered = filter_stable_symbols(symbols)
+        normalized = {self._key(sym) for sym in filtered if sym}
         with self._lock:
             added = normalized - self._symbols
             removed = self._symbols - normalized
