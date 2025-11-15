@@ -462,7 +462,13 @@ def _sanitize_prompt(prompt: str, max_len: int = 3000) -> str:
     return prompt
 
 
-def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 500) -> str:
+def get_llm_judgment(
+    prompt: str,
+    temperature: float = 0.4,
+    max_tokens: int = 500,
+    *,
+    model_override: str | None = None,
+) -> str:
     """Query Groq LLM with a prompt asking for trade advice in JSON format."""
 
     safe_prompt = _sanitize_prompt(prompt)
@@ -486,11 +492,13 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
         {"role": "user", "content": user_prompt},
     ]
 
+    model_name = model_override or config.get_groq_model()
+
     start = time.perf_counter()
     try:
         response = safe_chat_completion(
             client,
-            model=config.get_groq_model(),
+            model=model_name,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -503,7 +511,7 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
         logger.info(
             "LLM call succeeded in %.2fs (model=%s)",
             latency,
-            getattr(response, "model", config.get_groq_model()),
+            getattr(response, "model", model_name),
         )
         return _extract_choice_content(response)
     except RateLimitError as err:
@@ -563,7 +571,13 @@ def get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 50
         return "LLM error: Exception occurred."
 
 
-async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_tokens: int = 500) -> str:
+async def async_get_llm_judgment(
+    prompt: str,
+    temperature: float = 0.4,
+    max_tokens: int = 500,
+    *,
+    model_override: str | None = None,
+) -> str:
     """Asynchronous version of ``get_llm_judgment`` using aiohttp."""
 
     safe_prompt = _sanitize_prompt(prompt)
@@ -587,12 +601,14 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
         {"role": "user", "content": user_prompt},
     ]
 
+    model_name = model_override or config.get_groq_model()
+
     start = time.perf_counter()
     try:
         response = await asyncio.to_thread(
             safe_chat_completion,
             client,
-            model=config.get_groq_model(),
+            model=model_name,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -605,7 +621,7 @@ async def async_get_llm_judgment(prompt: str, temperature: float = 0.4, max_toke
         logger.info(
             "Async LLM call succeeded in %.2fs (model=%s)",
             latency,
-            getattr(response, "model", config.get_groq_model()),
+            getattr(response, "model", model_name),
         )
         return _extract_choice_content(response)
     except RateLimitError as err:

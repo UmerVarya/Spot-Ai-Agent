@@ -47,7 +47,7 @@ def test_should_trade_requires_strong_quant_on_llm_error():
         macro_news={"safe": True, "reason": ""},
     )
     assert result["decision"] is True
-    assert "fallback thresholds" in result["reason"].lower()
+    assert "quant-only auto-approval" in result["reason"].lower()
     assert result.get("llm_error") is True
 
 

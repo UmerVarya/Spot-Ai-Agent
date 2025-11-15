@@ -160,7 +160,7 @@ def test_finalize_trade_decision_handles_error(monkeypatch):
 
     assert result["decision"] is True
     assert result["llm_error"] is True
-    assert "fallback thresholds" in result["reason"].lower()
+    assert "quant-only auto-approval" in result["reason"].lower()
 
 
 def test_finalize_trade_decision_handles_json_error(monkeypatch):
@@ -197,7 +197,7 @@ def test_finalize_trade_decision_handles_json_error(monkeypatch):
 
     assert result["decision"] is True
     assert result["llm_error"] is True
-    assert "fallback thresholds" in result["reason"].lower()
+    assert "quant-only auto-approval" in result["reason"].lower()
 
 
 def test_finalize_trade_decision_error_blocks_weak_signals(monkeypatch):
