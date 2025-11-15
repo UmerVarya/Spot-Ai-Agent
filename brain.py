@@ -193,18 +193,22 @@ def call_llm_with_fallbacks(
         if not provider or not model:
             continue
 
+        executor = ThreadPoolExecutor(max_workers=1)
+        shutdown_kwargs = {"wait": True, "cancel_futures": True}
+
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    _invoke_llm_provider,
-                    provider,
-                    model,
-                    prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-                result = future.result(timeout=timeout)
+            future = executor.submit(
+                _invoke_llm_provider,
+                provider,
+                model,
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            result = future.result(timeout=timeout)
         except FuturesTimeoutError:
+            future.cancel()
+            shutdown_kwargs = {"wait": False, "cancel_futures": True}
             err = f"{provider}:{model} timed out after {timeout:.1f}s"
             errors.append(err)
             logger.warning("LLM provider %s:%s timed out after %.1fs", provider, model, timeout)
@@ -214,6 +218,8 @@ def call_llm_with_fallbacks(
             errors.append(err)
             logger.warning("LLM provider %s:%s failed: %s", provider, model, exc)
             continue
+        finally:
+            executor.shutdown(**shutdown_kwargs)
 
         trimmed = str(result).strip() if result is not None else ""
         if not trimmed or "llm error" in trimmed.lower():
