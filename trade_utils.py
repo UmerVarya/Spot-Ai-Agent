@@ -24,6 +24,8 @@ except Exception:
 
 from trade_storage import TRADE_HISTORY_FILE, load_trade_history_df  # shared trade log path
 
+from risk_profiles.btc_profile import get_btc_profile
+
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
 from multi_timeframe import (
     multi_timeframe_confluence,
@@ -1660,15 +1662,42 @@ def evaluate_signal(
         session_name = get_market_session()
         session_factor = {"Asia": 0.3, "Europe": 0.3, "US": 0.4}
         vol_factor = session_factor.get(session_name, 0.4)
-        vol_threshold = max(vol_factor * avg_quote_vol_20, 50_000)
+        try:
+            avg_quote_vol_20 = float(avg_quote_vol_20)
+        except (TypeError, ValueError):
+            avg_quote_vol_20 = 0.0
+        try:
+            latest_quote_vol = float(latest_quote_vol)
+        except (TypeError, ValueError):
+            latest_quote_vol = 0.0
+        dynamic_threshold = max(vol_factor * avg_quote_vol_20, 50_000.0)
+        vol_expansion = 0.0
+        if avg_quote_vol_20 > 0:
+            vol_expansion = latest_quote_vol / max(avg_quote_vol_20, 1e-9)
 
         # TRAINING_MODE support: skip volume filter when in training mode
         training_mode = os.getenv("TRAINING_MODE", "false").lower() == "true"
-        if not training_mode and latest_quote_vol < vol_threshold:
+        effective_floor = dynamic_threshold
+        if symbol.upper() == "BTCUSDT" and not training_mode:
+            profile = get_btc_profile()
+            effective_floor = max(dynamic_threshold, profile.min_quote_volume_1m)
+            if (
+                latest_quote_vol < profile.min_quote_volume_1m
+                or avg_quote_vol_20 < profile.avg_quote_volume_20_min
+                or vol_expansion < profile.vol_expansion_min
+            ):
+                logger.info(
+                    f"[BTC VOL GATE] Skipping BTCUSDT: "
+                    f"last={latest_quote_vol:.0f}, avg20={avg_quote_vol_20:.0f}, "
+                    f"expansion={vol_expansion:.2f}, "
+                    f"floor={profile.min_quote_volume_1m:.0f}"
+                )
+                return 0, None, 0, None
+        if not training_mode and latest_quote_vol < effective_floor:
             logger.info(
                 "Skipping due to low volume: %s < %s (%s%% of 20-bar avg)",
                 f"{latest_quote_vol:,.0f}",
-                f"{vol_threshold:,.0f}",
+                f"{effective_floor:,.0f}",
                 f"{vol_factor*100:.0f}",
             )
             return 0, None, 0, None
@@ -1974,6 +2003,80 @@ def evaluate_signal(
         normalized_score = round(normalized_score, 2)
         direction = "long" if setup_type and normalized_score >= dynamic_threshold else None
         position_size = get_position_size(normalized_score)
+
+        if symbol.upper() == "BTCUSDT" and direction == "long":
+            profile = get_btc_profile()
+            final_score = float(normalized_score)
+            session_key = (session_name or "").lower()
+            multiplier = profile.session_multipliers.get(session_key)
+            if multiplier is not None:
+                final_score *= multiplier
+
+            atr_ratio_raw = price_data.attrs.get("atr_15m_ratio")
+            try:
+                atr_ratio = float(atr_ratio_raw)
+            except (TypeError, ValueError):
+                atr_ratio = None
+            if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
+                final_score -= 0.5
+
+            def _trend_state(value: Any, strong_threshold: float = 0.001) -> str:
+                try:
+                    slope = float(value)
+                except (TypeError, ValueError):
+                    return "neutral"
+                if not np.isfinite(slope):
+                    return "neutral"
+                try:
+                    ref_price = float(price_now)
+                except (TypeError, ValueError, NameError):
+                    ref_price = 0.0
+                if not np.isfinite(ref_price) or ref_price == 0.0:
+                    ref_price = 1.0
+                relative = slope / ref_price
+                if relative <= -strong_threshold:
+                    return "strong_bearish"
+                if relative < 0:
+                    return "bearish"
+                if relative >= strong_threshold:
+                    return "bullish"
+                return "neutral"
+
+            trend_1h_state = _trend_state(ema_trend_1h, strong_threshold=0.0005)
+            trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
+            if trend_1h_state not in ("bullish", "neutral"):
+                return 0, None, 0, None
+            if trend_4h_state == "strong_bearish":
+                return 0, None, 0, None
+
+            news_raw = price_data.attrs.get("news_severity", 0)
+            try:
+                news_severity = int(float(news_raw))
+            except (TypeError, ValueError):
+                news_severity = 0
+            btc_d_trend_raw = price_data.attrs.get("btc_d_trend")
+            btc_d_trend = None
+            if btc_d_trend_raw is not None:
+                try:
+                    btc_d_trend = str(btc_d_trend_raw).lower()
+                except Exception:
+                    btc_d_trend = None
+            if btc_d_trend == "falling":
+                return 0, None, 0, None
+            if news_severity >= 3:
+                return 0, None, 0, None
+            if news_severity == 2:
+                profile_min_score = max(profile.min_score_for_trade, 5.0)
+            else:
+                profile_min_score = profile.min_score_for_trade
+
+            final_score = max(final_score, 0.0)
+            if final_score < profile_min_score:
+                logger.info(
+                    f"[BTC SCORE GATE] Skipping BTCUSDT: "
+                    f"score={final_score:.2f} < min={profile_min_score:.2f}"
+                )
+                return 0, None, 0, None
         zones = detect_support_resistance_zones(price_data)
         zones = zones.to_dict() if isinstance(zones, pd.Series) else (zones or {"support": [], "resistance": []})
         current_price = float(close.iloc[-1])
