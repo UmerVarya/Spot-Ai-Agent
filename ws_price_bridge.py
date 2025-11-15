@@ -26,6 +26,7 @@ import requests
 import websockets
 
 from observability import log_event, record_metric
+from trade_utils import filter_stable_symbols
 
 # Use the interactive subscription endpoint so SUBSCRIBE payloads are honoured.
 BINANCE_WS = "wss://stream.binance.com:9443/ws"
@@ -1074,13 +1075,20 @@ class _WebsocketsPriceBridge:
 
     @staticmethod
     def _normalise_symbols(symbols: Iterable[str]) -> List[str]:
-        seen = set()
-        normalised: List[str] = []
+        cleaned: list[str] = []
         for sym in symbols:
-            token = str(sym or "").strip().lower()
+            token = str(sym or "").strip()
             if not token:
                 continue
-            if token in seen:
+            cleaned.append(token.upper())
+
+        filtered = filter_stable_symbols(cleaned)
+
+        seen: set[str] = set()
+        normalised: List[str] = []
+        for sym in filtered:
+            token = sym.lower()
+            if not token or token in seen:
                 continue
             seen.add(token)
             normalised.append(token)

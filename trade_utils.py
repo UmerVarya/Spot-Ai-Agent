@@ -45,20 +45,28 @@ SIGNAL_LOG_FILE = os.getenv(
 
 logger = setup_logger(__name__)
 
-STABLE_BASES: set[str] = {
+STABLECOIN_BASES: set[str] = {
     "USDT",
     "USDC",
-    "FDUSD",
     "BUSD",
     "TUSD",
+    "FDUSD",
     "USDD",
+    "USDP",
     "DAI",
-    "SUSD",
-    "PAX",
+    "GUSD",
+    "USDE",
+    "USDJ",
+    "FRAX",
     "LUSD",
+    "SUSD",
+    "CEUR",
+    "AEUR",
+    "BKRW",
+    "BVND",
+    "TRYB",
+    "EURS",
 }
-
-_STABLE_QUOTES: tuple[str, ...] = ("USDT", "BUSD", "FDUSD", "TUSD")
 
 
 def is_stable_symbol(symbol: str) -> bool:
@@ -71,30 +79,44 @@ def is_stable_symbol(symbol: str) -> bool:
     if not s:
         return False
 
-    for quote in _STABLE_QUOTES:
+    if s.endswith("USDT"):
+        base = s[:-4]
+        if base in STABLECOIN_BASES:
+            return True
+
+    for quote in STABLECOIN_BASES:
+        if quote == "USDT":
+            continue
         if s.endswith(quote):
-            base = s[:-len(quote)]
-            if base in STABLE_BASES:
-                return True
+            return True
     return False
 
 
-def filter_stable_symbols(symbols: Iterable[str]) -> tuple[list[str], list[str]]:
-    """Split a sequence of symbols into non-stable entries and those filtered out."""
+def filter_stable_symbols(symbols: Iterable[str]) -> list[str]:
+    """Return a list of symbols excluding those identified as stablecoin pairs."""
 
     filtered: list[str] = []
-    dropped: list[str] = []
+    removed: set[str] = set()
     for sym in symbols:
         if not isinstance(sym, str):
             continue
         candidate = sym.strip()
         if not candidate:
             continue
-        if is_stable_symbol(candidate):
-            dropped.append(candidate)
-        else:
-            filtered.append(candidate)
-    return filtered, dropped
+        token = candidate.upper()
+        if is_stable_symbol(token):
+            removed.add(token)
+            continue
+        filtered.append(token)
+
+    if removed:
+        removed_count = len(removed)
+        logger.info(
+            "Filtered out %d stablecoin symbols: %s",
+            removed_count,
+            sorted(removed),
+        )
+    return filtered
 
 # Maximum age (seconds) of WebSocket order book data before we consider it stale.
 _STREAM_STALENESS_MAX_SECONDS = 5.0
@@ -1109,18 +1131,7 @@ def get_top_symbols(limit: int = 30) -> list:
     if exclude:
         symbols = [sym for sym in symbols if sym.upper() not in exclude]
 
-    filtered_symbols, dropped = filter_stable_symbols(symbols)
-    if dropped:
-        unique_dropped = sorted({sym.upper() for sym in dropped})
-        logger.info(
-            "Filtered out %d stablecoin symbols from universe (kept %d of %d): %s",
-            len(dropped),
-            len(filtered_symbols),
-            len(symbols),
-            ", ".join(unique_dropped),
-        )
-    else:
-        filtered_symbols = symbols
+    filtered_symbols = filter_stable_symbols(symbols)
 
     _TOP_SYMBOLS_CACHE["symbols"] = filtered_symbols
     _TOP_SYMBOLS_CACHE["timestamp"] = now
