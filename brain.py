@@ -15,11 +15,13 @@ when qualitative oversight is missing.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
 import re
 import json
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from log_utils import setup_logger
 import logging
 import math
@@ -36,6 +38,26 @@ LLM_ERROR_SCORE_BUFFER = 0.5
 # LLM advisor is unavailable.  This helps prevent borderline trades from being
 # executed without qualitative oversight.
 LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE = 8.0
+QUANT_CONF_MIN_FOR_LLM_APPROVAL = 4.0
+
+FALLBACK_LLM_SEQUENCE: List[Tuple[str, str]] = [
+    (
+        "groq",
+        os.getenv("GROQ_MODEL_TRADE")
+        or os.getenv("TRADE_LLM_MODEL")
+        or "qwen/qwen3-32b",
+    ),
+    (
+        "groq",
+        os.getenv("GROQ_MODEL_FALLBACK")
+        or os.getenv("GROQ_OVERFLOW_MODEL")
+        or "llama-3.3-70b-versatile",
+    ),
+]
+
+# Timeout for each LLM provider attempt when iterating through
+# ``FALLBACK_LLM_SEQUENCE``.
+LLM_FALLBACK_TIMEOUT_SECONDS = 5.0
 
 logger = setup_logger(__name__)
 
@@ -130,6 +152,99 @@ except Exception:
         _ = symbol
         return []
 
+
+def _invoke_llm_provider(
+    provider: str,
+    model: str,
+    prompt: str,
+    *,
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    """Invoke a single LLM provider/model combination."""
+
+    if provider == "groq":
+        return get_llm_judgment(
+            prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            model_override=model,
+        )
+
+    raise ValueError(f"Unsupported LLM provider: {provider}")
+
+
+def call_llm_with_fallbacks(
+    prompt: str,
+    *,
+    temperature: float = 0.4,
+    max_tokens: int = 500,
+    timeout: float = LLM_FALLBACK_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    """Attempt LLM approval across a sequence of providers/models.
+
+    Each provider is given ``timeout`` seconds to respond.  If the call fails or
+    times out we proceed to the next entry in ``FALLBACK_LLM_SEQUENCE``.
+    """
+
+    errors: List[str] = []
+
+    for provider, model in FALLBACK_LLM_SEQUENCE:
+        if not provider or not model:
+            continue
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    _invoke_llm_provider,
+                    provider,
+                    model,
+                    prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                result = future.result(timeout=timeout)
+        except FuturesTimeoutError:
+            err = f"{provider}:{model} timed out after {timeout:.1f}s"
+            errors.append(err)
+            logger.warning("LLM provider %s:%s timed out after %.1fs", provider, model, timeout)
+            continue
+        except Exception as exc:  # noqa: BLE001 - want the full error
+            err = f"{provider}:{model} -> {exc}"
+            errors.append(err)
+            logger.warning("LLM provider %s:%s failed: %s", provider, model, exc)
+            continue
+
+        trimmed = str(result).strip() if result is not None else ""
+        if not trimmed or "llm error" in trimmed.lower():
+            err = f"{provider}:{model} returned error payload"
+            errors.append(err)
+            logger.warning(
+                "LLM provider %s:%s returned error payload, trying fallback", provider, model
+            )
+            continue
+
+        if errors:
+            logger.warning("Primary LLM failed, used fallback %s:%s", provider, model)
+
+        return {
+            "ok": True,
+            "provider": provider,
+            "model": model,
+            "result": result,
+            "errors": errors,
+        }
+
+    if errors:
+        logger.error(
+            "All LLM providers failed for trade approval: %s",
+            "; ".join(errors),
+        )
+    else:
+        logger.error("All LLM providers failed for trade approval: no providers configured")
+
+    return {"ok": False, "errors": errors}
+
 # Cache for BTC context awareness
 symbol_context_cache: Dict[str, Dict[str, Any]] = {}
 
@@ -158,6 +273,99 @@ class PreparedTradeDecision:
     final_confidence: float
     score_threshold: float
     advisor_prompt: str
+
+
+def _quantitative_fallback_decision(
+    prepared: PreparedTradeDecision,
+    *,
+    llm_errors: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Apply quantitative-only approval rules when all LLMs fail."""
+
+    final_confidence = prepared.final_confidence
+    score_requirement = prepared.score_threshold + LLM_ERROR_SCORE_BUFFER
+    score_ok = prepared.score >= score_requirement
+    high_confidence = final_confidence >= LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE
+    strong_quant = high_confidence and score_ok
+    score_buffer = prepared.score - score_requirement
+
+    if llm_errors:
+        logger.warning("LLM providers unavailable: %s", "; ".join(llm_errors))
+
+    base_payload = {
+        "confidence": final_confidence,
+        "news_summary": prepared.news_summary,
+        "symbol_news_summary": prepared.symbol_news_summary,
+        "llm_decision": "LLM unavailable",
+        "llm_approval": None,
+        "llm_confidence": None,
+        "llm_error": True,
+        "llm_provider": None,
+        "llm_model": None,
+        "technical_indicator_score": prepared.technical_score,
+        "pattern_memory": prepared.pattern_memory_context,
+        "fallback_auto_approval_threshold": LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE,
+        "fallback_score_requirement": score_requirement,
+    }
+
+    if strong_quant:
+        logger.warning(
+            (
+                "LLM unavailable across all fallbacks; proceeding with quant-only "
+                "auto-approval (confidence=%.2f ≥ %.2f, score=%.2f ≥ %.2f)"
+            ),
+            final_confidence,
+            LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE,
+            prepared.score,
+            score_requirement,
+        )
+        narrative = generate_trade_narrative(
+            symbol=prepared.symbol,
+            direction=prepared.direction,
+            score=prepared.score,
+            confidence=final_confidence,
+            indicators=prepared.indicators,
+            sentiment_bias=prepared.sentiment_bias,
+            sentiment_confidence=prepared.sentiment_confidence,
+            orderflow=prepared.orderflow,
+            pattern=prepared.pattern_name,
+            macro_reason=prepared.macro_news.get("reason", ""),
+            news_summary=prepared.news_summary,
+        ) or f"No major pattern, but macro/sentiment context favors {prepared.direction} setup."
+
+        return {
+            **base_payload,
+            "decision": True,
+            "reason": (
+                "LLM unavailable across all fallbacks; proceeding with quant-only "
+                f"auto-approval (confidence {final_confidence:.2f} ≥ "
+                f"{LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE:.2f}, score buffer {score_buffer:.2f} "
+                f"≥ {LLM_ERROR_SCORE_BUFFER:.2f})"
+            ),
+            "narrative": narrative,
+        }
+
+    logger.warning(
+        (
+            "Quantitative conviction insufficient under LLM-unavailable fallback "
+            "(confidence=%.2f < %.2f or score=%.2f < %.2f)"
+        ),
+        final_confidence,
+        LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE,
+        prepared.score,
+        score_requirement,
+    )
+
+    return {
+        **base_payload,
+        "decision": False,
+        "reason": (
+            "Quantitative conviction insufficient under LLM-unavailable fallback "
+            f"(confidence {final_confidence:.2f} < {LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE:.2f} "
+            f"or score buffer {score_buffer:.2f} < {LLM_ERROR_SCORE_BUFFER:.2f})"
+        ),
+        "narrative": "",
+    }
 
 
 _SYMBOL_NEWS_CACHE_TTL_SECONDS = 15 * 60
@@ -815,9 +1023,27 @@ def prepare_trade_decision(
 
 def finalize_trade_decision(
     prepared: PreparedTradeDecision,
-    llm_response: Any,
+    llm_result: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Combine LLM response with prepared context to produce final decision."""
+    """Combine LLM response with prepared context to produce final decision.
+
+    Trades first attempt a multi-model LLM sequence.  If every provider fails we
+    degrade into the quantitative-only fallback which still requires
+    ``final_confidence`` ≥ ``LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE`` and beating
+    the dynamic technical threshold by ``LLM_ERROR_SCORE_BUFFER``.
+    """
+
+    if not isinstance(llm_result, Mapping):
+        raw_text = "" if llm_result is None else str(llm_result)
+        ok = bool(raw_text.strip()) and "llm error" not in raw_text.lower()
+        errors = [] if ok else [f"default provider error: {raw_text or 'empty response'}"]
+        llm_result = {
+            "ok": ok,
+            "provider": None,
+            "model": None,
+            "result": raw_text,
+            "errors": errors,
+        }
 
     final_confidence = prepared.final_confidence
     technical_score = prepared.technical_score
@@ -825,7 +1051,15 @@ def finalize_trade_decision(
     news_summary = prepared.news_summary
     symbol_news_summary = prepared.symbol_news_summary
 
-    response_text = str(llm_response) if llm_response is not None else ""
+    if not llm_result.get("ok"):
+        return _quantitative_fallback_decision(
+            prepared,
+            llm_errors=llm_result.get("errors"),
+        )
+
+    provider = llm_result.get("provider")
+    model = llm_result.get("model")
+    response_text = str(llm_result.get("result") or "")
 
     try:
         resp_lc = response_text.lower()
@@ -836,82 +1070,10 @@ def finalize_trade_decision(
     parse_failed_initially = parsed_decision is None
 
     if parse_failed_initially and ("error" in resp_lc or not response_text.strip()):
-        score_requirement = prepared.score_threshold + LLM_ERROR_SCORE_BUFFER
-        score_ok = prepared.score >= score_requirement
-        high_confidence = final_confidence >= LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE
-        strong_quant = high_confidence and score_ok
-
-        base_payload = {
-            "confidence": final_confidence,
-            "news_summary": news_summary,
-            "symbol_news_summary": symbol_news_summary,
-            "llm_decision": "LLM unavailable",
-            "llm_approval": None,
-            "llm_confidence": None,
-            "llm_error": True,
-            "technical_indicator_score": technical_score,
-            "pattern_memory": pattern_memory_context,
-            "fallback_auto_approval_threshold": LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE,
-            "fallback_score_requirement": score_requirement,
-        }
-
-        if strong_quant:
-            logger.warning(
-                (
-                    "LLM unavailable for %s %s trade; auto-approving due to "
-                    "high quantitative conviction (confidence=%.2f/%.2f, score=%.2f "
-                    ">= %.2f)"
-                ),
-                prepared.symbol,
-                prepared.direction,
-                final_confidence,
-                LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE,
-                prepared.score,
-                score_requirement,
-            )
-            narrative = generate_trade_narrative(
-                symbol=prepared.symbol,
-                direction=prepared.direction,
-                score=prepared.score,
-                confidence=final_confidence,
-                indicators=prepared.indicators,
-                sentiment_bias=prepared.sentiment_bias,
-                sentiment_confidence=prepared.sentiment_confidence,
-                orderflow=prepared.orderflow,
-                pattern=prepared.pattern_name,
-                macro_reason=prepared.macro_news.get("reason", ""),
-                news_summary=news_summary,
-            ) or f"No major pattern, but macro/sentiment context favors {prepared.direction} setup."
-
-            return {
-                **base_payload,
-                "decision": True,
-                "reason": "LLM unavailable; quantitative metrics cleared fallback thresholds",
-                "narrative": narrative,
-            }
-
-        logger.warning(
-            (
-                "LLM unavailable for %s %s trade; blocking due to insufficient "
-                "quantitative conviction (confidence=%.2f/%.2f, score=%.2f < %.2f)"
-            ),
-            prepared.symbol,
-            prepared.direction,
-            final_confidence,
-            LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE,
-            prepared.score,
-            score_requirement,
-        )
-
-        return {
-            **base_payload,
-            "decision": False,
-            "reason": (
-                "LLM unavailable and quantitative conviction insufficient "
-                f"(confidence {final_confidence:.2f} < {LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE:.2f})"
-            ),
-            "narrative": "",
-        }
+        errors = list(llm_result.get("errors", []))
+        source = f"{provider}:{model}" if provider or model else "unknown"
+        errors.append(f"{source} returned unusable response")
+        return _quantitative_fallback_decision(prepared, llm_errors=errors)
 
     if parsed_decision is None:
         match = re.search(r"(\d+(?:\.\d+)?)", response_text)
@@ -928,20 +1090,49 @@ def finalize_trade_decision(
         advisor_rating = max(0.0, min(float(advisor_rating), 10.0))
         final_confidence = round((final_confidence + advisor_rating) / 2.0, 2)
 
+    base_payload = {
+        "news_summary": news_summary,
+        "symbol_news_summary": symbol_news_summary,
+        "llm_decision": advisor_reason,
+        "llm_approval": parsed_decision,
+        "llm_confidence": advisor_rating,
+        "llm_error": False,
+        "llm_provider": provider,
+        "llm_model": model,
+        "technical_indicator_score": technical_score,
+        "pattern_memory": pattern_memory_context,
+    }
+
     if not parsed_decision:
+        logger.warning(
+            "LLM vetoed trade via %s:%s: %s",
+            provider,
+            model,
+            advisor_reason,
+        )
         return {
+            **base_payload,
             "decision": False,
             "confidence": final_confidence,
-            "reason": f"LLM advisor vetoed trade: {advisor_reason}",
+            "reason": f"LLM vetoed trade via {provider}:{model}: {advisor_reason}",
             "narrative": advisor_thesis,
-            "news_summary": news_summary,
-            "symbol_news_summary": symbol_news_summary,
-            "llm_decision": advisor_reason,
-            "llm_approval": parsed_decision,
-            "llm_confidence": advisor_rating,
-            "llm_error": False,
-            "technical_indicator_score": technical_score,
-            "pattern_memory": pattern_memory_context,
+        }
+
+    if final_confidence < QUANT_CONF_MIN_FOR_LLM_APPROVAL:
+        logger.warning(
+            "LLM approval but quantitative conviction %.2f < %.2f",
+            final_confidence,
+            QUANT_CONF_MIN_FOR_LLM_APPROVAL,
+        )
+        return {
+            **base_payload,
+            "decision": False,
+            "confidence": final_confidence,
+            "reason": (
+                "LLM approval but quantitative conviction "
+                f"{final_confidence:.2f} < {QUANT_CONF_MIN_FOR_LLM_APPROVAL:.2f}"
+            ),
+            "narrative": advisor_thesis,
         }
 
     narrative = advisor_thesis or generate_trade_narrative(
@@ -959,18 +1150,11 @@ def finalize_trade_decision(
     ) or f"No major pattern, but macro/sentiment context favors {prepared.direction} setup."
 
     return {
+        **base_payload,
         "decision": True,
         "confidence": final_confidence,
         "reason": "All filters passed",
         "narrative": narrative,
-        "news_summary": news_summary,
-        "symbol_news_summary": symbol_news_summary,
-        "llm_decision": advisor_reason or "Approved",
-        "llm_approval": True,
-        "llm_confidence": advisor_rating,
-        "llm_error": False,
-        "technical_indicator_score": technical_score,
-        "pattern_memory": pattern_memory_context,
     }
 
 
@@ -1046,8 +1230,8 @@ def should_trade(
             assert pre_result is not None
             return pre_result
 
-        llm_response: Any = get_llm_judgment(prepared.advisor_prompt)
-        return finalize_trade_decision(prepared, llm_response)
+        llm_result = call_llm_with_fallbacks(prepared.advisor_prompt)
+        return finalize_trade_decision(prepared, llm_result)
 
     except Exception as e:
         return {
