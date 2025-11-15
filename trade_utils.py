@@ -8,7 +8,7 @@ import time
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional, Any, Mapping, Callable, Tuple, TypeVar, Dict
+from typing import Optional, Any, Mapping, Callable, Tuple, TypeVar, Dict, Iterable
 import traceback
 import asyncio
 from log_utils import setup_logger
@@ -44,6 +44,57 @@ SIGNAL_LOG_FILE = os.getenv(
 )
 
 logger = setup_logger(__name__)
+
+STABLE_BASES: set[str] = {
+    "USDT",
+    "USDC",
+    "FDUSD",
+    "BUSD",
+    "TUSD",
+    "USDD",
+    "DAI",
+    "SUSD",
+    "PAX",
+    "LUSD",
+}
+
+_STABLE_QUOTES: tuple[str, ...] = ("USDT", "BUSD", "FDUSD", "TUSD")
+
+
+def is_stable_symbol(symbol: str) -> bool:
+    """Return True if the Binance-style symbol represents a stablecoin pair."""
+
+    if not symbol:
+        return False
+
+    s = str(symbol).strip().upper()
+    if not s:
+        return False
+
+    for quote in _STABLE_QUOTES:
+        if s.endswith(quote):
+            base = s[:-len(quote)]
+            if base in STABLE_BASES:
+                return True
+    return False
+
+
+def filter_stable_symbols(symbols: Iterable[str]) -> tuple[list[str], list[str]]:
+    """Split a sequence of symbols into non-stable entries and those filtered out."""
+
+    filtered: list[str] = []
+    dropped: list[str] = []
+    for sym in symbols:
+        if not isinstance(sym, str):
+            continue
+        candidate = sym.strip()
+        if not candidate:
+            continue
+        if is_stable_symbol(candidate):
+            dropped.append(candidate)
+        else:
+            filtered.append(candidate)
+    return filtered, dropped
 
 # Maximum age (seconds) of WebSocket order book data before we consider it stale.
 _STREAM_STALENESS_MAX_SECONDS = 5.0
@@ -1058,9 +1109,22 @@ def get_top_symbols(limit: int = 30) -> list:
     if exclude:
         symbols = [sym for sym in symbols if sym.upper() not in exclude]
 
-    _TOP_SYMBOLS_CACHE["symbols"] = symbols
+    filtered_symbols, dropped = filter_stable_symbols(symbols)
+    if dropped:
+        unique_dropped = sorted({sym.upper() for sym in dropped})
+        logger.info(
+            "Filtered out %d stablecoin symbols from universe (kept %d of %d): %s",
+            len(dropped),
+            len(filtered_symbols),
+            len(symbols),
+            ", ".join(unique_dropped),
+        )
+    else:
+        filtered_symbols = symbols
+
+    _TOP_SYMBOLS_CACHE["symbols"] = filtered_symbols
     _TOP_SYMBOLS_CACHE["timestamp"] = now
-    return symbols[:limit]
+    return filtered_symbols[:limit]
 
 def _extract_trade_returns(df: pd.DataFrame) -> pd.Series:
     """Return per-trade returns as decimal values."""
