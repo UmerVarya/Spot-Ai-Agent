@@ -12,17 +12,10 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from groq import (
-    APIConnectionError,
-    APIError,
-    APIStatusError,
-    APITimeoutError,
-    RateLimitError,
-)
+import requests
 
 import config
-from groq_client import get_groq_client
-from groq_safe import safe_chat_completion
+from groq_safe import describe_error, extract_error_payload
 from json_utils import parse_llm_json_response
 from log_utils import setup_logger
 
@@ -40,8 +33,25 @@ def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, value))
+
+
 _MAX_POSTS = _env_int("GROQ_ALT_DATA_MAX_POSTS", 12, minimum=3, maximum=30)
 _MAX_TOKENS = _env_int("GROQ_ALT_DATA_MAX_TOKENS", 400, minimum=200, maximum=800)
+_REQUEST_TIMEOUT = _env_float("GROQ_ALT_DATA_TIMEOUT", 10.0, minimum=1.0, maximum=30.0)
+
+_DEFAULT_GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+_ALT_DATA_DISABLED = False
+_AUTH_FAILURE_LOGGED = False
 
 _SYSTEM_MESSAGE = (
     "You are a crypto alternative-data analyst."
@@ -135,6 +145,117 @@ def _format_posts(posts: Sequence[str] | None) -> tuple[str, int]:
     return formatted, len(sample)
 
 
+def _groq_api_key() -> str:
+    return os.getenv("GROQ_API_KEY", "")
+
+
+def _groq_api_url() -> str:
+    return os.getenv("GROQ_API_URL", _DEFAULT_GROQ_API_URL) or _DEFAULT_GROQ_API_URL
+
+
+def _handle_auth_failure(error_payload: Any) -> None:
+    global _ALT_DATA_DISABLED, _AUTH_FAILURE_LOGGED
+    _ALT_DATA_DISABLED = True
+    if not _AUTH_FAILURE_LOGGED:
+        logger.error(
+            "Groq alt-data authentication failed (401). Disabling alt-data requests: %s",
+            describe_error(error_payload),
+        )
+        _AUTH_FAILURE_LOGGED = True
+
+
+def _extract_http_content(payload: Mapping[str, Any] | None) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, Mapping):
+            message = first.get("message")
+            if isinstance(message, Mapping):
+                content = message.get("content")
+                if isinstance(content, str):
+                    return content
+    return ""
+
+
+def _http_chat_completion(
+    api_key: str,
+    api_url: str,
+    *,
+    model: str,
+    messages: List[Mapping[str, str]],
+    temperature: float,
+    max_tokens: int,
+) -> tuple[Optional[str], Optional[int], Any]:
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.post(
+            api_url,
+            headers=headers,
+            json=payload,
+            timeout=_REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        return None, None, exc
+
+    if response.status_code >= 400:
+        return None, response.status_code, extract_error_payload(response)
+
+    try:
+        data = response.json()
+    except ValueError:
+        return None, None, None
+
+    content = _extract_http_content(data)
+    if not content:
+        return None, None, data
+
+    return content, None, None
+
+
+def _build_defaults(
+    model_name: str,
+    posts_count: int,
+    onchain_snapshot: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    snapshot = onchain_snapshot or {}
+    return {
+        "social": {
+            "bias": "neutral",
+            "score": 0.0,
+            "confidence": 0.0,
+            "posts": posts_count,
+            "models": ["groq", model_name],
+        },
+        "onchain": {
+            "composite_score": _coerce_float(snapshot.get("composite_score")) or 0.0,
+            "net_exchange_flow": _coerce_float(snapshot.get("net_exchange_flow")),
+            "large_holder_netflow": _coerce_float(snapshot.get("large_holder_netflow")),
+            "whale_ratio": _coerce_float(snapshot.get("whale_ratio")),
+        },
+        "sources": ["groq", model_name],
+    }
+
+
+def _neutral_payload(defaults: Mapping[str, Any]) -> Mapping[str, Any]:
+    return {
+        "social": defaults["social"],
+        "onchain": defaults["onchain"],
+        "sources": defaults["sources"],
+    }
+
+
 def analyze_alt_data(
     symbol: str,
     *,
@@ -145,18 +266,23 @@ def analyze_alt_data(
 
     The returned mapping mirrors the FinGPT schema so existing parsing
     helpers in :mod:`alternative_data` can be reused.  ``None`` is
-    returned when the Groq client is unavailable or the model response
+    returned when the Groq API key is unavailable or the model response
     cannot be parsed into JSON.
     """
 
-    client = get_groq_client()
-    if client is None:
-        logger.debug("Groq client unavailable; skipping Groq alt-data request")
+    api_key = _groq_api_key()
+    if not api_key:
+        logger.debug("Groq API key unavailable; skipping Groq alt-data request")
         return None
 
     model_name = config.get_groq_model()
     onchain_text = _format_onchain_snapshot(onchain_snapshot)
     posts_text, posts_count = _format_posts(social_posts)
+    defaults = _build_defaults(model_name, posts_count, onchain_snapshot)
+
+    global _ALT_DATA_DISABLED
+    if _ALT_DATA_DISABLED:
+        return _neutral_payload(defaults)
 
     user_prompt = (
         f"Symbol: {symbol}\n\n"
@@ -170,52 +296,31 @@ def analyze_alt_data(
         {"role": "user", "content": user_prompt},
     ]
 
-    try:
-        response = safe_chat_completion(
-            client,
-            model=model_name,
-            messages=messages,
-            temperature=0.2,
-            max_tokens=_MAX_TOKENS,
-        )
-    except RateLimitError as err:
-        logger.warning("Groq alt-data rate limited: %s", err)
-        return None
-    except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
-        logger.warning("Groq alt-data request failed: %s", err)
-        return None
-    except Exception as err:  # pragma: no cover - defensive guardrail
-        logger.error("Unexpected Groq alt-data exception: %s", err, exc_info=True)
-        return None
+    api_url = _groq_api_url()
+    content, status_code, error_payload = _http_chat_completion(
+        api_key,
+        api_url,
+        model=model_name,
+        messages=messages,
+        temperature=0.2,
+        max_tokens=_MAX_TOKENS,
+    )
 
-    content = ""
-    if getattr(response, "choices", None):
-        message = response.choices[0].message
-        content = getattr(message, "content", "") or ""
-
-    defaults: Dict[str, Any] = {
-        "social": {
-            "bias": "neutral",
-            "score": 0.0,
-            "confidence": 0.0,
-            "posts": posts_count,
-            "models": ["groq", model_name],
-        },
-        "onchain": {
-            "composite_score": _coerce_float(
-                (onchain_snapshot or {}).get("composite_score")
+    if not content:
+        if status_code == 401:
+            _handle_auth_failure(error_payload)
+            return _neutral_payload(defaults)
+        if status_code is not None:
+            logger.warning(
+                "Groq alt-data request failed: HTTP %s (%s)",
+                status_code,
+                describe_error(error_payload),
             )
-            or 0.0,
-            "net_exchange_flow": _coerce_float(
-                (onchain_snapshot or {}).get("net_exchange_flow")
-            ),
-            "large_holder_netflow": _coerce_float(
-                (onchain_snapshot or {}).get("large_holder_netflow")
-            ),
-            "whale_ratio": _coerce_float((onchain_snapshot or {}).get("whale_ratio")),
-        },
-        "sources": ["groq", model_name],
-    }
+        elif isinstance(error_payload, Exception):
+            logger.warning("Groq alt-data request failed: %s", error_payload)
+        else:
+            logger.debug("Groq alt-data response missing content: %s", error_payload)
+        return None
 
     parsed, success = parse_llm_json_response(content, defaults=defaults, logger=logger)
     if not success:
