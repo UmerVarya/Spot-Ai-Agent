@@ -9,9 +9,10 @@ HTTP clients used elsewhere in the codebase.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, List, Mapping
 
 import config
+from groq_http import http_chat_completion, is_auth_error
 from log_utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -26,6 +27,41 @@ _DECOMMISSIONED_HINTS = (
     "not found",
     "do not have access",
 )
+
+
+class GroqAuthError(RuntimeError):
+    """Raised when Groq authentication fails and requests must be skipped."""
+
+
+class _LLMMessage:
+    __slots__ = ("content",)
+
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "content":
+            return self.content
+        return default
+
+
+class _LLMChoice:
+    __slots__ = ("message",)
+
+    def __init__(self, content: str) -> None:
+        self.message = _LLMMessage(content)
+
+
+class _LLMResponse:
+    __slots__ = ("choices", "model")
+
+    def __init__(self, content: str, model: str) -> None:
+        self.choices: List[_LLMChoice] = [_LLMChoice(content)]
+        self.model = model
+
+
+_AUTH_DISABLED = False
+_AUTH_WARNING_LOGGED = False
 
 
 def _normalise_text(text: str | None) -> str:
@@ -72,34 +108,73 @@ def is_model_decommissioned_error(error: Any) -> bool:
     return any(hint in lowered for hint in _DECOMMISSIONED_HINTS)
 
 
+def _disable_auth(error: Any) -> None:
+    global _AUTH_DISABLED, _AUTH_WARNING_LOGGED
+    _AUTH_DISABLED = True
+    if not _AUTH_WARNING_LOGGED:
+        logger.error(
+            "Groq authentication failed (401). Disabling Groq requests: %s",
+            describe_error(error),
+        )
+        _AUTH_WARNING_LOGGED = True
+
+
+def _build_response(content: str, model: str) -> _LLMResponse:
+    return _LLMResponse(content, model)
+
+
 def safe_chat_completion(client, *, messages: list[dict[str, Any]], model: str | None = None, **kwargs: Any):
-    """Invoke ``client.chat.completions.create`` with automatic model fallback."""
+    """Invoke the Groq HTTP helper with automatic model fallback."""
+
+    if client is None:
+        raise RuntimeError("Groq client unavailable")
+
+    if _AUTH_DISABLED:
+        raise GroqAuthError("Groq authentication disabled")
 
     requested_model = (model or config.get_groq_model()).strip()
     if not requested_model:
         requested_model = config.DEFAULT_GROQ_MODEL
 
-    try:
-        return client.chat.completions.create(
-            model=requested_model,
+    temperature = float(kwargs.get("temperature", 0.0))
+    max_tokens = int(kwargs.get("max_tokens", 256))
+    timeout = kwargs.get("timeout")
+
+    models_to_try = [requested_model]
+    fallback_model = config.get_overflow_model()
+    if fallback_model and fallback_model not in models_to_try:
+        models_to_try.append(fallback_model)
+
+    for model_name in models_to_try:
+        content, status_code, error_payload = http_chat_completion(
+            model=model_name,
             messages=messages,
-            **kwargs,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
         )
-    except Exception as err:  # pragma: no cover - SDK specific exception types
-        fallback_model = config.get_overflow_model()
-        if fallback_model != requested_model and is_model_decommissioned_error(err):
+
+        if content:
+            return _build_response(content, model_name)
+
+        if is_auth_error(status_code, error_payload):
+            _disable_auth(error_payload)
+            raise GroqAuthError("Groq authentication failed")
+
+        if model_name != fallback_model and is_model_decommissioned_error(error_payload):
             logger.warning(
                 "Groq model %s unavailable (%s). Retrying with fallback model %s.",
-                requested_model,
-                describe_error(err),
+                model_name,
+                describe_error(error_payload),
                 fallback_model,
             )
-            return client.chat.completions.create(
-                model=fallback_model,
-                messages=messages,
-                **kwargs,
-            )
-        raise
+            continue
+
+        if isinstance(error_payload, Exception):
+            raise error_payload
+
+        message = describe_error(error_payload)
+        raise RuntimeError(f"Groq HTTP request failed: {message}")
 
 
 def extract_error_payload(response: Any) -> Any:

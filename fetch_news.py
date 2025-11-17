@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import json
 import asyncio
@@ -12,15 +14,8 @@ import aiohttp
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import config
-from groq import (
-    APIConnectionError,
-    APIError,
-    APIStatusError,
-    APITimeoutError,
-    RateLimitError,
-)
 from groq_client import get_groq_client
-from groq_safe import safe_chat_completion
+from groq_safe import GroqAuthError, safe_chat_completion
 from news_guardrails import (
     parse_llm_json,
     quantify_event_risk,
@@ -50,6 +45,26 @@ _BACKGROUND_LOOP: Optional[asyncio.AbstractEventLoop] = None
 _BACKGROUND_THREAD: Optional[threading.Thread] = None
 _BACKGROUND_LOCK = threading.Lock()
 _INFLIGHT_REFRESH: Optional[asyncio.Future] = None
+_NEWS_LLM_AUTH_DISABLED = False
+_NEWS_LLM_AUTH_WARNED = False
+_NEWS_LLM_AUTH_REASON = "Groq news analysis unavailable"
+
+
+def _disable_news_llm(reason: str | None) -> None:
+    """Record that Groq news analysis is disabled due to authentication."""
+
+    global _NEWS_LLM_AUTH_DISABLED, _NEWS_LLM_AUTH_WARNED, _NEWS_LLM_AUTH_REASON
+    _NEWS_LLM_AUTH_DISABLED = True
+    text = (reason or "Groq authentication failed").strip()
+    if not text:
+        text = "Groq authentication failed"
+    _NEWS_LLM_AUTH_REASON = text
+    if not _NEWS_LLM_AUTH_WARNED:
+        logger.warning(
+            "Groq news analysis disabled due to authentication failure: %s",
+            text,
+        )
+        _NEWS_LLM_AUTH_WARNED = True
 
 
 def _update_cache(payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -457,9 +472,15 @@ async def analyze_news_with_llm_async(
         ],
     }
 
+    if _NEWS_LLM_AUTH_DISABLED:
+        return {
+            "safe": True,
+            "sensitivity": 0.0,
+            "reason": _NEWS_LLM_AUTH_REASON,
+        }
+
     try:
         response: Optional[Any] = None
-        last_error: Optional[Exception] = None
         overflow_model = config.get_overflow_model()
         models_to_try = [payload_template["model"]]
         if payload_template["model"] != overflow_model:
@@ -478,16 +499,14 @@ async def analyze_news_with_llm_async(
                     max_tokens=300,
                 )
                 break
-            except RateLimitError as err:
-                last_error = err
-                logger.warning(
-                    "Groq rate limit during news analysis (model=%s): %s",
-                    model_name,
-                    err,
-                )
-                break
-            except (APIStatusError, APIConnectionError, APITimeoutError, APIError) as err:
-                last_error = err
+            except GroqAuthError as err:
+                _disable_news_llm(str(err))
+                return {
+                    "safe": True,
+                    "sensitivity": 0.0,
+                    "reason": _NEWS_LLM_AUTH_REASON,
+                }
+            except Exception as err:
                 if (
                     index == 0
                     and len(models_to_try) > 1
@@ -504,32 +523,11 @@ async def analyze_news_with_llm_async(
                     "Groq news analysis failed with model %s: %s",
                     model_name,
                     err,
-                )
-            except Exception as err:
-                last_error = err
-                if (
-                    index == 0
-                    and len(models_to_try) > 1
-                    and model_name != overflow_model
-                ):
-                    logger.warning(
-                        "Unexpected Groq error for model %s (%s). Retrying with fallback model %s.",
-                        model_name,
-                        err,
-                        overflow_model,
-                    )
-                    continue
-                logger.error(
-                    "Unexpected Groq error for model %s: %s",
-                    model_name,
-                    err,
                     exc_info=True,
                 )
-                break
+                raise
 
         if response is None:
-            if last_error is not None:
-                raise last_error
             raise RuntimeError("Groq LLM request failed")
 
         raw_reply = _extract_message_content(response)

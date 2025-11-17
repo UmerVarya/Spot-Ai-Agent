@@ -12,10 +12,14 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-import requests
-
 import config
-from groq_safe import describe_error, extract_error_payload
+from groq_http import (
+    extract_error_payload,
+    groq_api_key,
+    groq_api_url,
+    http_chat_completion,
+)
+from groq_safe import describe_error
 from json_utils import parse_llm_json_response
 from log_utils import setup_logger
 
@@ -145,14 +149,6 @@ def _format_posts(posts: Sequence[str] | None) -> tuple[str, int]:
     return formatted, len(sample)
 
 
-def _groq_api_key() -> str:
-    return os.getenv("GROQ_API_KEY", "")
-
-
-def _groq_api_url() -> str:
-    return os.getenv("GROQ_API_URL", _DEFAULT_GROQ_API_URL) or _DEFAULT_GROQ_API_URL
-
-
 def _handle_auth_failure(error_payload: Any) -> None:
     global _ALT_DATA_DISABLED, _AUTH_FAILURE_LOGGED
     _ALT_DATA_DISABLED = True
@@ -162,66 +158,6 @@ def _handle_auth_failure(error_payload: Any) -> None:
             describe_error(error_payload),
         )
         _AUTH_FAILURE_LOGGED = True
-
-
-def _extract_http_content(payload: Mapping[str, Any] | None) -> str:
-    if not isinstance(payload, Mapping):
-        return ""
-    choices = payload.get("choices")
-    if isinstance(choices, list) and choices:
-        first = choices[0]
-        if isinstance(first, Mapping):
-            message = first.get("message")
-            if isinstance(message, Mapping):
-                content = message.get("content")
-                if isinstance(content, str):
-                    return content
-    return ""
-
-
-def _http_chat_completion(
-    api_key: str,
-    api_url: str,
-    *,
-    model: str,
-    messages: List[Mapping[str, str]],
-    temperature: float,
-    max_tokens: int,
-) -> tuple[Optional[str], Optional[int], Any]:
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        response = requests.post(
-            api_url,
-            headers=headers,
-            json=payload,
-            timeout=_REQUEST_TIMEOUT,
-        )
-    except requests.RequestException as exc:
-        return None, None, exc
-
-    if response.status_code >= 400:
-        return None, response.status_code, extract_error_payload(response)
-
-    try:
-        data = response.json()
-    except ValueError:
-        return None, None, None
-
-    content = _extract_http_content(data)
-    if not content:
-        return None, None, data
-
-    return content, None, None
 
 
 def _build_defaults(
@@ -270,7 +206,7 @@ def analyze_alt_data(
     cannot be parsed into JSON.
     """
 
-    api_key = _groq_api_key()
+    api_key = groq_api_key()
     if not api_key:
         logger.debug("Groq API key unavailable; skipping Groq alt-data request")
         return None
@@ -296,14 +232,15 @@ def analyze_alt_data(
         {"role": "user", "content": user_prompt},
     ]
 
-    api_url = _groq_api_url()
-    content, status_code, error_payload = _http_chat_completion(
-        api_key,
-        api_url,
+    api_url = groq_api_url()
+    content, status_code, error_payload = http_chat_completion(
         model=model_name,
         messages=messages,
         temperature=0.2,
         max_tokens=_MAX_TOKENS,
+        api_key=api_key,
+        api_url=api_url,
+        timeout=_REQUEST_TIMEOUT,
     )
 
     if not content:

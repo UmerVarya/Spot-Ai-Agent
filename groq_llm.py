@@ -25,8 +25,6 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, List, Tuple
 
-import requests
-
 from groq import (
     APIConnectionError,
     APIError,
@@ -37,16 +35,15 @@ from groq import (
 
 import config
 from groq_client import get_groq_client
+from groq_http import http_chat_completion
 from groq_safe import (
     safe_chat_completion,
-    extract_error_payload,
     is_model_decommissioned_error,
     describe_error,
 )
 from log_utils import setup_logger
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_API_URL = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1/chat/completions")
 _HTTP_TIMEOUT_SECONDS = 10
 
 _DEFAULT_RATE_LIMIT_BACKOFF_SECONDS = 2.0
@@ -331,21 +328,6 @@ def _extract_choice_content(response: Any) -> str:
         return ""
 
 
-def _extract_http_message_content(payload: Mapping[str, Any]) -> str:
-    """Return the first message content from a raw HTTP payload."""
-
-    choices = payload.get("choices")
-    if isinstance(choices, list) and choices:
-        first = choices[0]
-        if isinstance(first, Mapping):
-            message = first.get("message")
-            if isinstance(message, Mapping):
-                content = message.get("content")
-                if isinstance(content, str):
-                    return content.strip()
-    return ""
-
-
 def _http_chat_completion(
     model: str,
     messages: list[dict[str, Any]],
@@ -358,47 +340,31 @@ def _http_chat_completion(
     if not GROQ_API_KEY:
         return None, None
 
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    content, status_code, error_payload = http_chat_completion(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=_HTTP_TIMEOUT_SECONDS,
+    )
 
-    try:
-        response = requests.post(
-            GROQ_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=_HTTP_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:
-        logger.error("Groq HTTP request failed: %s", exc)
-        return None, exc
-
-    if response.status_code >= 400:
-        error_payload = extract_error_payload(response)
-        logger.warning(
-            "Groq HTTP error for model %s: %s", model, describe_error(error_payload)
-        )
-        return None, error_payload
-
-    try:
-        data = response.json()
-    except Exception:
-        logger.warning("Groq HTTP response missing JSON body for model %s", model)
-        return None, None
-
-    content = _extract_http_message_content(data)
     if content:
         return content, None
 
+    if isinstance(error_payload, Exception):
+        logger.error("Groq HTTP request failed: %s", error_payload)
+        return None, error_payload
+
+    if status_code is not None or error_payload is not None:
+        logger.warning(
+            "Groq HTTP error for model %s: %s",
+            model,
+            describe_error(error_payload),
+        )
+        return None, error_payload or status_code
+
     logger.warning("Groq HTTP response missing content for model %s", model)
-    return None, data
+    return None, None
 
 
 def _http_completion_with_fallback(
