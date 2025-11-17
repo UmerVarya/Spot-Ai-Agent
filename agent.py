@@ -1878,40 +1878,81 @@ def run_agent_loop() -> None:
                         decision_logged = True
 
                     def _emit_metrics(decision_type: str) -> None:
-                        nonlocal metrics_logged
+                        nonlocal metrics_logged, breakdown_data
                         if metrics_logged:
                             return
-                        breakdown_data["decision_type"] = decision_type
-                        breakdown_data["adjusted_score"] = adjusted_score
-                        breakdown_data["alt_adj"] = alt_adjustment
-                        breakdown_data["alt_adj_block"] = adjusted_score < entry_cutoff
-                        breakdown_data["macro_veto"] = macro_veto_flag
-                        breakdown_data["news_veto"] = news_veto_flag
-                        breakdown_data["cooldown_block"] = cooldown_active
-                        breakdown_data["pos_size"] = position_size
-                        breakdown_data["volume_ok_for_size"] = position_size > 0
-                        breakdown_data["direction_final"] = direction
-                        breakdown_data["forced_long_applied"] = (
-                            breakdown_data.get("direction_raw") is None and direction == "long"
+                        try:
+                            structured_breakdown = ensure_breakdown_fields(
+                                breakdown_data,
+                                required_fields=("symbol",),
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to rehydrate decision breakdown for %s", symbol_key,
+                                exc_info=True,
+                            )
+                            structured_breakdown = {
+                                "symbol": symbol_key,
+                            }
+                        breakdown_data = structured_breakdown
+                        price_data.attrs["decision_breakdown"] = structured_breakdown
+                        structured_breakdown["symbol"] = symbol_key
+                        structured_breakdown["decision_type"] = decision_type
+                        structured_breakdown["setup_type"] = (
+                            structured_breakdown.get("setup_type") or setup_type
                         )
+                        structured_breakdown["norm_score"] = raw_score
+                        try:
+                            dyn_threshold = float(signal_snapshot.get("activation_threshold"))
+                        except (TypeError, ValueError):
+                            dyn_threshold = float(entry_cutoff)
+                        structured_breakdown["dyn_threshold"] = dyn_threshold
+                        structured_breakdown["entry_cutoff"] = entry_cutoff
+                        structured_breakdown["alt_adj"] = alt_adjustment
+                        structured_breakdown["adjusted_score"] = adjusted_score
+                        structured_breakdown["pos_size"] = position_size
+                        structured_breakdown["volume_ok_for_size"] = position_size > 0
+                        structured_breakdown.setdefault("direction_raw", direction)
+                        structured_breakdown["direction_final"] = direction
+                        structured_breakdown["macro_veto"] = macro_veto_flag
+                        structured_breakdown["news_veto"] = news_veto_flag
+                        structured_breakdown["cooldown_block"] = cooldown_active
+                        structured_breakdown["alt_adj_block"] = adjusted_score < entry_cutoff
+                        structured_breakdown.setdefault("profile_veto", False)
+                        structured_breakdown.setdefault("sr_guard_pass", True)
+                        structured_breakdown.setdefault("auction_guard_pass", True)
+                        structured_breakdown.setdefault("spread_gate_pass", True)
+                        structured_breakdown.setdefault("obi_gate_pass", True)
+                        structured_breakdown.setdefault("volume_gate_pass", volume_ok)
+                        structured_breakdown.setdefault("volume_gate_reason", None)
+                        structured_breakdown.setdefault("profile_min_score", structured_breakdown.get("profile_min_score"))
+                        structured_breakdown.setdefault("forced_long_applied", (
+                            structured_breakdown.get("direction_raw") is None and direction == "long"
+                        ))
                         if decision_type == "skip":
                             reason_text, reason_key = _compute_skip_reason()
-                            breakdown_data["primary_skip_reason"] = reason_key
-                            breakdown_data["primary_skip_text"] = reason_text
-                            record_skip_reason(reason_key)
+                            structured_breakdown["primary_skip_reason"] = reason_key
+                            structured_breakdown["primary_skip_text"] = reason_text
+                            if reason_key:
+                                record_skip_reason(reason_key)
                         else:
                             record_trade_opened()
                         try:
                             log_decision_breakdown(
                                 symbol_key,
                                 signal_snapshot,
-                                breakdown_data,
+                                structured_breakdown,
                             )
+                            metrics_logged = True
                         except Exception:
-                            logger.debug(
-                                "Failed to emit decision metrics for %s", symbol_key, exc_info=True
+                            logger.warning(
+                                "Failed to emit decision metrics for %s (decision=%s)",
+                                symbol_key,
+                                decision_type,
+                                exc_info=True,
                             )
-                        metrics_logged = True
+                        finally:
+                            maybe_log_summary()
 
                     pattern_lower = (pattern_name or "").lower()
                     setup_lower = (setup_type or "").lower() if isinstance(setup_type, str) else ""
@@ -1977,6 +2018,7 @@ def run_agent_loop() -> None:
                             _assign_skip_reason("pos_size_zero", "zero position (low confidence)")
                             skip_reasons.append("zero position (low confidence)")
                         reason_text = " and ".join(skip_reasons) if skip_reasons else "not eligible"
+                        custom_skip_reason_text = reason_text
                         logger.info(
                             "[SKIP] %s: direction=%s, size=%s – %s, Score=%.2f",
                             symbol,
@@ -2148,27 +2190,11 @@ def run_agent_loop() -> None:
                         and not metrics_logged
                     ):
                         try:
-                            reason_key = custom_skip_reason_key
-                            reason_text = custom_skip_reason_text
-                            if not reason_key and not reason_text:
-                                if "_compute_skip_reason" in locals():
-                                    reason_text, reason_key = _compute_skip_reason()
-                                else:
-                                    reason_text, reason_key = ("unclassified skip", None)
-                            if reason_key:
-                                breakdown_data.setdefault("primary_skip_reason", reason_key)
-                                record_skip_reason(reason_key)
-                            if reason_text:
-                                breakdown_data.setdefault("primary_skip_text", reason_text)
-                            log_decision_breakdown(
-                                symbol_key,
-                                signal_snapshot,
-                                breakdown_data,
-                            )
-                            metrics_logged = True
+                            _emit_metrics("skip")
                         except Exception:
-                            logger.debug(
-                                "Failed to emit decision metrics for %s", symbol_key, exc_info=True
+                            logger.warning(
+                                "Final decision metric emission failed for %s", symbol_key,
+                                exc_info=True,
                             )
                     maybe_log_summary()
             maybe_log_summary()
