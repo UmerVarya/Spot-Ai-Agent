@@ -69,12 +69,13 @@ from typing import Any, Dict, Mapping, Optional, Set, Tuple
 
 from ws_price_bridge import WSPriceBridge
 from decision_metrics import (
+    ensure_breakdown_fields,
     log_decision_breakdown,
     maybe_log_summary,
-    new_decision_breakdown,
     record_signal_evaluated,
     record_skip_reason,
     record_trade_opened,
+    update_breakdown_reason,
 )
 
 # Centralized configuration loader
@@ -1690,10 +1691,12 @@ def run_agent_loop() -> None:
                     signal_snapshot = price_data.attrs.get("signal_features", {}) or {}
                     setup_type = signal_snapshot.get("setup_type")
                     record_signal_evaluated()
-                    breakdown_data = price_data.attrs.get("decision_breakdown")
-                    if not isinstance(breakdown_data, dict):
-                        breakdown_data = new_decision_breakdown(symbol_key)
-                        price_data.attrs["decision_breakdown"] = breakdown_data
+                    breakdown_data = ensure_breakdown_fields(
+                        price_data.attrs.get("decision_breakdown"),
+                        required_fields=("symbol",),
+                    )
+                    breakdown_data["symbol"] = symbol_key
+                    price_data.attrs["decision_breakdown"] = breakdown_data
                     breakdown_data["setup_type"] = breakdown_data.get("setup_type") or setup_type
                     breakdown_data["norm_score"] = raw_score
                     breakdown_data["pos_size"] = position_size
@@ -2088,6 +2091,37 @@ def run_agent_loop() -> None:
                     )
                 except Exception as e:
                     logger.error("Error evaluating %s: %s", symbol, e, exc_info=True)
+                    if "price_data" in locals() and hasattr(price_data, "attrs"):
+                        breakdown_snapshot = price_data.attrs.get("decision_breakdown")
+                        signal_features = price_data.attrs.get("signal_features", {})
+                    else:
+                        breakdown_snapshot = None
+                        signal_features = {}
+                    symbol_for_metrics = locals().get("symbol_key", str(symbol).upper())
+                    try:
+                        structured_breakdown = ensure_breakdown_fields(
+                            breakdown_snapshot,
+                            required_fields=("symbol",),
+                        )
+                    except Exception:
+                        structured_breakdown = None
+                    if structured_breakdown is not None:
+                        structured_breakdown.setdefault("symbol", symbol_for_metrics)
+                        structured_breakdown.setdefault("decision_type", "error")
+                        update_breakdown_reason(
+                            structured_breakdown,
+                            "evaluation_error",
+                            "signal evaluation raised",
+                        )
+                        record_skip_reason("evaluation_error")
+                        try:
+                            log_decision_breakdown(
+                                symbol_for_metrics,
+                                signal_features,
+                                structured_breakdown,
+                            )
+                        except Exception:
+                            logger.debug("Failed to emit decision metrics after exception", exc_info=True)
                     continue
                 finally:
                     maybe_log_summary()
