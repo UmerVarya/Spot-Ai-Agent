@@ -24,7 +24,7 @@ except Exception:
 
 from trade_storage import TRADE_HISTORY_FILE, load_trade_history_df  # shared trade log path
 
-from risk_profiles.btc_profile import get_btc_profile
+from risk_profiles import get_btc_profile, get_eth_profile
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
 from multi_timeframe import (
@@ -1677,22 +1677,37 @@ def evaluate_signal(
 
         # TRAINING_MODE support: skip volume filter when in training mode
         training_mode = os.getenv("TRAINING_MODE", "false").lower() == "true"
+        symbol_upper = symbol.upper()
         effective_floor = dynamic_threshold
-        if symbol.upper() == "BTCUSDT" and not training_mode:
-            profile = get_btc_profile()
-            effective_floor = max(dynamic_threshold, profile.min_quote_volume_1m)
-            if (
-                latest_quote_vol < profile.min_quote_volume_1m
-                or avg_quote_vol_20 < profile.avg_quote_volume_20_min
-                or vol_expansion < profile.vol_expansion_min
-            ):
-                logger.info(
-                    f"[BTC VOL GATE] Skipping BTCUSDT: "
-                    f"last={latest_quote_vol:.0f}, avg20={avg_quote_vol_20:.0f}, "
-                    f"expansion={vol_expansion:.2f}, "
-                    f"floor={profile.min_quote_volume_1m:.0f}"
-                )
-                return 0, None, 0, None
+        if not training_mode:
+            if symbol_upper == "BTCUSDT":
+                profile = get_btc_profile()
+                effective_floor = max(dynamic_threshold, profile.min_quote_volume_1m)
+                if (
+                    latest_quote_vol < profile.min_quote_volume_1m
+                    or avg_quote_vol_20 < profile.avg_quote_volume_20_min
+                    or vol_expansion < profile.vol_expansion_min
+                ):
+                    logger.info(
+                        f"[BTC VOL GATE] Skipping BTCUSDT: "
+                        f"last={latest_quote_vol:.0f}, avg20={avg_quote_vol_20:.0f}, "
+                        f"expansion={vol_expansion:.2f}, floor={profile.min_quote_volume_1m:.0f}"
+                    )
+                    return 0, None, 0, None
+            elif symbol_upper == "ETHUSDT":
+                profile = get_eth_profile()
+                effective_floor = max(dynamic_threshold, profile.min_quote_volume_1m)
+                if (
+                    latest_quote_vol < profile.min_quote_volume_1m
+                    or avg_quote_vol_20 < profile.avg_quote_volume_20_min
+                    or vol_expansion < profile.vol_expansion_min
+                ):
+                    logger.info(
+                        f"[ETH VOL GATE] Skipping ETHUSDT: "
+                        f"last={latest_quote_vol:.0f}, avg20={avg_quote_vol_20:.0f}, "
+                        f"expansion={vol_expansion:.2f}, floor={profile.min_quote_volume_1m:.0f}"
+                    )
+                    return 0, None, 0, None
         if not training_mode and latest_quote_vol < effective_floor:
             logger.info(
                 "Skipping due to low volume: %s < %s (%s%% of 20-bar avg)",
@@ -2004,6 +2019,28 @@ def evaluate_signal(
         direction = "long" if setup_type and normalized_score >= dynamic_threshold else None
         position_size = get_position_size(normalized_score)
 
+        def _trend_state(value: Any, strong_threshold: float = 0.001) -> str:
+            try:
+                slope = float(value)
+            except (TypeError, ValueError):
+                return "neutral"
+            if not np.isfinite(slope):
+                return "neutral"
+            try:
+                ref_price = float(price_now)
+            except (TypeError, ValueError, NameError):
+                ref_price = 0.0
+            if not np.isfinite(ref_price) or ref_price == 0.0:
+                ref_price = 1.0
+            relative = slope / ref_price
+            if relative <= -strong_threshold:
+                return "strong_bearish"
+            if relative < 0:
+                return "bearish"
+            if relative >= strong_threshold:
+                return "bullish"
+            return "neutral"
+
         if symbol.upper() == "BTCUSDT" and direction == "long":
             profile = get_btc_profile()
             final_score = float(normalized_score)
@@ -2019,28 +2056,6 @@ def evaluate_signal(
                 atr_ratio = None
             if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
                 final_score -= 0.5
-
-            def _trend_state(value: Any, strong_threshold: float = 0.001) -> str:
-                try:
-                    slope = float(value)
-                except (TypeError, ValueError):
-                    return "neutral"
-                if not np.isfinite(slope):
-                    return "neutral"
-                try:
-                    ref_price = float(price_now)
-                except (TypeError, ValueError, NameError):
-                    ref_price = 0.0
-                if not np.isfinite(ref_price) or ref_price == 0.0:
-                    ref_price = 1.0
-                relative = slope / ref_price
-                if relative <= -strong_threshold:
-                    return "strong_bearish"
-                if relative < 0:
-                    return "bearish"
-                if relative >= strong_threshold:
-                    return "bullish"
-                return "neutral"
 
             trend_1h_state = _trend_state(ema_trend_1h, strong_threshold=0.0005)
             trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
@@ -2074,6 +2089,78 @@ def evaluate_signal(
             if final_score < profile_min_score:
                 logger.info(
                     f"[BTC SCORE GATE] Skipping BTCUSDT: "
+                    f"score={final_score:.2f} < min={profile_min_score:.2f}"
+                )
+                return 0, None, 0, None
+
+        if symbol.upper() == "ETHUSDT" and direction == "long":
+            profile = get_eth_profile()
+            final_score = float(normalized_score)
+
+            session_key = (session_name or "").lower()
+            multiplier = profile.session_multipliers.get(session_key)
+            if multiplier is not None:
+                final_score *= multiplier
+
+            atr_ratio_raw = price_data.attrs.get("atr_15m_ratio")
+            try:
+                atr_ratio = float(atr_ratio_raw)
+            except (TypeError, ValueError):
+                atr_ratio = None
+            if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
+                final_score -= 0.3
+
+            trend_1h_state = _trend_state(ema_trend_1h, strong_threshold=0.0005)
+            trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
+
+            if trend_4h_state == "strong_bearish":
+                return 0, None, 0, None
+
+            one_h_bearish = trend_1h_state == "bearish"
+
+            news_raw = price_data.attrs.get("news_severity", 0)
+            try:
+                news_severity = int(float(news_raw))
+            except (TypeError, ValueError):
+                news_severity = 0
+
+            if news_severity >= 3:
+                return 0, None, 0, None
+
+            if news_severity == 2:
+                profile_min_score = max(profile.min_score_for_trade, 4.6)
+            else:
+                profile_min_score = profile.min_score_for_trade
+
+            btc_d_trend_raw = price_data.attrs.get("btc_d_trend")
+            ethbtc_trend_raw = price_data.attrs.get("ethbtc_trend")
+            btc_d_trend = None
+            ethbtc_trend = None
+            if btc_d_trend_raw is not None:
+                try:
+                    btc_d_trend = str(btc_d_trend_raw).lower()
+                except Exception:
+                    btc_d_trend = None
+            if ethbtc_trend_raw is not None:
+                try:
+                    ethbtc_trend = str(ethbtc_trend_raw).lower()
+                except Exception:
+                    ethbtc_trend = None
+
+            if btc_d_trend == "rising" and ethbtc_trend == "falling":
+                final_score -= 0.3
+                profile_min_score = max(profile_min_score, 4.4)
+
+            if ethbtc_trend == "rising":
+                final_score += 0.2
+
+            if one_h_bearish:
+                profile_min_score = max(profile_min_score, 4.5)
+
+            final_score = max(final_score, 0.0)
+            if final_score < profile_min_score:
+                logger.info(
+                    f"[ETH SCORE GATE] Skipping ETHUSDT: "
                     f"score={final_score:.2f} < min={profile_min_score:.2f}"
                 )
                 return 0, None, 0, None
