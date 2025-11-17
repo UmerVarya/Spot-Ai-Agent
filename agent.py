@@ -1878,11 +1878,21 @@ def run_agent_loop() -> None:
                         )
                         decision_logged = True
 
-                    def _emit_metrics(decision_type: str) -> None:
+                    def _emit_metrics(
+                        decision_type: str,
+                        *,
+                        reason_text: Optional[str] = None,
+                        reason_key: Optional[str] = None,
+                    ) -> None:
                         nonlocal metrics_logged, breakdown_data, last_decision_type
+                        nonlocal custom_skip_reason_key, custom_skip_reason_text
                         last_decision_type = decision_type
                         if metrics_logged:
                             return
+                        if reason_key:
+                            custom_skip_reason_key = reason_key
+                        if reason_text:
+                            custom_skip_reason_text = reason_text
                         try:
                             structured_breakdown = ensure_breakdown_fields(
                                 breakdown_data,
@@ -1925,14 +1935,17 @@ def run_agent_loop() -> None:
                         structured_breakdown.setdefault("auction_guard_pass", True)
                         structured_breakdown.setdefault("spread_gate_pass", True)
                         structured_breakdown.setdefault("obi_gate_pass", True)
-                        structured_breakdown.setdefault("volume_gate_pass", volume_ok)
+                        structured_breakdown["volume_gate_pass"] = bool(
+                            structured_breakdown.get("volume_gate_pass", True) and volume_ok
+                        )
                         structured_breakdown.setdefault("volume_gate_reason", None)
                         structured_breakdown.setdefault("profile_min_score", structured_breakdown.get("profile_min_score"))
                         structured_breakdown.setdefault("forced_long_applied", (
                             structured_breakdown.get("direction_raw") is None and direction == "long"
                         ))
                         if decision_type == "skip":
-                            reason_text, reason_key = _compute_skip_reason()
+                            if reason_text is None or reason_key is None:
+                                reason_text, reason_key = _compute_skip_reason()
                             structured_breakdown["primary_skip_reason"] = reason_key
                             structured_breakdown["primary_skip_text"] = reason_text
                             if reason_key:
@@ -1964,16 +1977,16 @@ def run_agent_loop() -> None:
                     if pattern_lower in BREAKOUT_PATTERNS or "breakout" in pattern_lower:
                         is_breakout_setup = True
                     if auction_state == "balanced" and is_breakout_setup:
-                        logger.info(
-                            "[SKIP] %s: Balanced regime detected – breakout setup filtered (pattern=%s, setup=%s)",
-                            symbol,
-                            pattern_name or "none",
-                            setup_type or "unknown",
+                        reason_text = (
+                            "Balanced regime detected – breakout setup filtered "
+                            f"(pattern={pattern_name or 'none'}, setup={setup_type or 'unknown'})"
                         )
+                        logger.info("[SKIP] %s: %s", symbol, reason_text)
                         breakdown_data["auction_guard_pass"] = False
-                        _assign_skip_reason("auction_guard_fail", "auction guard veto")
+                        reason_key = "auction_guard_fail"
+                        _assign_skip_reason(reason_key, reason_text, overwrite=True)
                         _log_decision("skip")
-                        _emit_metrics("skip")
+                        _emit_metrics("skip", reason_text=reason_text, reason_key=reason_key)
                         continue
                     logger.info(
                         "%s: Score=%.2f (alt_adj=%.2f), Direction=%s, Pattern=%s, PosSize=%s, AuctionState=%s (age=%.2fs)",
@@ -2029,8 +2042,13 @@ def run_agent_loop() -> None:
                             reason_text,
                             score,
                         )
+                        reason_key = custom_skip_reason_key
                         _log_decision("skip")
-                        _emit_metrics("skip")
+                        _emit_metrics(
+                            "skip",
+                            reason_text=reason_text,
+                            reason_key=reason_key,
+                        )
                         continue
                     flow_analysis = detect_aggression(
                         price_data,
@@ -2052,12 +2070,16 @@ def run_agent_loop() -> None:
                     if auction_state == "out_of_balance_trend":
                         volume_profile_result = compute_trend_leg_volume_profile(price_data)
                         if volume_profile_result is None or not volume_profile_result.lvns:
-                            logger.debug(
-                                "[SKIP] %s: unable to derive impulse-leg LVNs for trend continuation.",
-                                symbol,
-                            )
+                            reason_key = "trend_lvn_missing"
+                            reason_text = "unable to derive impulse-leg LVNs for trend continuation."
+                            _assign_skip_reason(reason_key, reason_text, overwrite=True)
+                            logger.debug("[SKIP] %s: %s", symbol, reason_text)
                             _log_decision("skip")
-                            _emit_metrics("skip")
+                            _emit_metrics(
+                                "skip",
+                                reason_text=reason_text,
+                                reason_key=reason_key,
+                            )
                             continue
                         lvn_touch = volume_profile_result.touched_lvn(
                             close=last_close or 0.0,
@@ -2065,33 +2087,51 @@ def run_agent_loop() -> None:
                             low=last_low,
                         )
                         if lvn_touch is None:
-                            logger.debug(
-                                "[SKIP] %s: price not interacting with impulse-leg LVN (auction_state=%s).",
-                                symbol,
-                                auction_state,
+                            reason_key = "trend_lvn_no_touch"
+                            reason_text = (
+                                "price not interacting with impulse-leg LVN "
+                                f"(auction_state={auction_state})."
                             )
+                            _assign_skip_reason(reason_key, reason_text, overwrite=True)
+                            logger.debug("[SKIP] %s: %s", symbol, reason_text)
                             _log_decision("skip")
-                            _emit_metrics("skip")
+                            _emit_metrics(
+                                "skip",
+                                reason_text=reason_text,
+                                reason_key=reason_key,
+                            )
                             continue
                         if flow_status != "buyers in control":
-                            logger.info(
-                                "[SKIP] %s: LVN retest lacks buyer aggression (order flow state=%s).",
-                                symbol,
-                                flow_status,
+                            reason_key = "trend_lvn_flow_weak"
+                            reason_text = (
+                                "LVN retest lacks buyer aggression "
+                                f"(order flow state={flow_status})."
                             )
+                            _assign_skip_reason(reason_key, reason_text, overwrite=True)
+                            logger.info("[SKIP] %s: %s", symbol, reason_text)
                             _log_decision("skip")
-                            _emit_metrics("skip")
+                            _emit_metrics(
+                                "skip",
+                                reason_text=reason_text,
+                                reason_key=reason_key,
+                            )
                             continue
                     elif auction_state in {"out_of_balance_revert", "balanced"}:
                         volume_profile_result = compute_reversion_leg_volume_profile(price_data)
                         if volume_profile_result is None or not volume_profile_result.lvns:
-                            logger.debug(
-                                "[SKIP] %s: unable to derive reclaim-leg LVNs (auction_state=%s).",
-                                symbol,
-                                auction_state,
+                            reason_key = "revert_lvn_missing"
+                            reason_text = (
+                                "unable to derive reclaim-leg LVNs "
+                                f"(auction_state={auction_state})."
                             )
+                            _assign_skip_reason(reason_key, reason_text, overwrite=True)
+                            logger.debug("[SKIP] %s: %s", symbol, reason_text)
                             _log_decision("skip")
-                            _emit_metrics("skip")
+                            _emit_metrics(
+                                "skip",
+                                reason_text=reason_text,
+                                reason_key=reason_key,
+                            )
                             continue
                         lvn_touch = volume_profile_result.touched_lvn(
                             close=last_close or 0.0,
@@ -2099,21 +2139,31 @@ def run_agent_loop() -> None:
                             low=last_low,
                         )
                         if lvn_touch is None:
-                            logger.debug(
-                                "[SKIP] %s: reclaim leg not pulling back into an LVN.",
-                                symbol,
-                            )
+                            reason_key = "revert_lvn_no_pullback"
+                            reason_text = "reclaim leg not pulling back into an LVN."
+                            _assign_skip_reason(reason_key, reason_text, overwrite=True)
+                            logger.debug("[SKIP] %s: %s", symbol, reason_text)
                             _log_decision("skip")
-                            _emit_metrics("skip")
+                            _emit_metrics(
+                                "skip",
+                                reason_text=reason_text,
+                                reason_key=reason_key,
+                            )
                             continue
                         if flow_status != "buyers in control":
-                            logger.info(
-                                "[SKIP] %s: reclaim LVN lacks buyer aggression (order flow state=%s).",
-                                symbol,
-                                flow_status,
+                            reason_key = "revert_lvn_flow_weak"
+                            reason_text = (
+                                "reclaim LVN lacks buyer aggression "
+                                f"(order flow state={flow_status})."
                             )
+                            _assign_skip_reason(reason_key, reason_text, overwrite=True)
+                            logger.info("[SKIP] %s: %s", symbol, reason_text)
                             _log_decision("skip")
-                            _emit_metrics("skip")
+                            _emit_metrics(
+                                "skip",
+                                reason_text=reason_text,
+                                reason_key=reason_key,
+                            )
                             continue
                     else:
                         if flow_status == "sellers in control":
