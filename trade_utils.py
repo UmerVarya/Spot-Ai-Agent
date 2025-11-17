@@ -24,7 +24,12 @@ except Exception:
 
 from trade_storage import TRADE_HISTORY_FILE, load_trade_history_df  # shared trade log path
 
-from risk_profiles import get_btc_profile, get_eth_profile, get_sol_profile
+from risk_profiles import (
+    get_btc_profile,
+    get_eth_profile,
+    get_sol_profile,
+    get_bnb_profile,
+)
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
 from multi_timeframe import (
@@ -155,6 +160,8 @@ def passes_volume_gate(
         profile = get_eth_profile()
     elif symbol_token == "SOLUSDT":
         profile = get_sol_profile()
+    elif symbol_token == "BNBUSDT":
+        profile = get_bnb_profile()
 
     if profile is not None:
         vol_expansion = last_volume / max(avg_volume, 1e-9)
@@ -2233,6 +2240,48 @@ def evaluate_signal(
             if final_score < profile_min_score:
                 logger.info(
                     f"[SOL SCORE GATE] Skipping SOLUSDT: "
+                    f"score={final_score:.2f} < min={profile_min_score:.2f}"
+                )
+                return 0, None, 0, None
+        if symbol.upper() == "BNBUSDT" and direction == "long":
+            profile = get_bnb_profile()
+            final_score = float(normalized_score)
+
+            session_key = (session_name or "").lower()
+            multiplier = profile.session_multipliers.get(session_key)
+            if multiplier is not None:
+                final_score *= multiplier
+
+            atr_ratio_raw = price_data.attrs.get("atr_15m_ratio")
+            try:
+                atr_ratio = float(atr_ratio_raw)
+            except (TypeError, ValueError):
+                atr_ratio = None
+            if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
+                final_score -= 0.2
+
+            trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
+
+            news_raw = price_data.attrs.get("news_severity", 0)
+            try:
+                news_severity = int(float(news_raw))
+            except (TypeError, ValueError):
+                news_severity = 0
+
+            if trend_4h_state == "strong_bearish":
+                return 0, None, 0, None
+
+            if news_severity >= 3:
+                return 0, None, 0, None
+
+            profile_min_score = profile.min_score_for_trade
+            if news_severity == 2:
+                profile_min_score = max(profile_min_score, 4.3)
+
+            final_score = max(final_score, 0.0)
+            if final_score < profile_min_score:
+                logger.info(
+                    f"[BNB SCORE GATE] Skipping BNBUSDT: "
                     f"score={final_score:.2f} < min={profile_min_score:.2f}"
                 )
                 return 0, None, 0, None
