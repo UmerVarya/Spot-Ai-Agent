@@ -12,6 +12,7 @@ from typing import Optional, Any, Mapping, Callable, Tuple, TypeVar, Dict, Itera
 import traceback
 import asyncio
 from log_utils import setup_logger
+from decision_metrics import new_decision_breakdown
 
 from weight_optimizer import optimize_indicator_weights
 
@@ -1598,6 +1599,28 @@ def evaluate_signal(
 
         symbol_token = str(symbol or "").upper()
         symbol_tier = get_symbol_tier(symbol_token)
+        breakdown = new_decision_breakdown(symbol_token)
+
+        def _set_primary_reason(key: str, text: str) -> None:
+            if key:
+                breakdown["primary_skip_reason"] = key
+            if text:
+                breakdown["primary_skip_text"] = text
+
+        def _mark_profile_veto(min_score: Optional[float], text: str) -> None:
+            breakdown["profile_veto"] = True
+            if min_score is not None:
+                try:
+                    breakdown["profile_min_score"] = float(min_score)
+                except (TypeError, ValueError):
+                    breakdown["profile_min_score"] = None
+            _set_primary_reason("profile_veto", text)
+
+        def _mark_sr_guard(text: str) -> None:
+            breakdown["sr_guard_pass"] = False
+            _set_primary_reason("sr_guard_fail", text)
+
+        price_data.attrs["decision_breakdown"] = breakdown
 
         price_data = price_data.replace([np.inf, -np.inf], np.nan)
         price_data = price_data.dropna(subset=['high', 'low', 'close'])
@@ -1798,6 +1821,9 @@ def evaluate_signal(
                 vol_factor,
                 volume_context,
             ):
+                breakdown["volume_gate_pass"] = False
+                breakdown["volume_ok_for_size"] = False
+                _set_primary_reason("volume_gate_fail", "volume gate failed")
                 return 0, None, 0, None
 
         base_weights = {
@@ -1993,6 +2019,8 @@ def evaluate_signal(
             trend_score += w["confluence"]
         if spread == spread and price_now > 0 and spread / price_now > 0.001:
             logger.warning("Skipping %s: spread %.6f is >0.1%% of price.", symbol, spread)
+            breakdown["spread_gate_pass"] = False
+            _set_primary_reason("spread_gate_fail", "spread gate failed")
             return 0, None, 0, None
         imbalance_to_check = imbalance
         aggression = detect_aggression(
@@ -2011,6 +2039,8 @@ def evaluate_signal(
                 symbol,
                 imbalance_to_check,
             )
+            breakdown["obi_gate_pass"] = False
+            _set_primary_reason("obi_gate_fail", "order book imbalance gate")
             return 0, None, 0, None
         flow_score = 0.0
         volume_ratio = None
@@ -2173,6 +2203,7 @@ def evaluate_signal(
                     f"[BTC SCORE GATE] Skipping BTCUSDT: "
                     f"score={final_score:.2f} < min={profile_min_score:.2f}"
                 )
+                _mark_profile_veto(profile_min_score, "BTC profile min score gate")
                 return 0, None, 0, None
 
         if symbol_upper == "ETHUSDT" and direction == "long":
@@ -2244,6 +2275,7 @@ def evaluate_signal(
                     f"[ETH SCORE GATE] Skipping ETHUSDT: "
                     f"score={final_score:.2f} < min={profile_min_score:.2f}"
                 )
+                _mark_profile_veto(profile_min_score, "ETH profile min score gate")
                 return 0, None, 0, None
 
         if symbol_upper == "SOLUSDT" and direction == "long":
@@ -2287,6 +2319,7 @@ def evaluate_signal(
                     f"[SOL SCORE GATE] Skipping SOLUSDT: "
                     f"score={final_score:.2f} < min={profile_min_score:.2f}"
                 )
+                _mark_profile_veto(profile_min_score, "SOL profile min score gate")
                 return 0, None, 0, None
         if symbol_upper == "BNBUSDT" and direction == "long":
             profile = get_bnb_profile()
@@ -2329,6 +2362,7 @@ def evaluate_signal(
                     f"[BNB SCORE GATE] Skipping BNBUSDT: "
                     f"score={final_score:.2f} < min={profile_min_score:.2f}"
                 )
+                _mark_profile_veto(profile_min_score, "BNB profile min score gate")
                 return 0, None, 0, None
         if direction == "long" and symbol_tier and symbol_upper not in {
             "BTCUSDT",
@@ -2372,6 +2406,7 @@ def evaluate_signal(
                     f"[TIER SCORE GATE] Skipping {symbol_upper} (tier={symbol_tier}): "
                     f"score={final_score:.2f} < min={profile_min_score:.2f}"
                 )
+                _mark_profile_veto(profile_min_score, "Tier profile min score gate")
                 return 0, None, 0, None
 
         zones = detect_support_resistance_zones(price_data)
@@ -2420,6 +2455,7 @@ def evaluate_signal(
                     normalized_score,
                     min_resistance_score,
                 )
+                _mark_sr_guard("resistance guard veto")
                 return 0, None, 0, None
             if not near_support and normalized_score < min_support_score:
                 logger.warning(
@@ -2428,6 +2464,7 @@ def evaluate_signal(
                     normalized_score,
                     min_support_score,
                 )
+                _mark_sr_guard("support guard veto")
                 return 0, None, 0, None
         if triggered_patterns:
             pattern_name = triggered_patterns[0]
@@ -2548,6 +2585,18 @@ def evaluate_signal(
             chart_pattern,
             indicator_flags,
             signal_snapshot,
+        )
+        breakdown.update(
+            {
+                "norm_score": normalized_score,
+                "dyn_threshold": dynamic_threshold,
+                "setup_type": setup_type,
+                "direction_raw": direction,
+                "direction_final": direction,
+                "pos_size": position_size,
+                "volume_ok_for_size": bool(position_size and position_size > 0),
+                "entry_cutoff": signal_snapshot.get("activation_threshold", dynamic_threshold),
+            }
         )
         return normalized_score, direction, position_size, pattern_name
     except Exception as e:
