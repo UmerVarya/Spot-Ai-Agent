@@ -1102,6 +1102,36 @@ def run_agent_loop() -> None:
             )
 
     state = CentralState()
+
+    def _get_state_section(section: str) -> Dict[str, Any]:
+        """Return a section snapshot without assuming ``state`` has the API."""
+
+        getter = getattr(state, "get_section", None)
+        if not callable(getter):
+            logger.debug(
+                "State container missing get_section; returning default for section '%s'",
+                section,
+            )
+            return {"data": None, "timestamp": 0.0}
+
+        try:
+            snapshot = getter(section)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning(
+                "State get_section('%s') failed: %s",
+                section,
+                exc,
+                exc_info=True,
+            )
+            return {"data": None, "timestamp": 0.0}
+
+        if not isinstance(snapshot, dict):
+            return {"data": None, "timestamp": 0.0}
+
+        return {
+            "data": snapshot.get("data"),
+            "timestamp": float(snapshot.get("timestamp", 0.0)),
+        }
     worker_pools = WorkerPools()
     _ensure_periodic_tick()
     scan_lock = threading.Lock()
@@ -1124,7 +1154,7 @@ def run_agent_loop() -> None:
     last_rest_backfill = 0.0
 
     def refresh_macro_state() -> None:
-        previous_snapshot = state.get_section("macro")
+        previous_snapshot = _get_state_section("macro")
         previous_payload = previous_snapshot.get("data")
         if not isinstance(previous_payload, dict):
             previous_payload = {}
@@ -1384,7 +1414,7 @@ def run_agent_loop() -> None:
             if perf.get("max_drawdown", 0) < -0.25:
                 logger.warning("Max drawdown exceeded 25%. Halting trading.")
                 continue
-            macro_snapshot = state.get_section("macro")
+            macro_snapshot = _get_state_section("macro")
             macro_payload_raw = macro_snapshot.get("data")
             macro_timestamp = float(macro_snapshot.get("timestamp", 0.0))
             macro_age = time.time() - macro_timestamp if macro_timestamp else float("inf")
@@ -1459,7 +1489,7 @@ def run_agent_loop() -> None:
             skip_all, skip_alt, macro_reasons = macro_filter_decision(
                 btc_d, fg, sentiment_bias, sentiment_confidence
             )
-            news_snapshot = state.get_section("news")
+            news_snapshot = _get_state_section("news")
             news_data = news_snapshot.get("data") or {}
             monitor_state = news_data.get("monitor") if isinstance(news_data, dict) else None
             if monitor_state:
