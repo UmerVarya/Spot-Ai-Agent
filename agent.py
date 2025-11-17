@@ -1670,6 +1670,13 @@ def run_agent_loop() -> None:
                 continue
             cache_miss_symbols: list[str] = []
             for symbol in symbols_to_fetch:
+                symbol_key = str(symbol or "").upper()
+                breakdown_data: Optional[Dict[str, Any]] = None
+                signal_snapshot: Mapping[str, Any] = {}
+                custom_skip_reason_key: Optional[str] = None
+                custom_skip_reason_text: Optional[str] = None
+                metrics_logged = False
+                evaluation_started = False
                 try:
                     cached_signal = signal_cache.get(symbol)
                     if cached_signal is None:
@@ -1680,7 +1687,6 @@ def run_agent_loop() -> None:
                     if price_data is None or price_data.empty or len(price_data) < 40:
                         logger.warning("Skipping %s due to insufficient data.", symbol)
                         continue
-                    symbol_key = str(symbol).upper()
                     tier = symbol_tier_lookup.get(symbol_key)
 
                     score = cached_signal.score
@@ -1691,6 +1697,7 @@ def run_agent_loop() -> None:
                     signal_snapshot = price_data.attrs.get("signal_features", {}) or {}
                     setup_type = signal_snapshot.get("setup_type")
                     record_signal_evaluated()
+                    evaluation_started = True
                     breakdown_data = ensure_breakdown_fields(
                         price_data.attrs.get("decision_breakdown"),
                         required_fields=("symbol",),
@@ -1870,8 +1877,6 @@ def run_agent_loop() -> None:
                         )
                         decision_logged = True
 
-                    metrics_logged = False
-
                     def _emit_metrics(decision_type: str) -> None:
                         nonlocal metrics_logged
                         if metrics_logged:
@@ -1896,7 +1901,16 @@ def run_agent_loop() -> None:
                             record_skip_reason(reason_key)
                         else:
                             record_trade_opened()
-                        log_decision_breakdown(symbol_key, signal_snapshot, breakdown_data)
+                        try:
+                            log_decision_breakdown(
+                                symbol_key,
+                                signal_snapshot,
+                                breakdown_data,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to emit decision metrics for %s", symbol_key, exc_info=True
+                            )
                         metrics_logged = True
 
                     pattern_lower = (pattern_name or "").lower()
@@ -2121,9 +2135,41 @@ def run_agent_loop() -> None:
                                 structured_breakdown,
                             )
                         except Exception:
-                            logger.debug("Failed to emit decision metrics after exception", exc_info=True)
+                            logger.debug(
+                                "Failed to emit decision metrics after exception",
+                                exc_info=True,
+                            )
+                    metrics_logged = True
                     continue
                 finally:
+                    if (
+                        evaluation_started
+                        and breakdown_data
+                        and not metrics_logged
+                    ):
+                        try:
+                            reason_key = custom_skip_reason_key
+                            reason_text = custom_skip_reason_text
+                            if not reason_key and not reason_text:
+                                if "_compute_skip_reason" in locals():
+                                    reason_text, reason_key = _compute_skip_reason()
+                                else:
+                                    reason_text, reason_key = ("unclassified skip", None)
+                            if reason_key:
+                                breakdown_data.setdefault("primary_skip_reason", reason_key)
+                                record_skip_reason(reason_key)
+                            if reason_text:
+                                breakdown_data.setdefault("primary_skip_text", reason_text)
+                            log_decision_breakdown(
+                                symbol_key,
+                                signal_snapshot,
+                                breakdown_data,
+                            )
+                            metrics_logged = True
+                        except Exception:
+                            logger.debug(
+                                "Failed to emit decision metrics for %s", symbol_key, exc_info=True
+                            )
                     maybe_log_summary()
             maybe_log_summary()
             if not symbol_scores:
