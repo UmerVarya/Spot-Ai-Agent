@@ -376,7 +376,7 @@ import numpy as np
 
 from trade_constants import ATR_STOP_MULTIPLIER, TP_ATR_MULTIPLIERS
 from rl_policy import RLPositionSizer
-from trade_utils import get_rl_state
+from trade_utils import get_rl_state, set_symbol_tiers
 from microstructure import plan_execution
 from volatility_regime import atr_percentile
 from cache_evaluator_adapter import evaluator_for_cache
@@ -1589,11 +1589,26 @@ def run_agent_loop() -> None:
             # Apply macro filtering to symbols: if macro filter indicated to skip altcoins,
             # restrict the universe to BTCUSDT only.  We do this after fetching the symbols
             # to avoid unnecessary API calls during the gating step.
+            tier_assignments: dict[str, str] = {}
             if skip_alt:
                 # keep BTCUSDT and potentially stablecoins if you wish; here we only keep BTCUSDT
                 top_symbols = [sym for sym in top_symbols if sym.upper() == "BTCUSDT"]
                 if macro_reason_text:
                     logger.warning("Macro gating (%s). Scanning only BTCUSDT.", macro_reason_text)
+            CORE_SYMBOLS = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
+            if top_symbols:
+                rest = [sym for sym in top_symbols if sym.upper() not in CORE_SYMBOLS]
+                tier1_list = rest[:6]
+                tier2_list = rest[6:16]
+                tier3_list = rest[16:26]
+                for sym in tier1_list:
+                    tier_assignments[sym.upper()] = "TIER1"
+                for sym in tier2_list:
+                    tier_assignments[sym.upper()] = "TIER2"
+                for sym in tier3_list:
+                    tier_assignments[sym.upper()] = "TIER3"
+            set_symbol_tiers(tier_assignments)
+            symbol_tier_lookup = dict(tier_assignments)
             if top_symbols and market_stream is not None:
                 market_stream.set_symbols(top_symbols)
             session = get_market_session()
@@ -1656,6 +1671,9 @@ def run_agent_loop() -> None:
                     if price_data is None or price_data.empty or len(price_data) < 40:
                         logger.warning("Skipping %s due to insufficient data.", symbol)
                         continue
+                    symbol_key = str(symbol).upper()
+                    tier = symbol_tier_lookup.get(symbol_key)
+
                     score = cached_signal.score
                     raw_score = float(score)
                     direction = cached_signal.direction
@@ -2310,6 +2328,10 @@ def run_agent_loop() -> None:
                     "macro_ind": macro_ind,
                     "pre_result": pre_result,
                     "prepared": prepared,
+                    "tier": tier,
+                    "session": session,
+                    "news_severity": price_data.attrs.get("news_severity", 0),
+                    "atr_15m_ratio": price_data.attrs.get("atr_15m_ratio"),
                 }
                 pending_trade_contexts.append(context)
                 if prepared is not None:

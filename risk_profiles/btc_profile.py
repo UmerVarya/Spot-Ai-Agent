@@ -81,6 +81,39 @@ BNB_PROFILE = SymbolProfile(
     },
 )
 
+TIER1_PROFILE = SymbolProfile(
+    symbol="__TIER1_DEFAULT__",
+    direction="long_only",
+    min_quote_volume_1m=200_000.0,
+    avg_quote_volume_20_min=120_000.0,
+    vol_expansion_min=1.03,
+    atr_min_ratio=0.50,
+    min_score_for_trade=4.0,
+    session_multipliers={"asia": 0.85, "europe": 1.0, "us": 1.10},
+)
+
+TIER2_PROFILE = SymbolProfile(
+    symbol="__TIER2_DEFAULT__",
+    direction="long_only",
+    min_quote_volume_1m=120_000.0,
+    avg_quote_volume_20_min=70_000.0,
+    vol_expansion_min=1.02,
+    atr_min_ratio=0.45,
+    min_score_for_trade=3.9,
+    session_multipliers={"asia": 0.9, "europe": 1.0, "us": 1.08},
+)
+
+TIER3_PROFILE = SymbolProfile(
+    symbol="__TIER3_DEFAULT__",
+    direction="long_only",
+    min_quote_volume_1m=60_000.0,
+    avg_quote_volume_20_min=40_000.0,
+    vol_expansion_min=1.00,  # just requires "normal" volume
+    atr_min_ratio=0.40,
+    min_score_for_trade=3.8,
+    session_multipliers={"asia": 0.95, "europe": 1.0, "us": 1.05},
+)
+
 
 def get_btc_profile() -> SymbolProfile:
     """Return the static BTCUSDT profile."""
@@ -104,3 +137,16 @@ def get_bnb_profile() -> SymbolProfile:
     """Return the static BNBUSDT profile."""
 
     return BNB_PROFILE
+
+
+def get_tier_profile(tier: str) -> SymbolProfile:
+    """Return the default tier profile for ``tier``."""
+
+    normalized = (tier or "").upper()
+    if normalized == "TIER1":
+        return TIER1_PROFILE
+    if normalized == "TIER2":
+        return TIER2_PROFILE
+    if normalized == "TIER3":
+        return TIER3_PROFILE
+    return TIER3_PROFILE

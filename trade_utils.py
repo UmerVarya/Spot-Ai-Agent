@@ -29,6 +29,7 @@ from risk_profiles import (
     get_eth_profile,
     get_sol_profile,
     get_bnb_profile,
+    get_tier_profile,
 )
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
@@ -74,6 +75,36 @@ STABLECOIN_BASES: set[str] = {
     "TRYB",
     "EURS",
 }
+
+_SYMBOL_TIER_MAP: Dict[str, str] = {}
+
+
+def set_symbol_tiers(tier_mapping: Optional[Mapping[str, str]]) -> None:
+    """Update the in-memory symbol→tier lookup used by evaluators."""
+
+    global _SYMBOL_TIER_MAP
+    if not tier_mapping:
+        _SYMBOL_TIER_MAP = {}
+        return
+
+    updated: Dict[str, str] = {}
+    for sym, tier in tier_mapping.items():
+        if sym is None or tier is None:
+            continue
+        sym_key = str(sym).upper().strip()
+        tier_value = str(tier).upper().strip()
+        if not sym_key or not tier_value:
+            continue
+        updated[sym_key] = tier_value
+    _SYMBOL_TIER_MAP = updated
+
+
+def get_symbol_tier(symbol: str) -> Optional[str]:
+    """Return the cached tier classification for ``symbol`` if available."""
+
+    if not symbol:
+        return None
+    return _SYMBOL_TIER_MAP.get(str(symbol).upper())
 
 
 def is_stable_symbol(symbol: str) -> bool:
@@ -135,8 +166,6 @@ def passes_volume_gate(
 ) -> bool:
     """Return True if the symbol satisfies dynamic + profile-specific volume guards."""
 
-    del context  # context reserved for future use; keeps signature stable
-
     symbol_token = (symbol or "").upper()
     try:
         last_volume = float(last_quote_vol)
@@ -162,6 +191,16 @@ def passes_volume_gate(
         profile = get_sol_profile()
     elif symbol_token == "BNBUSDT":
         profile = get_bnb_profile()
+    else:
+        tier = None
+        if context:
+            raw_tier = context.get("tier")
+            if isinstance(raw_tier, str) and raw_tier:
+                tier = raw_tier.upper()
+        if not tier:
+            tier = get_symbol_tier(symbol_token)
+        if tier:
+            profile = get_tier_profile(tier)
 
     if profile is not None:
         vol_expansion = last_volume / max(avg_volume, 1e-9)
@@ -1557,6 +1596,9 @@ def evaluate_signal(
             logger.debug("[DEBUG] Skipping %s: missing columns %s.", symbol, ', '.join(sorted(missing)))
             return 0, None, 0, None
 
+        symbol_token = str(symbol or "").upper()
+        symbol_tier = get_symbol_tier(symbol_token)
+
         price_data = price_data.replace([np.inf, -np.inf], np.nan)
         price_data = price_data.dropna(subset=['high', 'low', 'close'])
 
@@ -1743,9 +1785,12 @@ def evaluate_signal(
             latest_quote_vol = 0.0
         # TRAINING_MODE support: skip volume filter when in training mode
         training_mode = os.getenv("TRAINING_MODE", "false").lower() == "true"
-        symbol_upper = symbol.upper()
+        symbol_upper = symbol_token
         if not training_mode:
-            volume_context = {"session": (session_name or "").lower()}
+            volume_context = {
+                "session": (session_name or "").lower(),
+                "tier": symbol_tier,
+            }
             if not passes_volume_gate(
                 symbol_upper,
                 latest_quote_vol,
@@ -2079,7 +2124,7 @@ def evaluate_signal(
                 return "bullish"
             return "neutral"
 
-        if symbol.upper() == "BTCUSDT" and direction == "long":
+        if symbol_upper == "BTCUSDT" and direction == "long":
             profile = get_btc_profile()
             final_score = float(normalized_score)
             session_key = (session_name or "").lower()
@@ -2130,7 +2175,7 @@ def evaluate_signal(
                 )
                 return 0, None, 0, None
 
-        if symbol.upper() == "ETHUSDT" and direction == "long":
+        if symbol_upper == "ETHUSDT" and direction == "long":
             profile = get_eth_profile()
             final_score = float(normalized_score)
 
@@ -2201,7 +2246,7 @@ def evaluate_signal(
                 )
                 return 0, None, 0, None
 
-        if symbol.upper() == "SOLUSDT" and direction == "long":
+        if symbol_upper == "SOLUSDT" and direction == "long":
             profile = get_sol_profile()
             final_score = float(normalized_score)
 
@@ -2243,7 +2288,7 @@ def evaluate_signal(
                     f"score={final_score:.2f} < min={profile_min_score:.2f}"
                 )
                 return 0, None, 0, None
-        if symbol.upper() == "BNBUSDT" and direction == "long":
+        if symbol_upper == "BNBUSDT" and direction == "long":
             profile = get_bnb_profile()
             final_score = float(normalized_score)
 
@@ -2285,6 +2330,50 @@ def evaluate_signal(
                     f"score={final_score:.2f} < min={profile_min_score:.2f}"
                 )
                 return 0, None, 0, None
+        if direction == "long" and symbol_tier and symbol_upper not in {
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "BNBUSDT",
+        }:
+            profile = get_tier_profile(symbol_tier)
+            final_score = float(normalized_score)
+            session_key = (session_name or "").lower()
+            multiplier = profile.session_multipliers.get(session_key)
+            if multiplier is not None:
+                final_score *= multiplier
+
+            atr_ratio_raw = price_data.attrs.get("atr_15m_ratio")
+            try:
+                atr_ratio = float(atr_ratio_raw)
+            except (TypeError, ValueError):
+                atr_ratio = None
+            if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
+                final_score -= 0.2
+
+            news_raw = price_data.attrs.get("news_severity", 0)
+            try:
+                news_severity = int(float(news_raw))
+            except (TypeError, ValueError):
+                news_severity = 0
+
+            if news_severity >= 3:
+                return 0, None, 0, None
+
+            profile_min_score = profile.min_score_for_trade
+            if news_severity == 2:
+                profile_min_score = max(
+                    profile_min_score, profile.min_score_for_trade + 0.2
+                )
+
+            final_score = max(final_score, 0.0)
+            if final_score < profile_min_score:
+                logger.info(
+                    f"[TIER SCORE GATE] Skipping {symbol_upper} (tier={symbol_tier}): "
+                    f"score={final_score:.2f} < min={profile_min_score:.2f}"
+                )
+                return 0, None, 0, None
+
         zones = detect_support_resistance_zones(price_data)
         zones = zones.to_dict() if isinstance(zones, pd.Series) else (zones or {"support": [], "resistance": []})
         current_price = float(close.iloc[-1])
