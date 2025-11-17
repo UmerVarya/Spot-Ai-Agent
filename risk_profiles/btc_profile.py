@@ -47,6 +47,21 @@ ETH_PROFILE = SymbolProfile(
     },
 )
 
+SOL_PROFILE = SymbolProfile(
+    symbol="SOLUSDT",
+    direction="long_only",
+    min_quote_volume_1m=300_000.0,
+    avg_quote_volume_20_min=200_000.0,
+    vol_expansion_min=1.03,
+    atr_min_ratio=0.50,
+    min_score_for_trade=4.0,
+    session_multipliers={
+        "asia": 0.9,
+        "europe": 1.0,
+        "us": 1.15,
+    },
+)
+
 
 def get_btc_profile() -> SymbolProfile:
     """Return the static BTCUSDT profile."""
@@ -58,3 +73,9 @@ def get_eth_profile() -> SymbolProfile:
     """Return the static ETHUSDT profile."""
 
     return ETH_PROFILE
+
+
+def get_sol_profile() -> SymbolProfile:
+    """Return the static SOLUSDT profile."""
+
+    return SOL_PROFILE
