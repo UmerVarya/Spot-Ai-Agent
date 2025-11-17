@@ -68,6 +68,14 @@ from datetime import datetime
 from typing import Any, Dict, Mapping, Optional, Set, Tuple
 
 from ws_price_bridge import WSPriceBridge
+from decision_metrics import (
+    log_decision_breakdown,
+    maybe_log_summary,
+    new_decision_breakdown,
+    record_signal_evaluated,
+    record_skip_reason,
+    record_trade_opened,
+)
 
 # Centralized configuration loader
 import config
@@ -1681,6 +1689,18 @@ def run_agent_loop() -> None:
                     pattern_name = cached_signal.pattern
                     signal_snapshot = price_data.attrs.get("signal_features", {}) or {}
                     setup_type = signal_snapshot.get("setup_type")
+                    record_signal_evaluated()
+                    breakdown_data = price_data.attrs.get("decision_breakdown")
+                    if not isinstance(breakdown_data, dict):
+                        breakdown_data = new_decision_breakdown(symbol_key)
+                        price_data.attrs["decision_breakdown"] = breakdown_data
+                    breakdown_data["setup_type"] = breakdown_data.get("setup_type") or setup_type
+                    breakdown_data["norm_score"] = raw_score
+                    breakdown_data["pos_size"] = position_size
+                    breakdown_data["volume_ok_for_size"] = position_size > 0
+                    if breakdown_data.get("direction_raw") is None:
+                        breakdown_data["direction_raw"] = direction
+                    breakdown_data["direction_final"] = direction
                     try:
                         auction_state = get_auction_state(price_data)
                     except Exception as exc:
@@ -1751,6 +1771,10 @@ def run_agent_loop() -> None:
                             raise ValueError
                     except Exception:
                         entry_cutoff = 5.0
+                    breakdown_data["entry_cutoff"] = entry_cutoff
+                    breakdown_data["alt_adj"] = alt_adjustment
+                    breakdown_data["adjusted_score"] = adjusted_score
+                    breakdown_data["alt_adj_block"] = adjusted_score < entry_cutoff
                     should_log_decision = raw_score >= entry_cutoff
                     volume_ok = position_size > 0
                     macro_state = macro_news_assessment or {}
@@ -1759,28 +1783,63 @@ def run_agent_loop() -> None:
                         monitor_state and bool(monitor_state.get("halt_trading"))
                     )
                     cooldown_active = False
+                    breakdown_data["macro_veto"] = macro_veto_flag
+                    breakdown_data["news_veto"] = news_veto_flag
+                    breakdown_data["cooldown_block"] = cooldown_active
 
                     decision_logged = False
+                    custom_skip_reason_key = breakdown_data.get("primary_skip_reason")
+                    custom_skip_reason_text = breakdown_data.get("primary_skip_text")
 
-                    def _compute_skip_reason() -> str:
+                    def _assign_skip_reason(
+                        key: Optional[str], text: Optional[str], *, overwrite: bool = False
+                    ) -> None:
+                        nonlocal custom_skip_reason_key, custom_skip_reason_text
+                        if not overwrite and custom_skip_reason_key:
+                            return
+                        custom_skip_reason_key = key
+                        custom_skip_reason_text = text
+
+                    def _compute_skip_reason() -> tuple[str, Optional[str]]:
+                        nonlocal custom_skip_reason_key, custom_skip_reason_text
+                        if custom_skip_reason_key:
+                            return (
+                                custom_skip_reason_text or custom_skip_reason_key,
+                                custom_skip_reason_key,
+                            )
                         if adjusted_score < entry_cutoff:
-                            return "alt_adj below cutoff"
+                            custom_skip_reason_text = "alt_adj below cutoff"
+                            if alt_adjustment and alt_adjustment < 0:
+                                custom_skip_reason_key = "alt_adj_block"
+                            else:
+                                custom_skip_reason_key = "low_score"
+                            return custom_skip_reason_text, custom_skip_reason_key
                         if not volume_ok:
-                            return "volume gate failed"
+                            custom_skip_reason_key = "pos_size_zero"
+                            custom_skip_reason_text = "volume gate failed"
+                            return custom_skip_reason_text, custom_skip_reason_key
                         if macro_veto_flag:
-                            return "macro veto"
+                            custom_skip_reason_key = "macro_veto"
+                            custom_skip_reason_text = "macro veto"
+                            return custom_skip_reason_text, custom_skip_reason_key
                         if news_veto_flag:
-                            return "news veto"
+                            custom_skip_reason_key = "news_veto"
+                            custom_skip_reason_text = "news veto"
+                            return custom_skip_reason_text, custom_skip_reason_key
                         if cooldown_active:
-                            return "cooldown in effect"
-                        return "other guard"
+                            custom_skip_reason_key = "cooldown_block"
+                            custom_skip_reason_text = "cooldown in effect"
+                            return custom_skip_reason_text, custom_skip_reason_key
+                        custom_skip_reason_key = "other_guard"
+                        custom_skip_reason_text = "other guard"
+                        return custom_skip_reason_text, custom_skip_reason_key
 
                     def _log_decision(decision_type: str) -> None:
                         nonlocal decision_logged
                         if decision_logged or not should_log_decision:
                             return
                         if decision_type == "skip":
-                            reason_text = _compute_skip_reason()
+                            reason_text, _ = _compute_skip_reason()
                             logger.info(
                                 "[DECISION] SKIP %s | raw=%.2f alt_adj=%.2f cutoff=%.2f size=%.1f dir=%s | "
                                 "volume_ok=%s macro_veto=%s news_veto=%s cooldown=%s reason=%s",
@@ -1805,8 +1864,37 @@ def run_agent_loop() -> None:
                                 entry_cutoff,
                                 position_size,
                                 direction,
-                            )
+                        )
                         decision_logged = True
+
+                    metrics_logged = False
+
+                    def _emit_metrics(decision_type: str) -> None:
+                        nonlocal metrics_logged
+                        if metrics_logged:
+                            return
+                        breakdown_data["decision_type"] = decision_type
+                        breakdown_data["adjusted_score"] = adjusted_score
+                        breakdown_data["alt_adj"] = alt_adjustment
+                        breakdown_data["alt_adj_block"] = adjusted_score < entry_cutoff
+                        breakdown_data["macro_veto"] = macro_veto_flag
+                        breakdown_data["news_veto"] = news_veto_flag
+                        breakdown_data["cooldown_block"] = cooldown_active
+                        breakdown_data["pos_size"] = position_size
+                        breakdown_data["volume_ok_for_size"] = position_size > 0
+                        breakdown_data["direction_final"] = direction
+                        breakdown_data["forced_long_applied"] = (
+                            breakdown_data.get("direction_raw") is None and direction == "long"
+                        )
+                        if decision_type == "skip":
+                            reason_text, reason_key = _compute_skip_reason()
+                            breakdown_data["primary_skip_reason"] = reason_key
+                            breakdown_data["primary_skip_text"] = reason_text
+                            record_skip_reason(reason_key)
+                        else:
+                            record_trade_opened()
+                        log_decision_breakdown(symbol_key, signal_snapshot, breakdown_data)
+                        metrics_logged = True
 
                     pattern_lower = (pattern_name or "").lower()
                     setup_lower = (setup_type or "").lower() if isinstance(setup_type, str) else ""
@@ -1822,7 +1910,10 @@ def run_agent_loop() -> None:
                             pattern_name or "none",
                             setup_type or "unknown",
                         )
+                        breakdown_data["auction_guard_pass"] = False
+                        _assign_skip_reason("auction_guard_fail", "auction guard veto")
                         _log_decision("skip")
+                        _emit_metrics("skip")
                         continue
                     logger.info(
                         "%s: Score=%.2f (alt_adj=%.2f), Direction=%s, Pattern=%s, PosSize=%s, AuctionState=%s (age=%.2fs)",
@@ -1850,15 +1941,23 @@ def run_agent_loop() -> None:
                             score,
                         )
                         direction = "long"
+                    breakdown_data["direction_final"] = direction
                     if direction != "long" or position_size <= 0:
                         skip_reasons: list[str] = []
                         if direction != "long":
                             if direction is None:
                                 skip_reasons.append("no long signal (score below cutoff)")
+                                _assign_skip_reason(
+                                    "direction_none",
+                                    "direction from evaluator was None",
+                                )
                             else:
                                 skip_reasons.append("direction not long")
+                                _assign_skip_reason("direction_mismatch", "direction not long")
                         if position_size <= 0:
                             volume_ok = False
+                            breakdown_data["volume_ok_for_size"] = False
+                            _assign_skip_reason("pos_size_zero", "zero position (low confidence)")
                             skip_reasons.append("zero position (low confidence)")
                         reason_text = " and ".join(skip_reasons) if skip_reasons else "not eligible"
                         logger.info(
@@ -1870,6 +1969,7 @@ def run_agent_loop() -> None:
                             score,
                         )
                         _log_decision("skip")
+                        _emit_metrics("skip")
                         continue
                     flow_analysis = detect_aggression(
                         price_data,
@@ -1896,6 +1996,7 @@ def run_agent_loop() -> None:
                                 symbol,
                             )
                             _log_decision("skip")
+                            _emit_metrics("skip")
                             continue
                         lvn_touch = volume_profile_result.touched_lvn(
                             close=last_close or 0.0,
@@ -1909,6 +2010,7 @@ def run_agent_loop() -> None:
                                 auction_state,
                             )
                             _log_decision("skip")
+                            _emit_metrics("skip")
                             continue
                         if flow_status != "buyers in control":
                             logger.info(
@@ -1917,6 +2019,7 @@ def run_agent_loop() -> None:
                                 flow_status,
                             )
                             _log_decision("skip")
+                            _emit_metrics("skip")
                             continue
                     elif auction_state in {"out_of_balance_revert", "balanced"}:
                         volume_profile_result = compute_reversion_leg_volume_profile(price_data)
@@ -1927,6 +2030,7 @@ def run_agent_loop() -> None:
                                 auction_state,
                             )
                             _log_decision("skip")
+                            _emit_metrics("skip")
                             continue
                         lvn_touch = volume_profile_result.touched_lvn(
                             close=last_close or 0.0,
@@ -1939,6 +2043,7 @@ def run_agent_loop() -> None:
                                 symbol,
                             )
                             _log_decision("skip")
+                            _emit_metrics("skip")
                             continue
                         if flow_status != "buyers in control":
                             logger.info(
@@ -1947,6 +2052,7 @@ def run_agent_loop() -> None:
                                 flow_status,
                             )
                             _log_decision("skip")
+                            _emit_metrics("skip")
                             continue
                     else:
                         if flow_status == "sellers in control":
@@ -1955,6 +2061,7 @@ def run_agent_loop() -> None:
                                 symbol,
                             )
                     _log_decision("enter")
+                    _emit_metrics("enter")
                     potential_trades.append(
                         {
                             "symbol": symbol,
@@ -1982,6 +2089,9 @@ def run_agent_loop() -> None:
                 except Exception as e:
                     logger.error("Error evaluating %s: %s", symbol, e, exc_info=True)
                     continue
+                finally:
+                    maybe_log_summary()
+            maybe_log_summary()
             if not symbol_scores:
                 if cache_miss_symbols:
                     diagnostics = signal_cache.pending_diagnostics()
