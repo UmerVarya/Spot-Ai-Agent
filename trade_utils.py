@@ -24,7 +24,7 @@ except Exception:
 
 from trade_storage import TRADE_HISTORY_FILE, load_trade_history_df  # shared trade log path
 
-from risk_profiles import get_btc_profile, get_eth_profile
+from risk_profiles import get_btc_profile, get_eth_profile, get_sol_profile
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
 from multi_timeframe import (
@@ -119,6 +119,70 @@ def filter_stable_symbols(symbols: Iterable[str]) -> list[str]:
             sorted(removed),
         )
     return filtered
+
+
+def passes_volume_gate(
+    symbol: str,
+    last_quote_vol: float,
+    avg20_quote_vol: float,
+    session_weight: float,
+    context: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Return True if the symbol satisfies dynamic + profile-specific volume guards."""
+
+    del context  # context reserved for future use; keeps signature stable
+
+    symbol_token = (symbol or "").upper()
+    try:
+        last_volume = float(last_quote_vol)
+    except (TypeError, ValueError):
+        last_volume = 0.0
+    try:
+        avg_volume = float(avg20_quote_vol)
+    except (TypeError, ValueError):
+        avg_volume = 0.0
+    try:
+        weight = float(session_weight)
+    except (TypeError, ValueError):
+        weight = 0.0
+
+    dynamic_threshold = max(avg_volume * weight, 50_000.0)
+
+    profile = None
+    if symbol_token == "BTCUSDT":
+        profile = get_btc_profile()
+    elif symbol_token == "ETHUSDT":
+        profile = get_eth_profile()
+    elif symbol_token == "SOLUSDT":
+        profile = get_sol_profile()
+
+    if profile is not None:
+        vol_expansion = last_volume / max(avg_volume, 1e-9)
+        effective_floor = max(dynamic_threshold, profile.min_quote_volume_1m)
+
+        if (
+            last_volume < profile.min_quote_volume_1m
+            or avg_volume < profile.avg_quote_volume_20_min
+            or vol_expansion < profile.vol_expansion_min
+        ):
+            tag = symbol_token.replace("USDT", "")
+            logger.info(
+                f"[{tag} VOL GATE] Skipping {symbol_token}: "
+                f"last={last_volume:.0f}, avg20={avg_volume:.0f}, "
+                f"expansion={vol_expansion:.2f}, floor={profile.min_quote_volume_1m:.0f}"
+            )
+            return False
+    else:
+        effective_floor = dynamic_threshold
+
+    if last_volume < effective_floor:
+        logger.info(
+            f"[VOL GATE] Skipping {symbol_token}: "
+            f"last={last_volume:.0f} < floor={effective_floor:.0f}"
+        )
+        return False
+
+    return True
 
 # Maximum age (seconds) of WebSocket order book data before we consider it stale.
 _STREAM_STALENESS_MAX_SECONDS = 5.0
@@ -1670,52 +1734,19 @@ def evaluate_signal(
             latest_quote_vol = float(latest_quote_vol)
         except (TypeError, ValueError):
             latest_quote_vol = 0.0
-        dynamic_threshold = max(vol_factor * avg_quote_vol_20, 50_000.0)
-        vol_expansion = 0.0
-        if avg_quote_vol_20 > 0:
-            vol_expansion = latest_quote_vol / max(avg_quote_vol_20, 1e-9)
-
         # TRAINING_MODE support: skip volume filter when in training mode
         training_mode = os.getenv("TRAINING_MODE", "false").lower() == "true"
         symbol_upper = symbol.upper()
-        effective_floor = dynamic_threshold
         if not training_mode:
-            if symbol_upper == "BTCUSDT":
-                profile = get_btc_profile()
-                effective_floor = max(dynamic_threshold, profile.min_quote_volume_1m)
-                if (
-                    latest_quote_vol < profile.min_quote_volume_1m
-                    or avg_quote_vol_20 < profile.avg_quote_volume_20_min
-                    or vol_expansion < profile.vol_expansion_min
-                ):
-                    logger.info(
-                        f"[BTC VOL GATE] Skipping BTCUSDT: "
-                        f"last={latest_quote_vol:.0f}, avg20={avg_quote_vol_20:.0f}, "
-                        f"expansion={vol_expansion:.2f}, floor={profile.min_quote_volume_1m:.0f}"
-                    )
-                    return 0, None, 0, None
-            elif symbol_upper == "ETHUSDT":
-                profile = get_eth_profile()
-                effective_floor = max(dynamic_threshold, profile.min_quote_volume_1m)
-                if (
-                    latest_quote_vol < profile.min_quote_volume_1m
-                    or avg_quote_vol_20 < profile.avg_quote_volume_20_min
-                    or vol_expansion < profile.vol_expansion_min
-                ):
-                    logger.info(
-                        f"[ETH VOL GATE] Skipping ETHUSDT: "
-                        f"last={latest_quote_vol:.0f}, avg20={avg_quote_vol_20:.0f}, "
-                        f"expansion={vol_expansion:.2f}, floor={profile.min_quote_volume_1m:.0f}"
-                    )
-                    return 0, None, 0, None
-        if not training_mode and latest_quote_vol < effective_floor:
-            logger.info(
-                "Skipping due to low volume: %s < %s (%s%% of 20-bar avg)",
-                f"{latest_quote_vol:,.0f}",
-                f"{effective_floor:,.0f}",
-                f"{vol_factor*100:.0f}",
-            )
-            return 0, None, 0, None
+            volume_context = {"session": (session_name or "").lower()}
+            if not passes_volume_gate(
+                symbol_upper,
+                latest_quote_vol,
+                avg_quote_vol_20,
+                vol_factor,
+                volume_context,
+            ):
+                return 0, None, 0, None
 
         base_weights = {
             "ema": 1.4,
@@ -2057,7 +2088,6 @@ def evaluate_signal(
             if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
                 final_score -= 0.5
 
-            trend_1h_state = _trend_state(ema_trend_1h, strong_threshold=0.0005)
             trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
             if trend_1h_state not in ("bullish", "neutral"):
                 return 0, None, 0, None
@@ -2110,7 +2140,6 @@ def evaluate_signal(
             if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
                 final_score -= 0.3
 
-            trend_1h_state = _trend_state(ema_trend_1h, strong_threshold=0.0005)
             trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
 
             if trend_4h_state == "strong_bearish":
@@ -2161,6 +2190,49 @@ def evaluate_signal(
             if final_score < profile_min_score:
                 logger.info(
                     f"[ETH SCORE GATE] Skipping ETHUSDT: "
+                    f"score={final_score:.2f} < min={profile_min_score:.2f}"
+                )
+                return 0, None, 0, None
+
+        if symbol.upper() == "SOLUSDT" and direction == "long":
+            profile = get_sol_profile()
+            final_score = float(normalized_score)
+
+            session_key = (session_name or "").lower()
+            multiplier = profile.session_multipliers.get(session_key)
+            if multiplier is not None:
+                final_score *= multiplier
+
+            atr_ratio_raw = price_data.attrs.get("atr_15m_ratio")
+            try:
+                atr_ratio = float(atr_ratio_raw)
+            except (TypeError, ValueError):
+                atr_ratio = None
+            if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
+                final_score -= 0.3
+
+            trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
+
+            news_raw = price_data.attrs.get("news_severity", 0)
+            try:
+                news_severity = int(float(news_raw))
+            except (TypeError, ValueError):
+                news_severity = 0
+
+            if trend_4h_state == "strong_bearish":
+                return 0, None, 0, None
+
+            if news_severity >= 3:
+                return 0, None, 0, None
+
+            profile_min_score = profile.min_score_for_trade
+            if news_severity == 2:
+                profile_min_score = max(profile_min_score, 4.4)
+
+            final_score = max(final_score, 0.0)
+            if final_score < profile_min_score:
+                logger.info(
+                    f"[SOL SCORE GATE] Skipping SOLUSDT: "
                     f"score={final_score:.2f} < min={profile_min_score:.2f}"
                 )
                 return 0, None, 0, None
