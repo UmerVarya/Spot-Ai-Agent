@@ -62,6 +62,25 @@ SOL_PROFILE = SymbolProfile(
     },
 )
 
+BNB_PROFILE = SymbolProfile(
+    symbol="BNBUSDT",
+    direction="long_only",
+    # BNB is very liquid but calmer than SOL/ETH
+    min_quote_volume_1m=250_000.0,
+    avg_quote_volume_20_min=150_000.0,
+    # BNB doesn't need huge expansion; just avoid dead tape
+    vol_expansion_min=1.02,
+    # Comfortable in slightly quieter volatility regimes
+    atr_min_ratio=0.45,
+    # Easier to trade than BTC/ETH; similar or slightly easier than SOL
+    min_score_for_trade=4.0,
+    session_multipliers={
+        "asia": 0.95,
+        "europe": 1.0,
+        "us": 1.10,
+    },
+)
+
 
 def get_btc_profile() -> SymbolProfile:
     """Return the static BTCUSDT profile."""
@@ -79,3 +98,9 @@ def get_sol_profile() -> SymbolProfile:
     """Return the static SOLUSDT profile."""
 
     return SOL_PROFILE
+
+
+def get_bnb_profile() -> SymbolProfile:
+    """Return the static BNBUSDT profile."""
+
+    return BNB_PROFILE
