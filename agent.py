@@ -1798,6 +1798,7 @@ def run_agent_loop() -> None:
                     breakdown_data["cooldown_block"] = cooldown_active
 
                     decision_logged = False
+                    last_decision_type: Optional[str] = None
                     custom_skip_reason_key = breakdown_data.get("primary_skip_reason")
                     custom_skip_reason_text = breakdown_data.get("primary_skip_text")
 
@@ -1878,7 +1879,8 @@ def run_agent_loop() -> None:
                         decision_logged = True
 
                     def _emit_metrics(decision_type: str) -> None:
-                        nonlocal metrics_logged, breakdown_data
+                        nonlocal metrics_logged, breakdown_data, last_decision_type
+                        last_decision_type = decision_type
                         if metrics_logged:
                             return
                         try:
@@ -2190,7 +2192,12 @@ def run_agent_loop() -> None:
                         and not metrics_logged
                     ):
                         try:
-                            _emit_metrics("skip")
+                            fallback_decision_type = (
+                                last_decision_type
+                                or breakdown_data.get("decision_type")
+                                or "skip"
+                            )
+                            _emit_metrics(fallback_decision_type)
                         except Exception:
                             logger.warning(
                                 "Final decision metric emission failed for %s", symbol_key,
