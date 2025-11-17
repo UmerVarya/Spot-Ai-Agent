@@ -36,7 +36,7 @@ ETH_PROFILE = SymbolProfile(
     symbol="ETHUSDT",
     direction="long_only",
     min_quote_volume_1m=400_000.0,
-    avg_quote_volume_20_min=250_000.0,
+    avg_quote_volume_20_min=200_000.0,
     vol_expansion_min=1.02,
     atr_min_ratio=0.50,
     min_score_for_trade=4.2,
@@ -51,7 +51,7 @@ SOL_PROFILE = SymbolProfile(
     symbol="SOLUSDT",
     direction="long_only",
     min_quote_volume_1m=120_000.0,
-    avg_quote_volume_20_min=80_000.0,
+    avg_quote_volume_20_min=70_000.0,
     vol_expansion_min=1.01,
     atr_min_ratio=0.50,
     min_score_for_trade=4.0,
@@ -67,7 +67,7 @@ BNB_PROFILE = SymbolProfile(
     direction="long_only",
     # BNB is very liquid but calmer than SOL/ETH
     min_quote_volume_1m=100_000.0,
-    avg_quote_volume_20_min=60_000.0,
+    avg_quote_volume_20_min=50_000.0,
     # BNB doesn't need huge expansion; just avoid dead tape
     vol_expansion_min=1.00,
     # Comfortable in slightly quieter volatility regimes
