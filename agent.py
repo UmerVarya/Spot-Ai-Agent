@@ -1677,6 +1677,7 @@ def run_agent_loop() -> None:
                 custom_skip_reason_text: Optional[str] = None
                 metrics_logged = False
                 evaluation_started = False
+                last_decision_type: Optional[str] = None
                 try:
                     cached_signal = signal_cache.get(symbol)
                     if cached_signal is None:
@@ -1798,7 +1799,6 @@ def run_agent_loop() -> None:
                     breakdown_data["cooldown_block"] = cooldown_active
 
                     decision_logged = False
-                    last_decision_type: Optional[str] = None
                     custom_skip_reason_key = breakdown_data.get("primary_skip_reason")
                     custom_skip_reason_text = breakdown_data.get("primary_skip_text")
 
