@@ -1,117 +1,231 @@
 #!/usr/bin/env python3
-"""Analyze skip decisions exported by ``parse_skips.py``.
-
-This helper expects ``analysis_logs/skip_decisions_parsed.csv`` to be populated by
-``opt/spot-agent/parse_skips.py``.  It aggregates the cleaned skip reasons and
-prints the most common entries to STDOUT so we can quickly spot recurring
-issues.
-"""
+"""Analyze parsed skip decisions and bucket them into high-level reasons."""
 
 from __future__ import annotations
 
-from pathlib import Path
+import collections
+import csv
+import os
+import sys
+from typing import Dict, Iterable, Tuple
 
-import pandas as pd
+# Where parse_skips.py writes the CSV
+DEFAULT_CSV_PATH = "analysis_logs/skip_decisions_parsed.csv"
+CSV_PATH = os.getenv("SKIP_DECISIONS_CSV", DEFAULT_CSV_PATH)
 
-CSV_PATH = Path("analysis_logs/skip_decisions_parsed.csv")
+# High-level buckets + the substrings that should map into them.
+# You can safely extend/tune this list as we learn more patterns.
+BUCKET_SUBSTRINGS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    (
+        "low_score",
+        (
+            "below min_score",
+            "below min score",
+            "score too low",
+            "score <",  # e.g. "score 2.3 < min_score 3.0"
+            "insufficient score",
+        ),
+    ),
+    (
+        "low_volume",
+        (
+            "low volume",
+            "volume gate",
+            "volume below threshold",
+            "quote volume",
+            "insufficient liquidity",
+            "volume <",
+            "skipping due to low volume",
+        ),
+    ),
+    (
+        "macro_news",
+        (
+            "macro halt",
+            "macro gate",
+            "macro bias",
+            "news halt",
+            "news risk",
+            "news veto",
+        ),
+    ),
+    (
+        "cooldown",
+        (
+            "cooldown",
+            "in cooldown window",
+            "recent exit",
+            "cool-down",
+        ),
+    ),
+    (
+        "risk_veto",
+        (
+            "risk veto",
+            "llm veto",
+            "vetoed by",
+            "risk engine veto",
+        ),
+    ),
+    (
+        "concurrency",
+        (
+            "max concurrent",
+            "too many open trades",
+            "concurrency limit",
+            "existing open trade",
+        ),
+    ),
+    (
+        "session_filter",
+        (
+            "session filter",
+            "asia session",
+            "europe session",
+            "us session",
+            "session bias",
+        ),
+    ),
+    (
+        "symbol_filter",
+        (
+            "blacklist",
+            "stablecoin",
+            "skipping stablecoin",
+            "symbol filter",
+            "excluded symbol",
+        ),
+    ),
+    (
+        "data_not_ready",
+        (
+            "cache not warm",
+            "signal cache not ready",
+            "insufficient history",
+            "no candles",
+            "missing cache",
+        ),
+    ),
+    (
+        "ws_down",
+        (
+            "websocket",
+            "ws bridge",
+            "no live prices",
+            "stream down",
+        ),
+    ),
+)
 
 
-def bucket_reason(raw_reason: str) -> str:
-    """Map a raw skip reason string into a coarse bucket."""
-    if not isinstance(raw_reason, str):
-        return "other"
+def _pick_reason_column(fieldnames: Iterable[str]) -> str:
+    """Try to pick the column that stores the textual reason string."""
 
-    text = raw_reason.lower()
+    candidates = [
+        "decision_reason",
+        "raw_reason",
+        "reason",
+        "reason_text",
+    ]
+    lower_map = {name.lower(): name for name in fieldnames}
 
-    # score / confidence related
-    if "score below cutoff" in text or "no long signal" in text:
-        return "score_below_cutoff"
-    if "zero position (low confidence)" in text or "low confidence" in text:
-        # still treat as score/pos-size issue
-        return "score_below_cutoff"
+    for wanted in candidates:
+        if wanted.lower() in lower_map:
+            return lower_map[wanted.lower()]
 
-    # volume gates
-    if "vol gate" in text or "volume gate" in text or "floor=" in text:
-        return "volume_gate"
+    for name in fieldnames:
+        if "reason" in name.lower():
+            return name
 
-    # spread / liquidity
-    if "spread" in text and "% of price" in text:
-        return "spread_gate"
+    return ""
 
-    # order book imbalance
-    if "order book imbalance" in text or "obi" in text:
-        return "orderbook_imbalance"
 
-    # macro / news veto
-    if "macro veto" in text or "news veto" in text or "news halt" in text:
-        return "macro_news_veto"
+def _bucket_from_substrings(reason: str) -> str:
+    """Bucket a free-form reason string using BUCKET_SUBSTRINGS."""
 
-    # profile / per-symbol min score
-    if "profile min score" in text or "below profile minimum" in text:
-        return "profile_min_score"
+    if not reason:
+        return "unknown"
 
-    # cooldown / auction state
-    if "cooldown" in text:
-        return "cooldown"
-    if "auctionstate=balanced" in text or "balanced auction" in text:
-        return "auction_state_guard"
+    r = reason.lower()
+    for bucket, needles in BUCKET_SUBSTRINGS:
+        if any(n in r for n in needles):
+            return bucket
 
     return "other"
 
 
-def load_skip_decisions(csv_path: Path = CSV_PATH) -> pd.DataFrame:
-    """Load the exported skip decisions and normalize the raw reason strings."""
-    if not csv_path.exists():
-        raise FileNotFoundError(
-            f"Skip decision export not found: {csv_path}. Run parse_skips.py first."
+def _bucket_for_row(row: Dict[str, str], reason_col: str, bucket_col: str) -> Tuple[str, str]:
+    """Decide the bucket for a row. Returns (bucket, reason_string)."""
+
+    existing_bucket = ""
+    if bucket_col:
+        existing_bucket = (row.get(bucket_col) or "").strip()
+
+    if existing_bucket and existing_bucket.lower() not in ("", "other", "unknown"):
+        return existing_bucket.strip(), row.get(reason_col, "").strip()
+
+    reason = (row.get(reason_col) or "").strip() if reason_col else ""
+    bucket = _bucket_from_substrings(reason)
+    return bucket, reason
+
+
+def analyze(csv_path: str) -> None:
+    if not os.path.exists(csv_path):
+        print(f"[ERROR] CSV file not found: {csv_path}", file=sys.stderr)
+        sys.exit(1)
+
+    counts = collections.Counter()
+    other_reasons = collections.Counter()
+    total = 0
+
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            print("[ERROR] CSV has no header/fieldnames.", file=sys.stderr)
+            sys.exit(1)
+
+        fieldnames = reader.fieldnames
+        reason_col = _pick_reason_column(fieldnames)
+        bucket_col = "bucket" if "bucket" in fieldnames else ""
+
+        if not reason_col:
+            print(
+                f"[WARN] Could not find a 'reason' column in {csv_path}. Fields: {fieldnames}",
+                file=sys.stderr,
+            )
+
+        for row in reader:
+            total += 1
+            bucket, raw_reason = _bucket_for_row(row, reason_col, bucket_col)
+            counts[bucket] += 1
+            if bucket == "other":
+                other_reasons[raw_reason or "<EMPTY>"] += 1
+
+    if not total:
+        print("[INFO] No rows found in skip_decisions CSV.")
+        return
+
+    print("Top skip reasons (bucket, count, pct_of_total):")
+    for bucket, count in counts.most_common():
+        pct = (count / total) * 100.0
+        print(f"{bucket:15s} {count:6d} ({pct:6.2f}%)")
+
+    top_bucket, top_count = counts.most_common(1)[0]
+    if top_bucket == "other" and top_count >= 0.8 * total:
+        print(
+            "\n[DEBUG] 'other' is dominating; here are the most common raw "
+            "reason strings inside the 'other' bucket:\n"
         )
-
-    df = pd.read_csv(csv_path)
-
-    required_cols = {"symbol", "direction", "size", "score", "raw_reason"}
-    missing = required_cols.difference(df.columns)
-    if missing:
-        raise ValueError(
-            "Skip decision export is missing expected columns: " + ", ".join(sorted(missing))
-        )
-
-    df["raw_reason"] = df["raw_reason"].fillna("").astype(str).str.strip()
-
-    # Ensure numeric fields are numeric so downstream stats (histograms, etc.) work.
-    df["score"] = pd.to_numeric(df["score"], errors="coerce")
-    df["size"] = pd.to_numeric(df["size"], errors="coerce")
-
-    return df
-
-
-def summarize_reason_buckets(df: pd.DataFrame) -> pd.DataFrame:
-    total = len(df)
-    if total == 0:
-        return pd.DataFrame(columns=["bucket", "count", "pct_of_total"])
-
-    summary = (
-        df.groupby("bucket")
-        .size()
-        .reset_index(name="count")
-        .sort_values("count", ascending=False)
-    )
-    summary["pct_of_total"] = summary["count"] / float(total)
-    return summary
+        for reason, count in other_reasons.most_common(25):
+            pct = (count / total) * 100.0
+            print(f"- {count:6d} ({pct:6.2f}%): {reason}")
 
 
 def main() -> None:
-    df = load_skip_decisions()
-    if df.empty:
-        print("No skip decisions found in export.")
-        return
-
-    df["bucket"] = df["raw_reason"].apply(bucket_reason)
-
-    summary = summarize_reason_buckets(df)
-
-    print("Top skip reasons (bucket, count, pct_of_total):")
-    for _, row in summary.iterrows():
-        print(f"{row['bucket']}: {row['count']} ({row['pct_of_total']:.2%})")
+    csv_path = CSV_PATH
+    if len(sys.argv) > 1:
+        csv_path = sys.argv[1]
+    analyze(csv_path)
 
 
 if __name__ == "__main__":
