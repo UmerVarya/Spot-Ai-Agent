@@ -7,7 +7,7 @@ import tempfile
 import time
 import random
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Any, Mapping, Callable, Tuple, TypeVar, Dict, Iterable
 import traceback
 import asyncio
@@ -168,6 +168,7 @@ def passes_volume_gate(
     """Return True if the symbol satisfies dynamic + profile-specific volume guards."""
 
     symbol_token = (symbol or "").upper()
+    meta = context if isinstance(context, dict) else {}
     try:
         last_volume = float(last_quote_vol)
     except (TypeError, ValueError):
@@ -182,6 +183,13 @@ def passes_volume_gate(
         weight = 0.0
 
     dynamic_threshold = max(avg_volume * weight, 50_000.0)
+    meta["last_quote_vol_1m"] = last_volume
+    meta["avg_quote_vol_20m"] = avg_volume
+    meta["session_volume_floor"] = dynamic_threshold
+    meta.setdefault("absolute_volume_floor", 50_000.0)
+    meta.setdefault("profile_volume_pass", True)
+    meta["volume_gate_pass"] = False
+    meta.pop("volume_gate_reason", None)
 
     profile = None
     if symbol_token == "BTCUSDT":
@@ -204,6 +212,10 @@ def passes_volume_gate(
             profile = get_tier_profile(tier)
 
     if profile is not None:
+        meta["profile_name"] = profile.symbol
+        meta["profile_min_1m_vol"] = profile.min_quote_volume_1m
+        meta["profile_min_avg20_vol"] = profile.avg_quote_volume_20_min
+        meta["profile_vol_expansion_min"] = profile.vol_expansion_min
         vol_expansion = last_volume / max(avg_volume, 1e-9)
         effective_floor = max(dynamic_threshold, profile.min_quote_volume_1m)
 
@@ -218,8 +230,13 @@ def passes_volume_gate(
                 f"last={last_volume:.0f}, avg20={avg_volume:.0f}, "
                 f"expansion={vol_expansion:.2f}, floor={profile.min_quote_volume_1m:.0f}"
             )
+            meta["profile_volume_pass"] = False
+            meta["volume_gate_reason"] = "profile_volume_floor"
             return False
     else:
+        meta.setdefault("profile_min_1m_vol", None)
+        meta.setdefault("profile_min_avg20_vol", None)
+        meta.setdefault("profile_vol_expansion_min", None)
         effective_floor = dynamic_threshold
 
     if last_volume < effective_floor:
@@ -227,8 +244,10 @@ def passes_volume_gate(
             f"[VOL GATE] Skipping {symbol_token}: "
             f"last={last_volume:.0f} < floor={effective_floor:.0f}"
         )
+        meta["volume_gate_reason"] = "absolute_volume_floor"
         return False
 
+    meta["volume_gate_pass"] = True
     return True
 
 # Maximum age (seconds) of WebSocket order book data before we consider it stale.
@@ -1597,6 +1616,8 @@ def evaluate_signal(
             logger.debug("[DEBUG] Skipping %s: missing columns %s.", symbol, ', '.join(sorted(missing)))
             return 0, None, 0, None
 
+        bars_count = len(price_data)
+
         symbol_token = str(symbol or "").upper()
         symbol_tier = get_symbol_tier(symbol_token)
         breakdown = new_decision_breakdown(symbol_token)
@@ -1669,6 +1690,7 @@ def evaluate_signal(
             price_data.attrs["poc_target"] = poc_candidate
 
         hourly_bar = price_data.attrs.get("hourly_bar")
+        hourly_bar_age_min: Optional[float] = None
         if isinstance(hourly_bar, pd.DataFrame) and not hourly_bar.empty:
             now = datetime.utcnow()
             last_hour = hourly_bar.index[-1]
@@ -1676,6 +1698,10 @@ def evaluate_signal(
             # are aligned to the candle *open* time, so the bar is considered fresh
             # for up to one hour plus a small grace window.
             max_age = timedelta(hours=1) + HOURLY_BAR_MAX_LAG
+            try:
+                hourly_bar_age_min = max((now - last_hour).total_seconds() / 60.0, 0.0)
+            except Exception:
+                hourly_bar_age_min = None
             if now - last_hour > max_age:
                 logger.warning(
                     "Skipping %s: latest 1H bar (%s) is stale (age=%s).",
@@ -1809,11 +1835,13 @@ def evaluate_signal(
         # TRAINING_MODE support: skip volume filter when in training mode
         training_mode = os.getenv("TRAINING_MODE", "false").lower() == "true"
         symbol_upper = symbol_token
+        volume_context = {
+            "session": (session_name or "").lower(),
+            "tier": symbol_tier,
+        }
+        volume_context.setdefault("volume_gate_pass", True)
+        volume_context.setdefault("profile_volume_pass", True)
         if not training_mode:
-            volume_context = {
-                "session": (session_name or "").lower(),
-                "tier": symbol_tier,
-            }
             if not passes_volume_gate(
                 symbol_upper,
                 latest_quote_vol,
@@ -1825,6 +1853,7 @@ def evaluate_signal(
                 breakdown["volume_ok_for_size"] = False
                 _set_primary_reason("volume_gate_fail", "volume gate failed")
                 return 0, None, 0, None
+        price_data.attrs["volume_context"] = dict(volume_context)
 
         base_weights = {
             "ema": 1.4,
@@ -2076,12 +2105,14 @@ def evaluate_signal(
             flow_score += 0.1
         elif price_change < 0:
             flow_score -= 0.1
+        flow_score_raw = flow_score
         flow_score = max(-1.0, min(1.0, flow_score))
         flow_flag = 0
-        if aggression.state == "buyers in control" or flow_score > 0.2:
+        flow_state_label = getattr(aggression, "state", "neutral") or "neutral"
+        if flow_state_label == "buyers in control" or flow_score > 0.2:
             flow_flag = 1
             trend_score += w["flow"] * max(flow_score, 0.0)
-        elif aggression.state == "sellers in control" or flow_score < -0.2:
+        elif flow_state_label == "sellers in control" or flow_score < -0.2:
             flow_flag = -1
             penalty_score += w["flow"] * max(-flow_score, 0.0)
         trend_weight_keys = ["ema", "macd", "rsi", "adx", "vwma", "dema", "flow", "confluence", "atr", "hurst"]
@@ -2112,6 +2143,7 @@ def evaluate_signal(
 
         setup_type = None
         normalized_score = max(trend_norm, mean_rev_norm)
+        sentiment_adjustment = 0.0
         TREND_THRESHOLD = max(5.0, dynamic_threshold - 0.5)
         MEAN_REV_THRESHOLD = max(4.5, dynamic_threshold - 1.0)
         COUNTER_TREND_THRESHOLD = max(4.0, dynamic_threshold - 1.5)
@@ -2124,10 +2156,12 @@ def evaluate_signal(
         elif mean_rev_norm >= MEAN_REV_THRESHOLD:
             normalized_score = mean_rev_norm
             setup_type = "mean_reversion"
+        pre_sentiment_score = normalized_score
         if sentiment_bias == "bullish" and normalized_score < 5.0 and setup_type:
             normalized_score += 0.8
         elif sentiment_bias == "bearish" and normalized_score > 7.5 and setup_type:
             normalized_score -= 0.8
+        sentiment_adjustment = normalized_score - pre_sentiment_score
         normalized_score = round(normalized_score, 2)
         direction = "long" if setup_type and normalized_score >= dynamic_threshold else None
         position_size = get_position_size(normalized_score)
@@ -2154,21 +2188,33 @@ def evaluate_signal(
                 return "bullish"
             return "neutral"
 
+        profile_name: Optional[str] = None
+        profile_min_score_required: Optional[float] = None
+        profile_session_multiplier: Optional[float] = None
+        atr_profile_min: Optional[float] = None
+        atr_profile_penalty = 0.0
+        score_after_profile = normalized_score
+        atr_ratio_attr = price_data.attrs.get("atr_15m_ratio")
+        try:
+            atr_ratio_15m_value = float(atr_ratio_attr)
+        except (TypeError, ValueError):
+            atr_ratio_15m_value = None
+
         if symbol_upper == "BTCUSDT" and direction == "long":
             profile = get_btc_profile()
+            profile_name = profile.symbol
             final_score = float(normalized_score)
             session_key = (session_name or "").lower()
             multiplier = profile.session_multipliers.get(session_key)
             if multiplier is not None:
                 final_score *= multiplier
+            profile_session_multiplier = multiplier
 
-            atr_ratio_raw = price_data.attrs.get("atr_15m_ratio")
-            try:
-                atr_ratio = float(atr_ratio_raw)
-            except (TypeError, ValueError):
-                atr_ratio = None
+            atr_ratio = atr_ratio_15m_value
+            atr_profile_min = profile.atr_min_ratio
             if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
                 final_score -= 0.5
+                atr_profile_penalty = 0.5
 
             trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
             if trend_1h_state not in ("bullish", "neutral"):
@@ -2196,6 +2242,7 @@ def evaluate_signal(
                 profile_min_score = max(profile.min_score_for_trade, 5.0)
             else:
                 profile_min_score = profile.min_score_for_trade
+            profile_min_score_required = profile_min_score
 
             final_score = max(final_score, 0.0)
             if final_score < profile_min_score:
@@ -2205,23 +2252,24 @@ def evaluate_signal(
                 )
                 _mark_profile_veto(profile_min_score, "BTC profile min score gate")
                 return 0, None, 0, None
+            score_after_profile = final_score
 
         if symbol_upper == "ETHUSDT" and direction == "long":
             profile = get_eth_profile()
+            profile_name = profile.symbol
             final_score = float(normalized_score)
 
             session_key = (session_name or "").lower()
             multiplier = profile.session_multipliers.get(session_key)
             if multiplier is not None:
                 final_score *= multiplier
+            profile_session_multiplier = multiplier
 
-            atr_ratio_raw = price_data.attrs.get("atr_15m_ratio")
-            try:
-                atr_ratio = float(atr_ratio_raw)
-            except (TypeError, ValueError):
-                atr_ratio = None
+            atr_ratio = atr_ratio_15m_value
+            atr_profile_min = profile.atr_min_ratio
             if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
                 final_score -= 0.3
+                atr_profile_penalty = 0.3
 
             trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
 
@@ -2243,6 +2291,7 @@ def evaluate_signal(
                 profile_min_score = max(profile.min_score_for_trade, 4.6)
             else:
                 profile_min_score = profile.min_score_for_trade
+            profile_min_score_required = profile_min_score
 
             btc_d_trend_raw = price_data.attrs.get("btc_d_trend")
             ethbtc_trend_raw = price_data.attrs.get("ethbtc_trend")
@@ -2277,23 +2326,24 @@ def evaluate_signal(
                 )
                 _mark_profile_veto(profile_min_score, "ETH profile min score gate")
                 return 0, None, 0, None
+            score_after_profile = final_score
 
         if symbol_upper == "SOLUSDT" and direction == "long":
             profile = get_sol_profile()
+            profile_name = profile.symbol
             final_score = float(normalized_score)
 
             session_key = (session_name or "").lower()
             multiplier = profile.session_multipliers.get(session_key)
             if multiplier is not None:
                 final_score *= multiplier
+            profile_session_multiplier = multiplier
 
-            atr_ratio_raw = price_data.attrs.get("atr_15m_ratio")
-            try:
-                atr_ratio = float(atr_ratio_raw)
-            except (TypeError, ValueError):
-                atr_ratio = None
+            atr_ratio = atr_ratio_15m_value
+            atr_profile_min = profile.atr_min_ratio
             if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
                 final_score -= 0.3
+                atr_profile_penalty = 0.3
 
             trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
 
@@ -2312,6 +2362,7 @@ def evaluate_signal(
             profile_min_score = profile.min_score_for_trade
             if news_severity == 2:
                 profile_min_score = max(profile_min_score, 4.4)
+            profile_min_score_required = profile_min_score
 
             final_score = max(final_score, 0.0)
             if final_score < profile_min_score:
@@ -2321,22 +2372,23 @@ def evaluate_signal(
                 )
                 _mark_profile_veto(profile_min_score, "SOL profile min score gate")
                 return 0, None, 0, None
+            score_after_profile = final_score
         if symbol_upper == "BNBUSDT" and direction == "long":
             profile = get_bnb_profile()
+            profile_name = profile.symbol
             final_score = float(normalized_score)
 
             session_key = (session_name or "").lower()
             multiplier = profile.session_multipliers.get(session_key)
             if multiplier is not None:
                 final_score *= multiplier
+            profile_session_multiplier = multiplier
 
-            atr_ratio_raw = price_data.attrs.get("atr_15m_ratio")
-            try:
-                atr_ratio = float(atr_ratio_raw)
-            except (TypeError, ValueError):
-                atr_ratio = None
+            atr_ratio = atr_ratio_15m_value
+            atr_profile_min = profile.atr_min_ratio
             if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
                 final_score -= 0.2
+                atr_profile_penalty = 0.2
 
             trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
 
@@ -2355,6 +2407,7 @@ def evaluate_signal(
             profile_min_score = profile.min_score_for_trade
             if news_severity == 2:
                 profile_min_score = max(profile_min_score, 4.3)
+            profile_min_score_required = profile_min_score
 
             final_score = max(final_score, 0.0)
             if final_score < profile_min_score:
@@ -2364,6 +2417,7 @@ def evaluate_signal(
                 )
                 _mark_profile_veto(profile_min_score, "BNB profile min score gate")
                 return 0, None, 0, None
+            score_after_profile = final_score
         if direction == "long" and symbol_tier and symbol_upper not in {
             "BTCUSDT",
             "ETHUSDT",
@@ -2371,19 +2425,19 @@ def evaluate_signal(
             "BNBUSDT",
         }:
             profile = get_tier_profile(symbol_tier)
+            profile_name = profile.symbol
             final_score = float(normalized_score)
             session_key = (session_name or "").lower()
             multiplier = profile.session_multipliers.get(session_key)
             if multiplier is not None:
                 final_score *= multiplier
+            profile_session_multiplier = multiplier
 
-            atr_ratio_raw = price_data.attrs.get("atr_15m_ratio")
-            try:
-                atr_ratio = float(atr_ratio_raw)
-            except (TypeError, ValueError):
-                atr_ratio = None
+            atr_ratio = atr_ratio_15m_value
+            atr_profile_min = profile.atr_min_ratio
             if atr_ratio is not None and atr_ratio < profile.atr_min_ratio:
                 final_score -= 0.2
+                atr_profile_penalty = 0.2
 
             news_raw = price_data.attrs.get("news_severity", 0)
             try:
@@ -2399,6 +2453,7 @@ def evaluate_signal(
                 profile_min_score = max(
                     profile_min_score, profile.min_score_for_trade + 0.2
                 )
+            profile_min_score_required = profile_min_score
 
             final_score = max(final_score, 0.0)
             if final_score < profile_min_score:
@@ -2408,6 +2463,7 @@ def evaluate_signal(
                 )
                 _mark_profile_veto(profile_min_score, "Tier profile min score gate")
                 return 0, None, 0, None
+            score_after_profile = final_score
 
         zones = detect_support_resistance_zones(price_data)
         zones = zones.to_dict() if isinstance(zones, pd.Series) else (zones or {"support": [], "resistance": []})
@@ -2420,6 +2476,9 @@ def evaluate_signal(
                     atr_value = latest_atr
             except Exception:
                 atr_value = None
+        near_resistance = False
+        near_support = False
+        sr_required_score: Optional[float] = None
         if direction == "long":
             if atr_value is not None:
                 resistance_multiple = 1.0
@@ -2448,6 +2507,7 @@ def evaluate_signal(
                 )
             min_resistance_score = max(dynamic_threshold + 0.5, 6.5)
             min_support_score = max(dynamic_threshold - 0.5, 5.5)
+            sr_required_score = min_resistance_score if near_resistance else min_support_score
             if near_resistance and normalized_score < min_resistance_score:
                 logger.warning(
                     "Skipping %s: near resistance zone with score %.2f < %.2f",
@@ -2499,6 +2559,37 @@ def evaluate_signal(
         if spread == spread and price_now > 0:
             spread_bps = (spread / price_now) * 10_000
 
+        di_plus_val = float(di_plus.iloc[-1]) if not di_plus.empty else float("nan")
+        di_minus_val = float(di_minus.iloc[-1]) if not di_minus.empty else float("nan")
+        ema_spread_pct = None
+        if price_now and price_now == price_now and np.isfinite(ema_diff):
+            try:
+                ema_spread_pct = ema_diff / price_now
+            except Exception:
+                ema_spread_pct = None
+        vwma_slope_value = None
+        try:
+            if len(vwma) >= 5 and price_now:
+                vwma_slope_value = (
+                    float(vwma.iloc[-1] - vwma.iloc[-5]) / max(price_now, 1e-9)
+                )
+        except Exception:
+            vwma_slope_value = None
+        boll_position = None
+        try:
+            bb_upper_val = float(bb_upper.iloc[-1]) if not bb_upper.empty else float("nan")
+            denom = bb_upper_val - bb_lower_val
+            if np.isfinite(denom) and denom != 0 and price_now == price_now:
+                boll_position = (price_now - bb_lower_val) / denom
+        except Exception:
+            boll_position = None
+        dema_diff_value = None
+        try:
+            if price_now:
+                dema_diff_value = float(dema_short.iloc[-1] - dema_long.iloc[-1]) / price_now
+        except Exception:
+            dema_diff_value = None
+
         def _safe_float(value: Any) -> Optional[float]:
             try:
                 number = float(value)
@@ -2515,7 +2606,7 @@ def evaluate_signal(
         flow_snapshot: dict[str, Any] = {
             "order_flow_score": _safe_float(flow_score),
             "order_flow_flag": float(flow_flag),
-            "order_flow_state": getattr(aggression, "state", "neutral") or "neutral",
+            "order_flow_state": flow_state_label,
             "order_book_imbalance": _safe_float(imbalance_to_check),
             "trade_imbalance": _safe_float(flow_features.get("trade_imbalance")),
             "cvd": _safe_float(flow_features.get("cvd")),
@@ -2530,17 +2621,108 @@ def evaluate_signal(
             "volume_ratio": _safe_float(volume_ratio),
             "price_change_pct": _safe_float(price_change_pct),
             "spread_bps": _safe_float(spread_bps),
+            "flow_score_raw": _safe_float(flow_score_raw),
+            "flow_score_clipped": _safe_float(flow_score),
         }
+        volume_meta = price_data.attrs.get("volume_context") or {}
         signal_snapshot = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "setup_type": setup_type or "none",
+            "setup_type_base": setup_type or "none",
             "trend_norm": _safe_float(trend_norm),
+            "mean_rev_norm": _safe_float(mean_rev_norm),
             "mean_reversion_norm": _safe_float(mean_rev_norm),
+            "trend_score_raw": _safe_float(trend_score),
+            "mean_rev_score_raw": _safe_float(mean_rev_score),
+            "penalty_score": _safe_float(penalty_score),
+            "trend_total": _safe_float(trend_total),
+            "mean_rev_total": _safe_float(mean_rev_total),
             "activation_threshold": _safe_float(dynamic_threshold),
+            "dynamic_threshold": _safe_float(dynamic_threshold),
+            "sentiment_bias": sentiment_bias,
+            "sentiment_score_adjustment": _safe_float(sentiment_adjustment),
+            "normalized_score": _safe_float(normalized_score),
+            "normalized_score_pre_profile": _safe_float(normalized_score),
+            "score_after_profile": _safe_float(score_after_profile),
+            "bars_5m_count": bars_count,
+            "hourly_bar_age_min": _safe_float(hourly_bar_age_min),
+            "data_ok": True,
+            "volume_gate_pass": bool(volume_meta.get("volume_gate_pass", True)),
+            "last_quote_vol_1m": _safe_float(volume_meta.get("last_quote_vol_1m")),
+            "avg_quote_vol_20m": _safe_float(volume_meta.get("avg_quote_vol_20m")),
+            "session_volume_floor": _safe_float(volume_meta.get("session_volume_floor")),
+            "absolute_volume_floor": _safe_float(volume_meta.get("absolute_volume_floor")),
+            "profile_min_1m_vol": _safe_float(volume_meta.get("profile_min_1m_vol")),
+            "profile_min_avg20_vol": _safe_float(volume_meta.get("profile_min_avg20_vol")),
+            "profile_vol_expansion_min": _safe_float(volume_meta.get("profile_vol_expansion_min")),
+            "profile_volume_pass": bool(volume_meta.get("profile_volume_pass", True)),
+            "spread_ratio": _safe_float((spread / price_now) if price_now else None),
+            "spread_gate_fail": not breakdown.get("spread_gate_pass", True),
+            "orderbook_imbalance": _safe_float(imbalance_to_check),
+            "obi_gate_fail": not breakdown.get("obi_gate_pass", True),
+            "atr_percentile": _safe_float(atr_p),
+            "atr_value": _safe_float(atr_value),
+            "atr_score_contrib": _safe_float(w["atr"] * atr_flag if "atr" in w else 0.0),
+            "ema_spread_pct": _safe_float(ema_spread_pct),
+            "ema_score_contrib": _safe_float(w["ema"] * ema_flag if "ema" in w else 0.0),
+            "macd_value": _safe_float(macd_latest),
+            "macd_slope_tanh": _safe_float(macd_flag),
+            "macd_score_contrib": _safe_float(w["macd"] * macd_flag if "macd" in w else 0.0),
+            "rsi_14": _safe_float(rsi_val),
+            "rsi_score_contrib": _safe_float(w["rsi"] * rsi_flag if "rsi" in w else 0.0),
+            "adx_14": _safe_float(adx_val),
+            "di_plus": _safe_float(di_plus_val),
+            "di_minus": _safe_float(di_minus_val),
+            "adx_score_contrib": _safe_float(w["adx"] * adx_flag if "adx" in w else 0.0),
+            "vwma_slope": _safe_float(vwma_slope_value),
+            "vwma_score_contrib": _safe_float(w["vwma"] * vwma_flag if "vwma" in w else 0.0),
+            "boll_position": _safe_float(boll_position),
+            "boll_score_contrib": _safe_float(w["bb"] if bb_flag and "bb" in w else 0.0),
+            "dema_diff": _safe_float(dema_diff_value),
+            "dema_score_contrib": _safe_float(w["dema"] if dema_flag and "dema" in w else 0.0),
+            "stoch_k": _safe_float(stoch_k_val),
+            "stoch_d": _safe_float(stoch_d_val),
+            "stoch_score_contrib": _safe_float(w["stoch"] * stoch_flag if "stoch" in w else 0.0),
+            "cci": _safe_float(cci_val),
+            "cci_score_contrib": _safe_float(w["cci"] * cci_flag if "cci" in w else 0.0),
+            "hurst": _safe_float(hurst),
+            "hurst_score_contrib": _safe_float(w["hurst"] * hurst_flag if "hurst" in w else 0.0),
+            "multi_tf_confluence_flag": int(confluence_flag),
+            "confluence_score_contrib": _safe_float(w["confluence"] if confluence_flag and "confluence" in w else 0.0),
+            "pattern_candle_flag": int(candle_flag),
+            "pattern_flag_flag": int(flag_flag),
+            "pattern_double_bottom_flag": int(double_flag),
+            "pattern_cup_handle_flag": int(cup_flag),
+            "pattern_head_shoulders_flag": int(hs_flag != 0),
+            "structure_score": _safe_float(structure_score),
+            "flow_trade_imbalance": _safe_float(flow_features.get("trade_imbalance")),
+            "flow_ob_imbalance": _safe_float(flow_features.get("order_book_imbalance")),
+            "flow_cvd_delta": _safe_float(flow_features.get("cvd_change")),
+            "flow_taker_buy_ratio": _safe_float(flow_features.get("taker_buy_ratio")),
+            "flow_aggression_rate": _safe_float(flow_features.get("aggressive_trade_rate")),
+            "flow_spoofing_intensity": _safe_float(flow_features.get("spoofing_intensity")),
+            "volume_ratio_5bar": _safe_float(volume_ratio),
+            "price_change_5bar": _safe_float(price_change_pct),
+            "flow_score_raw": _safe_float(flow_score_raw),
+            "flow_score_clipped": _safe_float(flow_score),
+            "flow_score_contrib": _safe_float(w["flow"] * flow_score if "flow" in w else flow_score),
+            "flow_state": flow_state_label,
             "auction_state": str(price_data.attrs.get("auction_state", auction_state or "unknown")),
             "poc_target": _safe_float(price_data.attrs.get("poc_target", poc_candidate)),
             "lvn_entry_level": _safe_float(price_data.attrs.get("lvn_entry_level", lvn_candidate)),
-            **flow_snapshot,
+            "profile_name": profile_name,
+            "profile_min_score": _safe_float(profile_min_score_required),
+            "session_multiplier": _safe_float(profile_session_multiplier),
+            "atr_ratio_15m": _safe_float(atr_ratio_15m_value),
+            "atr_profile_min": _safe_float(atr_profile_min),
+            "atr_profile_penalty": _safe_float(atr_profile_penalty),
+            "profile_veto": bool(breakdown.get("profile_veto", False)),
+            "sr_guard_pass": bool(breakdown.get("sr_guard_pass", True)),
+            "near_resistance": int(bool(near_resistance)),
+            "near_support": int(bool(near_support)),
+            "sr_required_min_score": _safe_float(sr_required_score),
         }
+        signal_snapshot.update(flow_snapshot)
         price_data.attrs["signal_features"] = signal_snapshot
         indicator_flags = {
             "ema": ema_flag,
