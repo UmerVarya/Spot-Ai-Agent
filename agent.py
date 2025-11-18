@@ -54,6 +54,7 @@ if os.getenv("DISABLE_LEGACY_BINANCE_WS", "0") == "1":
 import quiet_logging  # silences Binance/RTSC spam globally
 
 from log_utils import setup_logger, LOG_FILE
+from typing import Any, Dict, Mapping, Optional, Set, Tuple
 
 logger = setup_logger(__name__)
 
@@ -97,7 +98,6 @@ import random
 import logging
 import threading
 from datetime import datetime
-from typing import Any, Dict, Mapping, Optional, Set, Tuple
 
 from ws_price_bridge import WSPriceBridge
 from decision_metrics import (
