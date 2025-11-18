@@ -56,6 +56,8 @@ import quiet_logging  # silences Binance/RTSC spam globally
 from log_utils import setup_logger, LOG_FILE
 from typing import Any, Dict, Mapping, Optional, Set, Tuple
 
+from signal_audit import log_signal_audit
+
 logger = setup_logger(__name__)
 
 
@@ -97,7 +99,7 @@ import asyncio
 import random
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ws_price_bridge import WSPriceBridge
 from decision_metrics import (
@@ -1664,6 +1666,24 @@ def run_agent_loop() -> None:
                 logger.info("Market scan started for %s session but no symbols available.", session)
             potential_trades: list[dict] = []
             symbol_scores: dict[str, dict[str, float | None]] = {}
+            audit_rows: Dict[str, Dict[str, Any]] = {}
+
+            def _audit_update(symbol_key: str, **updates: Any) -> None:
+                if not symbol_key:
+                    return
+                row = audit_rows.setdefault(symbol_key, {"symbol": symbol_key})
+                row.update(updates)
+
+            def _audit_finalize(symbol_key: str, **updates: Any) -> None:
+                if not symbol_key:
+                    return
+                row = audit_rows.pop(symbol_key, None)
+                if row is None:
+                    row = {"symbol": symbol_key}
+                row.update(updates)
+                row.setdefault("ts", datetime.now(timezone.utc).isoformat())
+                log_signal_audit(row)
+
             symbols_to_fetch = [
                 sym for sym in top_symbols if not any(t.get("symbol") == sym for t in active_trades)
             ]
@@ -1754,6 +1774,38 @@ def run_agent_loop() -> None:
                             exc_info=True,
                         )
                         auction_state = "unknown"
+                    volume_meta = price_data.attrs.get("volume_context") or {}
+                    audit_payload = {
+                        "ts": signal_snapshot.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                        "symbol": symbol_key,
+                        "tier": tier,
+                        "session": session,
+                        "auction_state": signal_snapshot.get("auction_state") or auction_state,
+                        "macro_bias": sentiment_bias,
+                        "fear_greed": fg,
+                        "btc_dominance": btc_d,
+                        "news_severity": price_data.attrs.get("news_severity", 0),
+                        "is_core_symbol": symbol_key in CORE_SYMBOLS,
+                        "volume_gate_reason": volume_meta.get("volume_gate_reason"),
+                        "macro_skip_all": skip_all,
+                        "macro_skip_alt": skip_alt,
+                        "selected_for_candidate_list": False,
+                        "brain_veto": False,
+                        "ml_veto": False,
+                        "risk_veto": False,
+                        "final_trade_taken": False,
+                    }
+                    audit_payload.update(signal_snapshot)
+                    _audit_update(symbol_key, **audit_payload)
+                    _audit_update(
+                        symbol_key,
+                        size_bucket=position_size,
+                        volume_ok_from_size=bool(position_size > 0),
+                        base_direction_from_signal=direction,
+                        final_direction_after_force=direction,
+                        forced_long_applied=bool(breakdown_data.get("forced_long_applied")),
+                        auction_breakout_veto=not breakdown_data.get("auction_guard_pass", True),
+                    )
                     alt_features: dict[str, object] = {}
                     alt_adjustment = 0.0
                     try:
@@ -1818,6 +1870,12 @@ def run_agent_loop() -> None:
                     breakdown_data["alt_adj"] = alt_adjustment
                     breakdown_data["adjusted_score"] = adjusted_score
                     breakdown_data["alt_adj_block"] = adjusted_score < entry_cutoff
+                    _audit_update(
+                        symbol_key,
+                        alt_adjustment=alt_adjustment,
+                        adjusted_score=adjusted_score,
+                        alt_adj_block=adjusted_score < entry_cutoff,
+                    )
                     should_log_decision = raw_score >= entry_cutoff
                     volume_ok = position_size > 0
                     macro_state = macro_news_assessment or {}
@@ -1826,6 +1884,12 @@ def run_agent_loop() -> None:
                         monitor_state and bool(monitor_state.get("halt_trading"))
                     )
                     cooldown_active = False
+                    _audit_update(
+                        symbol_key,
+                        macro_veto=macro_veto_flag,
+                        news_veto=news_veto_flag,
+                        cooldown_active=cooldown_active,
+                    )
                     breakdown_data["macro_veto"] = macro_veto_flag
                     breakdown_data["news_veto"] = news_veto_flag
                     breakdown_data["cooldown_block"] = cooldown_active
@@ -2002,8 +2066,18 @@ def run_agent_loop() -> None:
                             structured_breakdown["primary_skip_text"] = reason_text
                             if reason_key:
                                 record_skip_reason(reason_key)
+                            _audit_finalize(
+                                symbol_key,
+                                selected_for_candidate_list=False,
+                                final_trade_taken=False,
+                                final_skip_reason=reason_text or "",
+                                brain_veto=False,
+                                ml_veto=False,
+                                risk_veto=False,
+                            )
                         else:
                             record_trade_opened()
+                            _audit_update(symbol_key, selected_for_candidate_list=False)
                         try:
                             log_decision_breakdown(
                                 symbol_key,
@@ -2496,6 +2570,18 @@ def run_agent_loop() -> None:
             opened_count = 0
             # Pass allowed_new as max_trades to avoid misassigning correlation threshold
             selected = select_diversified_signals(potential_trades, max_trades=allowed_new)
+            selected_keys = {c['symbol'].upper() for c in selected}
+            for candidate in potential_trades:
+                sym_key = str(candidate['symbol']).upper()
+                if sym_key in selected_keys:
+                    _audit_update(sym_key, selected_for_candidate_list=True)
+                else:
+                    _audit_finalize(
+                        sym_key,
+                        selected_for_candidate_list=False,
+                        final_trade_taken=False,
+                        final_skip_reason="not selected after diversification",
+                    )
             pending_trade_contexts: list[dict] = []
             batched_prompts: dict[str, str] = {}
 
@@ -2745,6 +2831,7 @@ def run_agent_loop() -> None:
                     break
 
                 symbol = context["symbol"]
+                symbol_key = str(symbol).upper()
                 prepared = context["prepared"]
                 pre_result = context["pre_result"]
 
@@ -2809,6 +2896,13 @@ def run_agent_loop() -> None:
                         reason_text=f"brain veto: {rejection_reason}",
                     )
                     log_rejection(symbol, rejection_reason)
+                    _audit_finalize(
+                        symbol_key,
+                        selected_for_candidate_list=True,
+                        brain_veto=True,
+                        final_trade_taken=False,
+                        final_skip_reason=rejection_reason,
+                    )
                     continue
 
                 ml_prob = predict_success_probability(
@@ -2823,6 +2917,7 @@ def run_agent_loop() -> None:
                     llm_confidence=decision_obj.get("llm_confidence", 5.0),
                     micro_features=micro_feature_payload,
                 )
+                _audit_update(symbol_key, ml_probability=ml_prob)
                 if ml_prob < 0.5:
                     logger.info(
                         "ML model predicted low success probability (%.2f) for %s. Skipping trade.",
@@ -2839,6 +2934,14 @@ def run_agent_loop() -> None:
                         reason_text=ml_reason,
                     )
                     log_rejection(symbol, ml_reason)
+                    _audit_finalize(
+                        symbol_key,
+                        selected_for_candidate_list=True,
+                        ml_probability=ml_prob,
+                        ml_veto=True,
+                        final_trade_taken=False,
+                        final_skip_reason=ml_reason,
+                    )
                     continue
 
                 final_conf = round((final_conf + ml_prob * 10) / 2.0, 2)
@@ -2919,6 +3022,14 @@ def run_agent_loop() -> None:
                         reason_text=risk_reason,
                     )
                     log_rejection(symbol, risk_reason)
+                    _audit_finalize(
+                        symbol_key,
+                        selected_for_candidate_list=True,
+                        ml_probability=ml_prob,
+                        risk_veto=True,
+                        final_trade_taken=False,
+                        final_skip_reason=risk_reason,
+                    )
                     continue
                 else:
                     logger.info(
@@ -2937,6 +3048,13 @@ def run_agent_loop() -> None:
                         size_value=position_size,
                         score_value=score,
                         reason_text=reason_text,
+                    )
+                    _audit_finalize(
+                        symbol_key,
+                        selected_for_candidate_list=True,
+                        ml_probability=ml_prob,
+                        final_trade_taken=False,
+                        final_skip_reason=reason_text,
                     )
                     continue
 
@@ -2999,6 +3117,11 @@ def run_agent_loop() -> None:
                             pass
                     trade_usd = max(MIN_TRADE_USD, min(MAX_TRADE_USD, trade_usd))
                     position_size = round(max(trade_usd / entry_price, 0), 6)
+                    _audit_update(
+                        symbol_key,
+                        size_bucket=position_size,
+                        volume_ok_from_size=bool(position_size > 0),
+                    )
                     volume_profile_summary = None
                     poc_price: Optional[float] = None
                     poc_target_price: Optional[float] = None
@@ -3176,6 +3299,16 @@ def run_agent_loop() -> None:
                                 f"trade opened @ {entry_price} | notional={trade_usd} | qty={position_size}"
                             ),
                         )
+                        _audit_finalize(
+                            symbol_key,
+                            selected_for_candidate_list=True,
+                            ml_probability=ml_prob,
+                            final_trade_taken=True,
+                            final_skip_reason="",
+                            brain_veto=False,
+                            ml_veto=False,
+                            risk_veto=False,
+                        )
                     else:
                         reason_text = "trade already active"
                         logger.info("Trade for %s already active; skipping new entry", symbol)
@@ -3187,8 +3320,28 @@ def run_agent_loop() -> None:
                             score_value=score,
                             reason_text=reason_text,
                         )
+                        _audit_finalize(
+                            symbol_key,
+                            selected_for_candidate_list=True,
+                            ml_probability=ml_prob,
+                            final_trade_taken=False,
+                            final_skip_reason=reason_text,
+                        )
                 except Exception as e:
                     logger.error("Error opening trade for %s: %s", symbol, e, exc_info=True)
+                    _audit_finalize(
+                        symbol_key,
+                        selected_for_candidate_list=True,
+                        ml_probability=ml_prob,
+                        final_trade_taken=False,
+                        final_skip_reason=f"error opening trade: {e}",
+                    )
+            for remaining_symbol in list(audit_rows.keys()):
+                _audit_finalize(
+                    remaining_symbol,
+                    final_trade_taken=False,
+                    final_skip_reason="no decision",
+                )
             # Manage existing trades after opening new ones
             try:
                 manage_trades()
