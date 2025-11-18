@@ -82,28 +82,33 @@ def categorize_reason(raw_reason: str) -> str:
 
 
 def summarize_reason_buckets(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["bucket", "count", "pct_of_total"])
+
     total = len(df)
     summary = (
-        df["reason_bucket"].value_counts().reset_index(name="count").rename(
-            columns={"index": "bucket"}
-        )
+        df.groupby("bucket")
+        .size()
+        .reset_index(name="count")
+        .sort_values("count", ascending=False)
     )
-    summary["pct_of_total"] = (summary["count"] / total * 100).round(1)
+    summary["pct_of_total"] = summary["count"] / total
     return summary
 
 
 def main() -> None:
     df = load_skip_decisions()
-    df["reason_bucket"] = df["raw_reason"].map(categorize_reason).fillna("other")
+    df["bucket"] = df["raw_reason"].map(categorize_reason).fillna("other")
 
     summary = summarize_reason_buckets(df)
 
+    if summary.empty:
+        print("No skip decisions found in export.")
+        return
+
     print("Top skip reasons (bucket, count, pct_of_total):")
     for _, row in summary.iterrows():
-        bucket = row["bucket"]
-        count = int(row["count"])
-        pct = row["pct_of_total"]
-        print(f"{bucket:<28}{count:>7}  {pct:>5.1f}%")
+        print(f"{row['bucket']}: {row['count']} ({row['pct_of_total']:.2%})")
 
 
 if __name__ == "__main__":
