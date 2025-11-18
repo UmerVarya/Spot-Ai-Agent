@@ -5,7 +5,7 @@ from pathlib import Path
 
 LOG_PATH = Path("analysis_logs/skip_decisions.log")
 # ``analyze_skips.py`` expects this CSV path, so keep it in sync.
-OUT_PATH = Path("analysis_logs/skip_decisions.csv")
+OUT_PATH = Path("analysis_logs/skip_decisions_parsed.csv")
 
 # Example line (wrapped):
 # Nov 18 04:45:11 vultr python[67187]: 2025-11-18 04:45:11,769 __main__ - INFO - [SKIP] ZECUSDT:
