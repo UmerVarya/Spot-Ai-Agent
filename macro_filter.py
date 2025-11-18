@@ -8,8 +8,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from btc_dominance import get_btc_dominance
-from fear_greed import get_fear_greed_index
+from macro_data import get_btc_dominance_cached, get_fear_greed_cached
 
 LOG = logging.getLogger(__name__)
 
@@ -45,6 +44,10 @@ def _default_context(reason: str = "bootstrap") -> Dict[str, Any]:
         "macro_required": MACRO_REQUIRED,
         "max_stale_seconds": MACRO_MAX_STALE_SECS,
         "refresh_interval": MACRO_REFRESH_SECS,
+        "btc_timestamp": 0.0,
+        "fear_greed_timestamp": 0.0,
+        "btc_age_seconds": None,
+        "fear_greed_age_seconds": None,
     }
 
 
@@ -148,6 +151,16 @@ def _log_status(
     LOG.log(level, message)
 
 
+def _format_age(age: Optional[float]) -> str:
+    if age is None:
+        return "n/a"
+    if age < 90:
+        return f"{age:.0f}s"
+    if age < 3600:
+        return f"{age / 60.0:.1f}m"
+    return f"{age / 3600.0:.1f}h"
+
+
 def _build_context(
     btc_value: float,
     fg_value: int,
@@ -155,6 +168,8 @@ def _build_context(
     stale: bool,
     reason: str,
     last_good_ts: float,
+    btc_ts: Optional[float],
+    fg_ts: Optional[float],
 ) -> Dict[str, Any]:
     now = time.time()
     macro_sentiment = _evaluate_macro_sentiment(btc_value, fg_value)
@@ -164,6 +179,8 @@ def _build_context(
     else:
         stale_for = None
 
+    btc_age = max(0.0, now - float(btc_ts)) if btc_ts else None
+    fg_age = max(0.0, now - float(fg_ts)) if fg_ts else None
     penalty = MACRO_STALE_PENALTY if stale else 0.0
     context = {
         "btc_dominance": round(float(btc_value), 2),
@@ -178,6 +195,10 @@ def _build_context(
         "macro_required": MACRO_REQUIRED,
         "max_stale_seconds": MACRO_MAX_STALE_SECS,
         "refresh_interval": MACRO_REFRESH_SECS,
+        "btc_timestamp": float(btc_ts or 0.0),
+        "fear_greed_timestamp": float(fg_ts or 0.0),
+        "btc_age_seconds": btc_age,
+        "fear_greed_age_seconds": fg_age,
     }
     return context
 
@@ -190,6 +211,8 @@ def _refresh_snapshot() -> Dict[str, Any]:
 
     btc_raw: Optional[float] = None
     fg_raw: Optional[int] = None
+    btc_ts_raw: Optional[float] = None
+    fg_ts_raw: Optional[float] = None
     btc_success = False
     fg_success = False
     attempts = max(1, MACRO_MAX_ATTEMPTS)
@@ -199,12 +222,15 @@ def _refresh_snapshot() -> Dict[str, Any]:
         if not btc_success:
             try:
                 btc_candidate = _call_with_timeout(
-                    lambda: get_btc_dominance(timeout=MACRO_FETCH_TIMEOUT),
+                    lambda: get_btc_dominance_cached(),
                     timeout=MACRO_FETCH_TIMEOUT,
                 )
                 if btc_candidate is _TIMEOUT_SENTINEL:
                     raise TimeoutError("btc_dominance timed out")
-                btc_raw = btc_candidate  # type: ignore[assignment]
+                btc_snapshot = btc_candidate  # type: ignore[assignment]
+                if btc_snapshot is not None:
+                    btc_raw = btc_snapshot.value
+                    btc_ts_raw = float(btc_snapshot.ts)
                 btc_success = btc_raw is not None
                 if btc_success:
                     errors.pop("btc_dominance", None)
@@ -214,12 +240,15 @@ def _refresh_snapshot() -> Dict[str, Any]:
         if not fg_success:
             try:
                 fg_candidate = _call_with_timeout(
-                    get_fear_greed_index,
+                    get_fear_greed_cached,
                     timeout=MACRO_FETCH_TIMEOUT,
                 )
                 if fg_candidate is _TIMEOUT_SENTINEL:
                     raise TimeoutError("fear_greed timed out")
-                fg_raw = fg_candidate  # type: ignore[assignment]
+                fg_snapshot = fg_candidate  # type: ignore[assignment]
+                if fg_snapshot is not None:
+                    fg_raw = fg_snapshot.value
+                    fg_ts_raw = float(fg_snapshot.ts)
                 fg_success = fg_raw is not None
                 if fg_success:
                     errors.pop("fear_greed", None)
@@ -250,7 +279,25 @@ def _refresh_snapshot() -> Dict[str, Any]:
     else:
         last_good_ts = time.time()
 
-    context = _build_context(btc_value, fg_value, stale=stale, reason=reason, last_good_ts=last_good_ts)
+    if btc_fallback:
+        btc_ts = float(last_good.get("btc_timestamp", 0.0))
+    else:
+        btc_ts = btc_ts_raw if btc_ts_raw is not None else time.time()
+
+    if fg_fallback:
+        fg_ts = float(last_good.get("fear_greed_timestamp", 0.0))
+    else:
+        fg_ts = fg_ts_raw if fg_ts_raw is not None else time.time()
+
+    context = _build_context(
+        btc_value,
+        fg_value,
+        stale=stale,
+        reason=reason,
+        last_good_ts=last_good_ts,
+        btc_ts=btc_ts,
+        fg_ts=fg_ts,
+    )
 
     if stale and last_good_ts and MACRO_MAX_STALE_SECS > 0:
         stale_age = context.get("stale_for") or 0.0
@@ -276,9 +323,12 @@ def _refresh_snapshot() -> Dict[str, Any]:
             f"{name}:{exc}" for name, exc in errors.items()
         )
 
+    btc_age = _format_age(context.get("btc_age_seconds"))
+    fg_age = _format_age(context.get("fear_greed_age_seconds"))
     _log_status(
         status,
-        f"{status}: btc={context['btc_dominance']} fg={context['fear_greed']} reason={context['reason']}{error_suffix}",
+        f"{status}: btc={context['btc_dominance']} (age={btc_age}) "
+        f"fg={context['fear_greed']} (age={fg_age}) reason={context['reason']}{error_suffix}",
         timestamp=context["timestamp"],
         level=level,
     )
