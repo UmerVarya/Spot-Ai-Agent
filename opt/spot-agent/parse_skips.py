@@ -16,7 +16,9 @@ line_re = re.compile(
     \[SKIP\]\s+
     (?P<symbol>[A-Z0-9]+):\s+
     direction=(?P<direction>[^,]+),\s+
-    size=(?P<size>[\d\.]+)\s*-\s*
+    # size separator can be ASCII hyphen or Unicode en dash depending on the
+    # logger (agent.py currently emits an en dash).
+    size=(?P<size>[\d\.]+)\s*[-–]\s*
     (?P<reason>.*?),\s*
     Score=(?P<score>[\d\.]+)
     """,
