@@ -4,6 +4,7 @@ import csv
 from pathlib import Path
 
 LOG_PATH = Path("analysis_logs/skip_decisions.log")
+# ``analyze_skips.py`` expects this CSV path, so keep it in sync.
 OUT_PATH = Path("analysis_logs/skip_decisions.csv")
 
 # Example line (wrapped):
@@ -35,7 +36,7 @@ def parse_line(line: str):
         "direction": m.group("direction"),
         "size": float(m.group("size")),
         "score": float(m.group("score")),
-        "reason": m.group("reason"),
+        "raw_reason": m.group("reason"),
     }
 
 
@@ -53,7 +54,15 @@ def main():
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with OUT_PATH.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["sys_ts", "symbol", "direction", "size", "score", "reason"]
+            f,
+            fieldnames=[
+                "sys_ts",
+                "symbol",
+                "direction",
+                "size",
+                "score",
+                "raw_reason",
+            ],
         )
         writer.writeheader()
         writer.writerows(rows)
