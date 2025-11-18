@@ -2363,6 +2363,8 @@ def run_agent_loop() -> None:
                             )
                     _log_decision("enter")
                     _emit_metrics("enter")
+                    if (row := audit_rows.get(symbol_key)):
+                        log_signal_audit(dict(row))
                     potential_trades.append(
                         {
                             "symbol": symbol,
