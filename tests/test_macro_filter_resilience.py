@@ -6,6 +6,7 @@ import importlib
 import time
 
 import macro_filter
+from macro_data import BTCDominanceSnapshot, FearGreedSnapshot
 
 
 def _reload_module():
@@ -15,8 +16,16 @@ def _reload_module():
 def test_macro_context_returns_live_values(monkeypatch):
     module = _reload_module()
 
-    monkeypatch.setattr(module, "get_btc_dominance", lambda timeout=None: 47.5)
-    monkeypatch.setattr(module, "get_fear_greed_index", lambda: 65)
+    monkeypatch.setattr(
+        module,
+        "get_btc_dominance_cached",
+        lambda: BTCDominanceSnapshot(value=47.5, ts=int(time.time())),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_fear_greed_cached",
+        lambda: FearGreedSnapshot(value=65.0, ts=int(time.time())),
+    )
 
     module.refresh_macro_context_now()
     context = module.get_macro_context()
@@ -32,8 +41,16 @@ def test_macro_context_returns_live_values(monkeypatch):
 def test_macro_context_uses_last_good_on_failure(monkeypatch):
     module = _reload_module()
 
-    monkeypatch.setattr(module, "get_btc_dominance", lambda timeout=None: 48.1)
-    monkeypatch.setattr(module, "get_fear_greed_index", lambda: 40)
+    monkeypatch.setattr(
+        module,
+        "get_btc_dominance_cached",
+        lambda: BTCDominanceSnapshot(value=48.1, ts=int(time.time())),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_fear_greed_cached",
+        lambda: FearGreedSnapshot(value=40.0, ts=int(time.time())),
+    )
 
     module.refresh_macro_context_now()
     first = module.get_macro_context()
@@ -41,8 +58,8 @@ def test_macro_context_uses_last_good_on_failure(monkeypatch):
     def _raise_dom():
         raise RuntimeError("dom down")
 
-    monkeypatch.setattr(module, "get_btc_dominance", _raise_dom)
-    monkeypatch.setattr(module, "get_fear_greed_index", lambda: None)
+    monkeypatch.setattr(module, "get_btc_dominance_cached", _raise_dom)
+    monkeypatch.setattr(module, "get_fear_greed_cached", lambda: None)
 
     time.sleep(0.01)
     module.refresh_macro_context_now()

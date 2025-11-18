@@ -397,8 +397,7 @@ from brain import (
     finalize_trade_decision,
 )
 from sentiment import get_macro_sentiment
-from btc_dominance import get_btc_dominance
-from fear_greed import get_fear_greed_index
+from macro_data import get_btc_dominance_cached, get_fear_greed_cached
 from orderflow import detect_aggression
 from volume_profile import (
     VolumeProfileResult,
@@ -789,6 +788,14 @@ def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: floa
     skip_alt = False
     reasons: list[str] = []
 
+    logger.info(
+        "macro_filter: using BTC_DOM=%.2f FNG=%s bias=%s conf=%.2f",
+        btc_dom,
+        fear_greed,
+        bias,
+        conf,
+    )
+
     if fear_greed < 10:
         skip_all = True
         reasons.append("extreme fear (FG < 10)")
@@ -813,6 +820,12 @@ def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: floa
         if bias == "bearish" and conf >= 6.0:
             reasons.append("bearish sentiment")
 
+    logger.info(
+        "macro_filter decision: skip_all=%s skip_alt=%s reasons=%s",
+        skip_all,
+        skip_alt,
+        ", ".join(reasons) if reasons else "none",
+    )
     return skip_all, skip_alt, reasons
 
 
@@ -1203,16 +1216,24 @@ def run_agent_loop() -> None:
             previous_payload = {}
 
         btc_dom_raw = None
+        btc_dom_ts = None
         fear_greed_raw = None
+        fear_greed_ts = None
         sentiment_raw: Any = None
 
         try:
-            btc_dom_raw = get_btc_dominance()
+            btc_snapshot = get_btc_dominance_cached()
+            if btc_snapshot is not None:
+                btc_dom_raw = btc_snapshot.value
+                btc_dom_ts = btc_snapshot.ts
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.debug("BTC dominance fetch failed: %s", exc, exc_info=True)
 
         try:
-            fear_greed_raw = get_fear_greed_index()
+            fg_snapshot = get_fear_greed_cached()
+            if fg_snapshot is not None:
+                fear_greed_raw = fg_snapshot.value
+                fear_greed_ts = fg_snapshot.ts
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.debug("Fear & Greed fetch failed: %s", exc, exc_info=True)
 
@@ -1236,6 +1257,8 @@ def run_agent_loop() -> None:
             "fear_greed": fear_greed,
             "sentiment": sentiment,
             "stale": bool(btc_fallback or fg_fallback or sentiment_fallback),
+            "btc_timestamp": btc_dom_ts,
+            "fear_greed_timestamp": fear_greed_ts,
         }
 
         state.update_section("macro", payload)
