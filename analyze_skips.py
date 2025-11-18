@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Analyze skip decisions exported by ``parse_skips.py``.
 
-This helper expects ``analysis_logs/skip_decisions.csv`` to be populated by
+This helper expects ``analysis_logs/skip_decisions_parsed.csv`` to be populated by
 ``opt/spot-agent/parse_skips.py``.  It aggregates the cleaned skip reasons and
 prints the most common entries to STDOUT so we can quickly spot recurring
 issues.
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-CSV_PATH = Path("analysis_logs/skip_decisions.csv")
+CSV_PATH = Path("analysis_logs/skip_decisions_parsed.csv")
 
 
 def load_skip_decisions(csv_path: Path = CSV_PATH) -> pd.DataFrame:
