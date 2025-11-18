@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -11,9 +12,6 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from macro_data import get_btc_dominance_cached, get_fear_greed_cached
 
 LOG = logging.getLogger(__name__)
-
-DEFAULT_BTC_DOMINANCE = 50.0
-DEFAULT_FEAR_GREED = 50
 
 MACRO_REQUIRED = os.getenv("MACRO_REQUIRED", "false").lower() in {"1", "true", "yes"}
 MACRO_STALE_PENALTY = float(os.getenv("MACRO_STALE_PENALTY", "0.15"))
@@ -32,8 +30,8 @@ _LOG_LOCK = threading.Lock()
 def _default_context(reason: str = "bootstrap") -> Dict[str, Any]:
     now = time.time()
     return {
-        "btc_dominance": DEFAULT_BTC_DOMINANCE,
-        "fear_greed": DEFAULT_FEAR_GREED,
+        "btc_dominance": None,
+        "fear_greed": None,
         "macro_sentiment": "neutral",
         "stale": True,
         "timestamp": now,
@@ -58,49 +56,59 @@ _REFRESH_THREAD_STARTED = False
 _TIMEOUT_SENTINEL = object()
 
 
-def _coerce_float(value: Any, previous: Any, default: float) -> Tuple[float, bool]:
+def _coerce_float(value: Any, previous: Any) -> Tuple[Optional[float], bool]:
     """Return a sane float and whether a fallback was used."""
 
-    try:
-        if value is not None:
-            coerced = float(value)
-            return coerced, False
-    except (TypeError, ValueError):
-        LOG.debug("Invalid float candidate for macro context: %s", value, exc_info=True)
-
-    try:
-        if previous is not None:
-            coerced = float(previous)
-            return coerced, True
-    except (TypeError, ValueError):
+    for candidate_value, fallback_flag in ((value, False), (previous, True)):
+        if candidate_value is None:
+            continue
+        try:
+            coerced = float(candidate_value)
+        except (TypeError, ValueError):
+            LOG.debug(
+                "Invalid float candidate for macro context: %s",
+                candidate_value,
+                exc_info=True,
+            )
+            continue
+        if math.isfinite(coerced):
+            return coerced, fallback_flag
         LOG.debug(
-            "Previous macro float value unusable; falling back to default", exc_info=True
+            "Non-finite macro float candidate: %s", candidate_value, exc_info=True
         )
 
-    return float(default), True
+    return None, True
 
 
-def _coerce_int(value: Any, previous: Any, default: int) -> Tuple[int, bool]:
+def _coerce_int(value: Any, previous: Any) -> Tuple[Optional[int], bool]:
     """Return a sane integer and whether a fallback was used."""
 
-    try:
-        if value is not None:
-            return int(float(value)), False
-    except (TypeError, ValueError):
-        LOG.debug("Invalid int candidate for macro context: %s", value, exc_info=True)
-
-    try:
-        if previous is not None:
-            return int(float(previous)), True
-    except (TypeError, ValueError):
+    for candidate_value, fallback_flag in ((value, False), (previous, True)):
+        if candidate_value is None:
+            continue
+        try:
+            coerced = int(float(candidate_value))
+        except (TypeError, ValueError):
+            LOG.debug(
+                "Invalid int candidate for macro context: %s",
+                candidate_value,
+                exc_info=True,
+            )
+            continue
+        if 0 <= coerced <= 100:
+            return coerced, fallback_flag
         LOG.debug(
-            "Previous macro int value unusable; falling back to default", exc_info=True
+            "Macro int candidate out of range (0-100): %s", candidate_value
         )
 
-    return int(default), True
+    return None, True
 
 
-def _evaluate_macro_sentiment(btc_d: float, fg_index: int) -> str:
+def _evaluate_macro_sentiment(
+    btc_d: Optional[float], fg_index: Optional[int]
+) -> str:
+    if btc_d is None or fg_index is None:
+        return "neutral"
     if btc_d > 52 or fg_index < 30:
         return "risk_off"
     if btc_d < 48 and fg_index > 60:
@@ -162,8 +170,8 @@ def _format_age(age: Optional[float]) -> str:
 
 
 def _build_context(
-    btc_value: float,
-    fg_value: int,
+    btc_value: Optional[float],
+    fg_value: Optional[int],
     *,
     stale: bool,
     reason: str,
@@ -183,8 +191,8 @@ def _build_context(
     fg_age = max(0.0, now - float(fg_ts)) if fg_ts else None
     penalty = MACRO_STALE_PENALTY if stale else 0.0
     context = {
-        "btc_dominance": round(float(btc_value), 2),
-        "fear_greed": int(fg_value),
+        "btc_dominance": round(float(btc_value), 2) if btc_value is not None else None,
+        "fear_greed": int(fg_value) if fg_value is not None else None,
         "macro_sentiment": macro_sentiment,
         "stale": stale,
         "timestamp": now,
@@ -262,10 +270,10 @@ def _refresh_snapshot() -> Dict[str, Any]:
             sleep_for = min(MACRO_BACKOFF_SECS * (2 ** (attempt - 1)), MACRO_REFRESH_SECS)
             time.sleep(sleep_for)
 
-    btc_prev = last_good.get("btc_dominance", DEFAULT_BTC_DOMINANCE)
-    fg_prev = last_good.get("fear_greed", DEFAULT_FEAR_GREED)
-    btc_value, btc_fallback = _coerce_float(btc_raw, btc_prev, DEFAULT_BTC_DOMINANCE)
-    fg_value, fg_fallback = _coerce_int(fg_raw, fg_prev, DEFAULT_FEAR_GREED)
+    btc_prev = last_good.get("btc_dominance")
+    fg_prev = last_good.get("fear_greed")
+    btc_value, btc_fallback = _coerce_float(btc_raw, btc_prev)
+    fg_value, fg_fallback = _coerce_int(fg_raw, fg_prev)
     stale = btc_fallback or fg_fallback
 
     last_good_ts = float(last_good.get("last_good_timestamp") or last_good.get("timestamp") or 0.0)

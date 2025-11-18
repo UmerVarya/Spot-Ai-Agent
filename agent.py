@@ -616,8 +616,6 @@ MIN_TRADE_USD = 400.0
 MAX_TRADE_USD = 500.0
 VOLATILITY_SPIKE_THRESHOLD = float(os.getenv("VOLATILITY_SPIKE_THRESHOLD", "0.9"))
 
-DEFAULT_MACRO_BTC_DOM = 50.0
-DEFAULT_MACRO_FG = 50
 DEFAULT_MACRO_SENTIMENT = {
     "bias": "neutral",
     "confidence": 5.0,
@@ -645,49 +643,51 @@ logger.info("News halt mode = %s", os.getenv("NEWS_HALT_MODE", "soft"))
 
 def _default_macro_payload() -> Dict[str, Any]:
     payload = {
-        "btc_dominance": DEFAULT_MACRO_BTC_DOM,
-        "fear_greed": DEFAULT_MACRO_FG,
+        "btc_dominance": None,
+        "fear_greed": None,
         "sentiment": dict(DEFAULT_MACRO_SENTIMENT),
         "stale": True,
     }
     return payload
 
 
-def _sanitize_float(value: Any, previous: Any, default: float) -> Tuple[float, bool]:
-    try:
-        if value is not None:
-            candidate = float(value)
-            if math.isfinite(candidate):
-                return candidate, False
-    except (TypeError, ValueError):
-        logger.debug("Invalid macro float candidate: %s", value, exc_info=True)
+def _sanitize_float(value: Any, previous: Any) -> Tuple[Optional[float], bool]:
+    for candidate_value, fallback_flag in ((value, False), (previous, True)):
+        if candidate_value is None:
+            continue
+        try:
+            candidate = float(candidate_value)
+        except (TypeError, ValueError):
+            logger.debug(
+                "Invalid macro float candidate: %s", candidate_value, exc_info=True
+            )
+            continue
+        if math.isfinite(candidate):
+            return candidate, fallback_flag
+        logger.debug(
+            "Macro float candidate not finite: %s", candidate_value, exc_info=True
+        )
 
-    try:
-        if previous is not None:
-            candidate = float(previous)
-            if math.isfinite(candidate):
-                return candidate, True
-    except (TypeError, ValueError):
-        logger.debug("Previous macro float unusable; falling back to default", exc_info=True)
-
-    return float(default), True
+    return None, True
 
 
-def _sanitize_int(value: Any, previous: Any, default: int) -> Tuple[int, bool]:
+def _sanitize_int(value: Any, previous: Any) -> Tuple[Optional[int], bool]:
     for candidate_value, fallback_flag in ((value, False), (previous, True)):
         if candidate_value is None:
             continue
         try:
             candidate = int(float(candidate_value))
         except (TypeError, ValueError):
-            logger.debug("Invalid macro int candidate: %s", candidate_value, exc_info=True)
+            logger.debug(
+                "Invalid macro int candidate: %s", candidate_value, exc_info=True
+            )
             continue
         if 0 <= candidate <= 100:
             return candidate, fallback_flag
         logger.debug(
             "Macro int candidate out of expected range (0-100): %s", candidate_value
         )
-    return int(default), True
+    return None, True
 
 
 def _sanitize_sentiment(value: Any, previous: Any) -> Tuple[Dict[str, Any], bool]:
@@ -764,15 +764,17 @@ def calculate_dynamic_trade_size(confidence: float, ml_prob: float, score: float
     return max(MIN_TRADE_USD, min(MAX_TRADE_USD, float(size)))
 
 
-def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: float):
+def macro_filter_decision(
+    btc_dom: Optional[float], fear_greed: Optional[int], bias: str, conf: float
+):
     """Return macro gating decision.
 
     Parameters
     ----------
-    btc_dom : float
-        Bitcoin dominance percentage.
-    fear_greed : int
-        Fear & Greed index value.
+    btc_dom : float | None
+        Bitcoin dominance percentage, when available.
+    fear_greed : int | None
+        Fear & Greed index value, when available.
     bias : str
         Macro sentiment bias.
     conf : float
@@ -789,24 +791,34 @@ def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: floa
     reasons: list[str] = []
 
     logger.info(
-        "macro_filter: using BTC_DOM=%.2f FNG=%s bias=%s conf=%.2f",
-        btc_dom,
-        fear_greed,
+        "macro_filter: using BTC_DOM=%s FNG=%s bias=%s conf=%.2f",
+        f"{btc_dom:.2f}" if btc_dom is not None else "None",
+        fear_greed if fear_greed is not None else "None",
         bias,
         conf,
     )
 
-    if fear_greed < 10:
-        skip_all = True
-        reasons.append("extreme fear (FG < 10)")
-    elif bias == "bearish" and conf >= 8.0 and fear_greed < 15:
-        skip_all = True
-        reasons.append("very bearish sentiment with deep fear")
+    if btc_dom in (50, 50.0):
+        logger.warning("macro_filter: detected default BTC dominance 50 – unexpected")
+    if fear_greed in (50, 50.0):
+        logger.warning("macro_filter: detected default FNG=50 – unexpected")
+
+    if fear_greed is None:
+        logger.info("macro_filter: FNG unavailable (None) – skipping FNG veto")
+    else:
+        if fear_greed < 10:
+            skip_all = True
+            reasons.append("extreme fear (FG < 10)")
+        elif bias == "bearish" and conf >= 8.0 and fear_greed < 15:
+            skip_all = True
+            reasons.append("very bearish sentiment with deep fear")
 
     alt_risk_score = 0
-    if btc_dom > 60.0:
+    if btc_dom is None:
+        logger.info("macro_filter: BTC_DOM unavailable (None) – skipping dominance veto")
+    elif btc_dom > 60.0:
         alt_risk_score += 1
-    if fear_greed < 20:
+    if fear_greed is not None and fear_greed < 20:
         alt_risk_score += 1
     if bias == "bearish" and conf >= 6.0:
         alt_risk_score += 1
@@ -829,7 +841,9 @@ def macro_filter_decision(btc_dom: float, fear_greed: int, bias: str, conf: floa
     return skip_all, skip_alt, reasons
 
 
-def dynamic_max_active_trades(fear_greed: int, bias: str, volatility: float | None) -> int:
+def dynamic_max_active_trades(
+    fear_greed: int | None, bias: str, volatility: float | None
+) -> int:
     """Return the hard limit of one active trade regardless of conditions."""
 
     _ = (fear_greed, bias, volatility)  # inputs retained for compatibility
@@ -1243,10 +1257,10 @@ def run_agent_loop() -> None:
             logger.debug("Macro sentiment fetch failed: %s", exc, exc_info=True)
 
         btc_dom, btc_fallback = _sanitize_float(
-            btc_dom_raw, previous_payload.get("btc_dominance"), DEFAULT_MACRO_BTC_DOM
+            btc_dom_raw, previous_payload.get("btc_dominance")
         )
         fear_greed, fg_fallback = _sanitize_int(
-            fear_greed_raw, previous_payload.get("fear_greed"), DEFAULT_MACRO_FG
+            fear_greed_raw, previous_payload.get("fear_greed")
         )
         sentiment, sentiment_fallback = _sanitize_sentiment(
             sentiment_raw, previous_payload.get("sentiment")
@@ -1263,10 +1277,12 @@ def run_agent_loop() -> None:
 
         state.update_section("macro", payload)
         if payload["stale"]:
+            btc_text = f"{btc_dom:.2f}" if btc_dom is not None else "n/a"
+            fg_text = f"{fear_greed}" if fear_greed is not None else "n/a"
             logger.debug(
-                "Macro refresh using cached values (btc=%.2f fg=%d bias=%s)",
-                btc_dom,
-                fear_greed,
+                "Macro refresh using cached values (btc=%s fg=%s bias=%s)",
+                btc_text,
+                fg_text,
                 sentiment.get("bias", "neutral"),
             )
         scan_trigger.set()
@@ -1484,32 +1500,44 @@ def run_agent_loop() -> None:
             macro_payload_raw = macro_snapshot.get("data")
             macro_timestamp = float(macro_snapshot.get("timestamp", 0.0))
             macro_age = time.time() - macro_timestamp if macro_timestamp else float("inf")
-            macro_payload = macro_payload_raw if isinstance(macro_payload_raw, dict) else {}
-            macro_fallback = False
-            if not macro_payload:
-                macro_fallback = True
-            else:
+            macro_payload = (
+                dict(macro_payload_raw) if isinstance(macro_payload_raw, dict) else {}
+            )
+            macro_missing = not macro_payload
+            macro_stale = False
+            if macro_payload:
                 if bool(macro_payload.get("stale")):
-                    macro_fallback = True
+                    macro_stale = True
                 elif macro_age > MACRO_CONTEXT_STALE_AFTER:
-                    macro_fallback = True
-            if macro_fallback:
-                if not macro_payload:
-                    logger.debug("Macro context unavailable; using neutral defaults.")
-                else:
-                    logger.debug(
-                        "Macro context stale (age=%.0fs). Using neutral defaults for gating.",
-                        macro_age,
-                    )
+                    macro_stale = True
+            if macro_missing:
+                logger.debug("Macro context unavailable; using empty snapshot for gating.")
                 macro_payload = _default_macro_payload()
-            try:
-                btc_d = float(macro_payload.get("btc_dominance", DEFAULT_MACRO_BTC_DOM))
-            except Exception:
-                btc_d = DEFAULT_MACRO_BTC_DOM
-            try:
-                fg = int(macro_payload.get("fear_greed", DEFAULT_MACRO_FG))
-            except Exception:
-                fg = DEFAULT_MACRO_FG
+            elif macro_stale:
+                logger.debug(
+                    "Macro context stale (age=%.0fs). Retaining last known macro values.",
+                    macro_age,
+                )
+                macro_payload["stale"] = True
+            btc_d_raw = macro_payload.get("btc_dominance")
+            btc_d: Optional[float]
+            if btc_d_raw is None:
+                btc_d = None
+            else:
+                try:
+                    candidate = float(btc_d_raw)
+                    btc_d = candidate if math.isfinite(candidate) else None
+                except (TypeError, ValueError):
+                    btc_d = None
+
+            fg_raw = macro_payload.get("fear_greed")
+            if fg_raw is None:
+                fg: Optional[int] = None
+            else:
+                try:
+                    fg = int(float(fg_raw))
+                except (TypeError, ValueError):
+                    fg = None
             sentiment_payload = macro_payload.get("sentiment") or {}
             if not isinstance(sentiment_payload, dict):
                 sentiment_payload = dict(DEFAULT_MACRO_SENTIMENT)
@@ -1545,10 +1573,12 @@ def run_agent_loop() -> None:
                 fg = int(fg)
             except Exception:
                 fg = 0
+            btc_log = f"{btc_d:.2f}%" if btc_d is not None else "n/a"
+            fg_log = f"{fg}" if fg is not None else "n/a"
             logger.info(
-                "BTC Dominance: %.2f%% | Fear & Greed: %s | Sentiment: %s (Confidence: %s)",
-                btc_d,
-                fg,
+                "BTC Dominance: %s | Fear & Greed: %s | Sentiment: %s (Confidence: %s)",
+                btc_log,
+                fg_log,
                 sentiment_bias,
                 sentiment_confidence,
             )
@@ -2936,8 +2966,8 @@ def run_agent_loop() -> None:
                     score=score,
                     confidence=final_conf,
                     session=session,
-                    btc_d=btc_d,
-                    fg=fg,
+                    btc_d=btc_d if btc_d is not None else float("nan"),
+                    fg=float(fg) if fg is not None else float("nan"),
                     sentiment_conf=sentiment_confidence,
                     pattern=pattern_name,
                     llm_approval=bool(llm_approval) if llm_approval is not None else True,
