@@ -2869,6 +2869,8 @@ def run_agent_loop() -> None:
                 macro_ind = context["macro_ind"]
                 direction = context.get("direction") or "long"
 
+                ml_prob: Optional[float] = None
+
                 decision = bool(decision_obj.get("decision", False))
                 final_conf = float(decision_obj.get("confidence", score))
                 narrative = decision_obj.get("narrative", "")
@@ -3334,7 +3336,7 @@ def run_agent_loop() -> None:
                     _audit_finalize(
                         symbol_key,
                         selected_for_candidate_list=True,
-                        ml_probability=ml_prob,
+                        ml_probability=ml_prob if ml_prob is not None else "",
                         final_trade_taken=False,
                         final_skip_reason=f"error opening trade: {e}",
                     )
