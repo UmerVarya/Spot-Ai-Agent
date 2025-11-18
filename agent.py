@@ -57,6 +57,38 @@ from log_utils import setup_logger, LOG_FILE
 
 logger = setup_logger(__name__)
 
+
+def log_simple_decision_metric(
+    symbol: str,
+    *,
+    action: str,
+    direction: Optional[str],
+    size_value: Optional[float],
+    score_value: Optional[float],
+    reason_text: Optional[str],
+) -> None:
+    """Emit the SIMPLE_DECISION metric without affecting control flow."""
+
+    try:
+        size = float(size_value) if size_value is not None else 0.0
+    except (TypeError, ValueError):
+        size = 0.0
+    score = 0.0
+    try:
+        if score_value is not None:
+            score = float(score_value)
+    except (TypeError, ValueError):
+        score = 0.0
+    logger.info(
+        "[METRIC] SIMPLE_DECISION: symbol=%s, action=%s, direction=%s, size=%.1f, score=%.2f, reason=%s",
+        symbol,
+        action,
+        direction or "None",
+        size,
+        score,
+        reason_text or "unspecified",
+    )
+
 import math
 import time
 import sys
@@ -1866,6 +1898,14 @@ def run_agent_loop() -> None:
                                 cooldown_active,
                                 reason_text,
                             )
+                            log_simple_decision_metric(
+                                symbol,
+                                action="skip",
+                                direction=direction,
+                                size_value=position_size,
+                                score_value=adjusted_score if adjusted_score is not None else raw_score,
+                                reason_text=reason_text,
+                            )
                         else:
                             logger.info(
                                 "[DECISION] ENTER_TRADE %s | raw=%.2f alt_adj=%.2f cutoff=%.2f size=%.1f dir=%s",
@@ -1875,7 +1915,19 @@ def run_agent_loop() -> None:
                                 entry_cutoff,
                                 position_size,
                                 direction,
-                        )
+                            )
+                            decision_summary = (
+                                f"raw={raw_score:.2f} alt_adj={adjusted_score:.2f} cutoff={entry_cutoff:.2f}"
+                                f" size={position_size:.1f} dir={direction}"
+                            )
+                            log_simple_decision_metric(
+                                symbol,
+                                action="enter",
+                                direction=direction,
+                                size_value=position_size,
+                                score_value=adjusted_score if adjusted_score is not None else raw_score,
+                                reason_text=decision_summary,
+                            )
                         decision_logged = True
 
                     def _emit_metrics(
@@ -1982,6 +2034,14 @@ def run_agent_loop() -> None:
                             f"(pattern={pattern_name or 'none'}, setup={setup_type or 'unknown'})"
                         )
                         logger.info("[SKIP] %s: %s", symbol, reason_text)
+                        log_simple_decision_metric(
+                            symbol,
+                            action="skip",
+                            direction=direction,
+                            size_value=position_size,
+                            score_value=adjusted_score if adjusted_score is not None else score,
+                            reason_text=reason_text,
+                        )
                         breakdown_data["auction_guard_pass"] = False
                         reason_key = "auction_guard_fail"
                         _assign_skip_reason(reason_key, reason_text, overwrite=True)
@@ -2042,6 +2102,14 @@ def run_agent_loop() -> None:
                             reason_text,
                             score,
                         )
+                        log_simple_decision_metric(
+                            symbol,
+                            action="skip",
+                            direction=direction,
+                            size_value=position_size,
+                            score_value=adjusted_score if adjusted_score is not None else score,
+                            reason_text=reason_text,
+                        )
                         reason_key = custom_skip_reason_key
                         _log_decision("skip")
                         _emit_metrics(
@@ -2074,6 +2142,14 @@ def run_agent_loop() -> None:
                             reason_text = "unable to derive impulse-leg LVNs for trend continuation."
                             _assign_skip_reason(reason_key, reason_text, overwrite=True)
                             logger.debug("[SKIP] %s: %s", symbol, reason_text)
+                            log_simple_decision_metric(
+                                symbol,
+                                action="skip",
+                                direction=direction,
+                                size_value=position_size,
+                                score_value=adjusted_score if adjusted_score is not None else score,
+                                reason_text=reason_text,
+                            )
                             _log_decision("skip")
                             _emit_metrics(
                                 "skip",
@@ -2094,6 +2170,14 @@ def run_agent_loop() -> None:
                             )
                             _assign_skip_reason(reason_key, reason_text, overwrite=True)
                             logger.debug("[SKIP] %s: %s", symbol, reason_text)
+                            log_simple_decision_metric(
+                                symbol,
+                                action="skip",
+                                direction=direction,
+                                size_value=position_size,
+                                score_value=adjusted_score if adjusted_score is not None else score,
+                                reason_text=reason_text,
+                            )
                             _log_decision("skip")
                             _emit_metrics(
                                 "skip",
@@ -2109,6 +2193,14 @@ def run_agent_loop() -> None:
                             )
                             _assign_skip_reason(reason_key, reason_text, overwrite=True)
                             logger.info("[SKIP] %s: %s", symbol, reason_text)
+                            log_simple_decision_metric(
+                                symbol,
+                                action="skip",
+                                direction=direction,
+                                size_value=position_size,
+                                score_value=adjusted_score if adjusted_score is not None else score,
+                                reason_text=reason_text,
+                            )
                             _log_decision("skip")
                             _emit_metrics(
                                 "skip",
@@ -2126,6 +2218,14 @@ def run_agent_loop() -> None:
                             )
                             _assign_skip_reason(reason_key, reason_text, overwrite=True)
                             logger.debug("[SKIP] %s: %s", symbol, reason_text)
+                            log_simple_decision_metric(
+                                symbol,
+                                action="skip",
+                                direction=direction,
+                                size_value=position_size,
+                                score_value=adjusted_score if adjusted_score is not None else score,
+                                reason_text=reason_text,
+                            )
                             _log_decision("skip")
                             _emit_metrics(
                                 "skip",
@@ -2143,6 +2243,14 @@ def run_agent_loop() -> None:
                             reason_text = "reclaim leg not pulling back into an LVN."
                             _assign_skip_reason(reason_key, reason_text, overwrite=True)
                             logger.debug("[SKIP] %s: %s", symbol, reason_text)
+                            log_simple_decision_metric(
+                                symbol,
+                                action="skip",
+                                direction=direction,
+                                size_value=position_size,
+                                score_value=adjusted_score if adjusted_score is not None else score,
+                                reason_text=reason_text,
+                            )
                             _log_decision("skip")
                             _emit_metrics(
                                 "skip",
@@ -2158,6 +2266,14 @@ def run_agent_loop() -> None:
                             )
                             _assign_skip_reason(reason_key, reason_text, overwrite=True)
                             logger.info("[SKIP] %s: %s", symbol, reason_text)
+                            log_simple_decision_metric(
+                                symbol,
+                                action="skip",
+                                direction=direction,
+                                size_value=position_size,
+                                score_value=adjusted_score if adjusted_score is not None else score,
+                                reason_text=reason_text,
+                            )
                             _log_decision("skip")
                             _emit_metrics(
                                 "skip",
@@ -2662,6 +2778,7 @@ def run_agent_loop() -> None:
                 htf_trend_pct = context["htf_trend_pct"]
                 signal_snapshot = context["signal_snapshot"]
                 macro_ind = context["macro_ind"]
+                direction = context.get("direction") or "long"
 
                 decision = bool(decision_obj.get("decision", False))
                 final_conf = float(decision_obj.get("confidence", score))
@@ -2682,7 +2799,16 @@ def run_agent_loop() -> None:
                 )
 
                 if not decision:
-                    log_rejection(symbol, reason or "Unknown reason")
+                    rejection_reason = reason or "Unknown reason"
+                    log_simple_decision_metric(
+                        symbol,
+                        action="skip",
+                        direction=direction,
+                        size_value=position_size,
+                        score_value=score,
+                        reason_text=f"brain veto: {rejection_reason}",
+                    )
+                    log_rejection(symbol, rejection_reason)
                     continue
 
                 ml_prob = predict_success_probability(
@@ -2703,7 +2829,16 @@ def run_agent_loop() -> None:
                         ml_prob,
                         symbol,
                     )
-                    log_rejection(symbol, f"ML prob {ml_prob:.2f} too low")
+                    ml_reason = f"ML prob {ml_prob:.2f} too low"
+                    log_simple_decision_metric(
+                        symbol,
+                        action="skip",
+                        direction=direction,
+                        size_value=position_size,
+                        score_value=score,
+                        reason_text=ml_reason,
+                    )
+                    log_rejection(symbol, ml_reason)
                     continue
 
                 final_conf = round((final_conf + ml_prob * 10) / 2.0, 2)
@@ -2774,7 +2909,16 @@ def run_agent_loop() -> None:
                         ", ".join(reasons_list) if reasons_list else "none",
                         float(risk_review.get("max_rr", 0.0)),
                     )
-                    log_rejection(symbol, f"Risk veto: {conflict_text or 'guardrail failure'}")
+                    risk_reason = f"Risk veto: {conflict_text or 'guardrail failure'}"
+                    log_simple_decision_metric(
+                        symbol,
+                        action="skip",
+                        direction=direction,
+                        size_value=position_size,
+                        score_value=score,
+                        reason_text=risk_reason,
+                    )
+                    log_rejection(symbol, risk_reason)
                     continue
                 else:
                     logger.info(
@@ -2784,8 +2928,15 @@ def run_agent_loop() -> None:
                         float(risk_review.get("max_rr", 0.0)),
                     )
                 if position_size <= 0:
-                    logger.info(
-                        "[SKIP] %s: computed position size <= 0 after ML veto integration", symbol
+                    reason_text = "computed position size <= 0 after ML veto integration"
+                    logger.info("[SKIP] %s: %s", symbol, reason_text)
+                    log_simple_decision_metric(
+                        symbol,
+                        action="skip",
+                        direction="long",
+                        size_value=position_size,
+                        score_value=score,
+                        reason_text=reason_text,
                     )
                     continue
 
@@ -3015,8 +3166,27 @@ def run_agent_loop() -> None:
                             f"{new_trade}\n\n Narrative:\n{narrative}\n\nNews Summary:\n{decision_obj.get('news_summary', '')}",
                         )
                         opened_count += 1
+                        log_simple_decision_metric(
+                            symbol,
+                            action="enter",
+                            direction=direction,
+                            size_value=position_size,
+                            score_value=score,
+                            reason_text=(
+                                f"trade opened @ {entry_price} | notional={trade_usd} | qty={position_size}"
+                            ),
+                        )
                     else:
+                        reason_text = "trade already active"
                         logger.info("Trade for %s already active; skipping new entry", symbol)
+                        log_simple_decision_metric(
+                            symbol,
+                            action="skip",
+                            direction=direction,
+                            size_value=position_size,
+                            score_value=score,
+                            reason_text=reason_text,
+                        )
                 except Exception as e:
                     logger.error("Error opening trade for %s: %s", symbol, e, exc_info=True)
             # Manage existing trades after opening new ones
