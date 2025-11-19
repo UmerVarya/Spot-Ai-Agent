@@ -362,6 +362,7 @@ from news_monitor import (
     get_news_monitor,
     start_background_news_monitor,
 )
+from news_risk import get_news_gate_state
 from trade_utils import simulate_slippage, estimate_commission  # noqa: F401
 from trade_utils import (
     get_top_symbols,
@@ -1629,6 +1630,16 @@ def run_agent_loop() -> None:
                     logger.warning("LLM news monitor warning: %s", reason)
             if monitor_state and monitor_state.get("alert_triggered"):
                 macro_reasons.append("LLM news alert")
+            gate_state = get_news_gate_state()
+            if gate_state.get("mode") == "HARD_HALT":
+                ttl = gate_state.get("ttl_secs", 0)
+                reason = gate_state.get("reason") or "News hard halt active"
+                logger.error(
+                    "News gate blocking new trades: %s (ttl=%ss)",
+                    reason,
+                    ttl,
+                )
+                continue
             signal_cache.update_context(
                 sentiment_bias=sentiment_bias, macro=macro_context_live
             )
