@@ -186,25 +186,25 @@ def render_news_status_banner() -> None:
     """Display the latest news halt status."""
 
     status = load_news_status()
-    mode = status.get("mode")
+    category = (status.get("category") or "UNKNOWN").upper()
+    mode = (status.get("mode") or "NONE").upper()
+    ttl = max(0, int(status.get("ttl_secs", 0)))
+    mins, secs = divmod(ttl, 60)
+    ttl_str = f"{mins}m left" if mins else f"{secs}s left"
+    headline = (
+        status.get("last_event_headline")
+        or status.get("reason")
+        or "No headline provided"
+    )
+
+    warning_categories = {"CRYPTO_MEDIUM", "MACRO_USD_T2"}
     if mode == "HARD_HALT":
-        ttl = int(status.get("ttl_secs", 0))
-        mins = ttl // 60
-        secs = ttl % 60
-        ttl_str = f"{mins} min left" if mins > 0 else f"{secs} sec left"
-        headline = (
-            status.get("last_event_headline")
-            or status.get("reason")
-            or "Unknown event"
-        )
-        st.error(
-            f"📡 NEWS: HARD HALT\n\n"
-            f"**Category:** `{status.get('category', 'UNKNOWN')}`\n\n"
-            f"**Time remaining:** {ttl_str}\n\n"
-            f"**Trigger:** {headline}"
-        )
+        st.error(f"🚨 NEWS HALT ({category}) – {ttl_str}")
+        st.write(f"**Headline:** {headline}")
+    elif category in warning_categories:
+        st.warning(f"⚠ NEWS: {category} – {headline}")
     else:
-        st.success("📡 NEWS: OK – no active hard halt")
+        st.success("🟢 NEWS: All Clear")
     st.caption(format_news_status_line(status=status))
 
 
