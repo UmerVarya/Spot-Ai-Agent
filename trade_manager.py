@@ -18,6 +18,7 @@ working directory.
 
 from datetime import datetime, timedelta, timezone
 import math
+import os
 import threading
 import time
 from typing import Any, Dict, List, Tuple, Optional, Union, Mapping
@@ -68,7 +69,23 @@ EARLY_EXIT_WEIGHTS = {
     "vwap": 0.15,
 }
 EXIT_SCORE_THRESHOLD = 0.6
-ATR_MULTIPLIER = 1.0
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        raw = os.getenv(name)
+        if raw is None:
+            return float(default)
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return float(default)
+
+
+ATR_MULTIPLIER = _env_float("EARLY_EXIT_ATR_MULTIPLIER", 1.0)
+MIN_DRAWDOWN_PCT = max(0.0, _env_float("EARLY_EXIT_MIN_DRAWDOWN_PCT", 0.003))
+EARLY_EXIT_ATR_TIMEFRAME = os.getenv("EARLY_EXIT_ATR_TIMEFRAME", "1m").strip().lower() or "1m"
+_ATR_TIMEFRAME_FREQ = {"1m": "1T", "5m": "5T", "15m": "15T"}
+_ATR_TIMEFRAME_WARNING_EMITTED = False
 # Require fairly high confidence before exiting on bearish macro signals
 MACRO_CONFIDENCE_EXIT_THRESHOLD = 7
 # Maximum duration to hold a trade before forcing exit
@@ -173,29 +190,37 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 
-def _calculate_leg_pnl(trade: dict, exit_price: float, quantity: float, fees: float, slippage: float) -> float:
-    """Return realised PnL for a single trade leg."""
+def _calculate_leg_pnl(
+    trade: dict,
+    exit_price: float,
+    quantity: float,
+    fees: float,
+    slippage: float,
+) -> Tuple[float, float, float]:
+    """Return gross/net PnL and notional for a single trade leg."""
 
     try:
         entry_val = float(trade.get("entry"))
         exit_val = float(exit_price)
         qty_val = float(quantity)
     except Exception:
-        return 0.0
+        return 0.0, 0.0, 0.0
     direction = str(trade.get("direction", "long")).lower()
     if direction == "short":
-        pnl = (entry_val - exit_val) * qty_val
+        gross = (entry_val - exit_val) * qty_val
     else:
-        pnl = (exit_val - entry_val) * qty_val
+        gross = (exit_val - entry_val) * qty_val
+    notional = entry_val * qty_val if math.isfinite(entry_val * qty_val) else 0.0
+    net = gross
     try:
-        pnl -= float(fees or 0.0)
+        net -= float(fees or 0.0)
     except Exception:
         pass
     try:
-        pnl -= float(slippage or 0.0)
+        net -= float(slippage or 0.0)
     except Exception:
         pass
-    return pnl
+    return gross, net, notional
 
 
 def _update_live_market(
@@ -458,12 +483,15 @@ def _record_partial_exit(
         slippage_val = float(slippage or 0.0)
     except Exception:
         slippage_val = 0.0
-    pnl = _calculate_leg_pnl(trade, exit_price, quantity, fee_val, slippage_val)
-    trade["realized_pnl"] = trade.get("realized_pnl", 0.0) + pnl
+    gross_leg, net_leg, _ = _calculate_leg_pnl(
+        trade, exit_price, quantity, fee_val, slippage_val
+    )
+    trade["realized_pnl"] = trade.get("realized_pnl", 0.0) + net_leg
+    trade["realized_gross_pnl"] = trade.get("realized_gross_pnl", 0.0) + gross_leg
     trade["realized_fees"] = trade.get("realized_fees", 0.0) + fee_val
     trade["realized_slippage"] = trade.get("realized_slippage", 0.0) + slippage_val
     trade["last_partial_exit"] = exit_time
-    trade["last_partial_pnl"] = pnl
+    trade["last_partial_pnl"] = net_leg
     try:
         quantity_val = float(quantity)
     except Exception:
@@ -476,7 +504,7 @@ def _record_partial_exit(
     if label == "tp1":
         trade["tp1_partial"] = True
         trade["tp1_exit_price"] = exit_price
-        trade["pnl_tp1"] = pnl
+        trade["pnl_tp1"] = net_leg
         if quantity_val is not None:
             trade["size_tp1"] = quantity_val
         if entry_val is not None and quantity_val is not None:
@@ -484,15 +512,15 @@ def _record_partial_exit(
     elif label == "tp2":
         trade["tp2_partial"] = True
         trade["tp2_exit_price"] = exit_price
-        trade["pnl_tp2"] = pnl
+        trade["pnl_tp2"] = net_leg
         if quantity_val is not None:
             trade["size_tp2"] = quantity_val
         if entry_val is not None and quantity_val is not None:
             trade["notional_tp2"] = entry_val * quantity_val
     else:
-        trade["trail_partial_pnl"] = trade.get("trail_partial_pnl", 0.0) + pnl
+        trade["trail_partial_pnl"] = trade.get("trail_partial_pnl", 0.0) + net_leg
         trade["trail_partial_count"] = trade.get("trail_partial_count", 0) + 1
-        trade["last_trail_partial_pnl"] = pnl
+        trade["last_trail_partial_pnl"] = net_leg
 
 
 def _finalize_trade_result(
@@ -514,25 +542,54 @@ def _finalize_trade_result(
         slippage_val = float(slippage or 0.0)
     except Exception:
         slippage_val = 0.0
-    final_leg_pnl = _calculate_leg_pnl(trade, exit_price, quantity, fee_val, slippage_val)
-    trade["final_leg_pnl"] = final_leg_pnl
+    final_gross, final_net, _ = _calculate_leg_pnl(
+        trade, exit_price, quantity, fee_val, slippage_val
+    )
+    trade["final_leg_pnl"] = final_net
+    trade["final_leg_gross_pnl"] = final_gross
     trade["final_exit_size"] = quantity
-    total_pnl = trade.get("realized_pnl", 0.0) + final_leg_pnl
+    total_gross = trade.get("realized_gross_pnl", 0.0) + final_gross
+    total_pnl = trade.get("realized_pnl", 0.0) + final_net
     total_fees = trade.get("realized_fees", 0.0) + fee_val
     total_slippage = trade.get("realized_slippage", 0.0) + slippage_val
+    entry_val = _to_float(trade.get("entry"))
+    initial_qty = _to_float(trade.get("initial_size"))
+    if initial_qty is None:
+        initial_qty = _to_float(trade.get("position_size"))
+    if initial_qty in (None, 0.0):
+        raw_size = _to_float(trade.get("size"))
+        if raw_size is not None and entry_val not in (None, 0.0):
+            try:
+                initial_qty = float(raw_size) / float(entry_val)
+            except Exception:
+                initial_qty = None
+    if initial_qty is None:
+        initial_qty = quantity
+    notional = None
+    if entry_val is not None and initial_qty is not None:
+        try:
+            notional = float(entry_val) * float(initial_qty)
+        except Exception:
+            notional = None
     trade["realized_pnl"] = total_pnl
     trade["total_pnl"] = total_pnl
+    trade["net_pnl"] = total_pnl
+    trade["realized_gross_pnl"] = total_gross
+    trade["gross_pnl"] = total_gross
     trade["realized_fees"] = total_fees
     trade["total_fees"] = total_fees
     trade["realized_slippage"] = total_slippage
     trade["total_slippage"] = total_slippage
+    if notional is not None:
+        trade["notional"] = notional
+        if notional not in (0, 0.0):
+            trade["pnl_pct"] = (total_pnl / notional) * 100.0
     trade["tp1_partial"] = bool(trade.get("tp1_partial"))
     trade["tp2_partial"] = bool(trade.get("tp2_partial"))
-    entry_val = _to_float(trade.get("entry"))
     outcome_token = str(outcome or trade.get("outcome", "")).lower()
     if "tp3" in outcome_token and "_partial" not in outcome_token:
         trade["tp3_reached"] = True
-        trade["pnl_tp3"] = trade.get("pnl_tp3", 0.0) + final_leg_pnl
+        trade["pnl_tp3"] = trade.get("pnl_tp3", 0.0) + final_net
         try:
             qty_val = float(quantity)
         except Exception:
@@ -541,7 +598,49 @@ def _finalize_trade_result(
             trade["size_tp3"] = qty_val
         if entry_val is not None and qty_val is not None:
             trade["notional_tp3"] = entry_val * qty_val
+
+    if notional and notional > 0:
+        if abs(total_pnl) > notional * 0.2:
+            logger.warning(
+                "Suspicious PnL magnitude; check slippage/fees",
+                extra={
+                    "symbol": trade.get("symbol"),
+                    "notional": notional,
+                    "net_pnl": total_pnl,
+                    "gross_pnl": total_gross,
+                    "fees": total_fees,
+                    "slippage": total_slippage,
+                },
+            )
+        if total_slippage > notional * 0.02:
+            logger.warning(
+                "Unusually large slippage on exit",
+                extra={
+                    "symbol": trade.get("symbol"),
+                    "notional": notional,
+                    "slippage": total_slippage,
+                    "net_pnl": total_pnl,
+                },
+            )
     return total_fees, total_slippage
+
+
+def _log_trade_closed(trade: dict, *, reason: str, outcome: str) -> None:
+    """Emit a structured log when a trade leaves the active set."""
+
+    payload = {
+        "trade_id": trade.get("trade_id"),
+        "symbol": trade.get("symbol"),
+        "entry_price": _to_float(trade.get("entry")),
+        "exit_price": _to_float(trade.get("exit_price")),
+        "gross_pnl": trade.get("gross_pnl"),
+        "net_pnl": trade.get("net_pnl", trade.get("realized_pnl")),
+        "fees_usdt": trade.get("total_fees"),
+        "slippage_usdt": trade.get("total_slippage"),
+        "reason": reason,
+        "outcome": outcome,
+    }
+    logger.info("Closed trade and removed from active_trades.json", extra=payload)
 
 
 def execute_exit_trade(
@@ -566,19 +665,34 @@ def execute_exit_trade(
     exit_price_val = _to_float(exit_price)
     if exit_price_val is None:
         exit_price_val = 0.0
+    requested_exit_price = exit_price_val
     if exit_time is None:
         exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    if fees is None:
-        commission_rate = estimate_commission(symbol, quantity=qty_val, maker=maker)
-        fees = exit_price_val * qty_val * commission_rate
+    slippage_per_unit = 0.0
     if slippage is None:
         slip_price = simulate_slippage(exit_price_val, direction=direction)
-        slippage = abs(slip_price - exit_price_val)
+        fill_price = slip_price
+        slippage_per_unit = abs(slip_price - requested_exit_price)
+        slippage = slippage_per_unit * qty_val
+    else:
+        fill_price = exit_price_val
+        try:
+            slippage = float(slippage)
+        except Exception:
+            slippage = 0.0
+        if qty_val > 0:
+            slippage_per_unit = abs(slippage) / qty_val
+    if fees is None:
+        commission_rate = estimate_commission(symbol, quantity=qty_val, maker=maker)
+        fees = fill_price * qty_val * commission_rate
 
     trade["exit_price"] = exit_price_val
+    trade["requested_exit_price"] = requested_exit_price
     trade["exit_time"] = exit_time
     trade["outcome"] = outcome
     trade["exit_reason"] = reason
+    trade["slippage_per_unit"] = slippage_per_unit
+    trade["fill_price"] = fill_price
 
     try:
         current_qty = float(trade.get("position_size", 0.0))
@@ -605,6 +719,23 @@ def execute_exit_trade(
         exit_time=exit_time,
         fees=total_fees,
         slippage=total_slippage,
+    )
+    gross_pnl = trade.get("gross_pnl")
+    net_pnl = trade.get("net_pnl", trade.get("realized_pnl"))
+    logger.info(
+        "Trade exit summary",
+        extra={
+            "symbol": symbol,
+            "entry_price": trade.get("entry"),
+            "exit_price": fill_price,
+            "requested_exit_price": requested_exit_price,
+            "qty": qty_val,
+            "gross_pnl": gross_pnl,
+            "net_pnl": net_pnl,
+            "fees_usdt": total_fees,
+            "slippage_usdt": total_slippage,
+            "outcome": outcome,
+        },
     )
     logger.info(
         "✅ Position closed for %s at %.6f (%s)",
@@ -787,8 +918,8 @@ def _update_stop_loss(trade: dict, new_sl: float) -> None:
 
 def _persist_active_snapshot(
     updated_trades: List[dict],
-    active_trades: List[dict],
-    index: int,
+    active_trades: Optional[List[dict]] = None,
+    index: int = -1,
     *,
     include_current: bool = True,
 ) -> None:
@@ -802,12 +933,16 @@ def _persist_active_snapshot(
     """
 
     try:
-        snapshot: List[dict] = list(updated_trades)
-        if include_current and 0 <= index < len(active_trades):
-            snapshot.append(active_trades[index])
-        if index + 1 < len(active_trades):
-            snapshot.extend(active_trades[index + 1 :])
-        save_active_trades([trade for trade in snapshot if trade is not None])
+        if active_trades is None:
+            snapshot = [trade for trade in updated_trades if trade is not None]
+        else:
+            snapshot = list(updated_trades)
+            if include_current and 0 <= index < len(active_trades):
+                snapshot.append(active_trades[index])
+            if index + 1 < len(active_trades):
+                snapshot.extend(active_trades[index + 1 :])
+            snapshot = [trade for trade in snapshot if trade is not None]
+        save_active_trades(snapshot)
     except Exception:
         logger.exception("Failed to persist active trades snapshot")
 
@@ -932,7 +1067,102 @@ def create_new_trade(
             symbol or "unknown",
         )
         return False
-    return store_trade(trade)
+    stored = store_trade(trade)
+    if stored:
+        entry_price = _to_float(trade.get("entry"))
+        qty_val = _to_float(trade.get("position_size"))
+        notional_val = _to_float(trade.get("size"))
+        if notional_val is None and entry_price is not None and qty_val is not None:
+            notional_val = entry_price * qty_val
+        payload = {
+            "symbol": symbol,
+            "entry_price": entry_price,
+            "quantity": qty_val,
+            "notional_usd": notional_val,
+            "atr_at_entry": _to_float(trade.get("atr_at_entry")),
+            "sl": _to_float(trade.get("sl")),
+            "tp1": _to_float(trade.get("tp1")),
+            "tp2": _to_float(trade.get("tp2")),
+            "tp3": _to_float(trade.get("tp3")),
+            "atr_guard_multiplier": ATR_MULTIPLIER,
+            "atr_guard_min_drawdown_pct": MIN_DRAWDOWN_PCT,
+            "atr_guard_timeframe": EARLY_EXIT_ATR_TIMEFRAME,
+        }
+        logger.info("New trade entry recorded", extra=payload)
+    return stored
+
+
+def _latest_indicator_value(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if hasattr(value, "iloc"):
+        try:
+            return float(value.iloc[-1])
+        except Exception:
+            return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _warn_atr_timeframe_once(message: str) -> None:
+    global _ATR_TIMEFRAME_WARNING_EMITTED
+    if _ATR_TIMEFRAME_WARNING_EMITTED:
+        return
+    logger.warning(message)
+    _ATR_TIMEFRAME_WARNING_EMITTED = True
+
+
+def _compute_atr_for_guard(price_data: pd.DataFrame, indicators: Any) -> Optional[float]:
+    atr_value = _latest_indicator_value(indicators.get("atr")) if isinstance(indicators, Mapping) or hasattr(indicators, "get") else None
+    freq = _ATR_TIMEFRAME_FREQ.get(EARLY_EXIT_ATR_TIMEFRAME)
+    if EARLY_EXIT_ATR_TIMEFRAME == "1m" or freq is None:
+        if freq is None and EARLY_EXIT_ATR_TIMEFRAME != "1m":
+            _warn_atr_timeframe_once(
+                f"Unsupported EARLY_EXIT_ATR_TIMEFRAME={EARLY_EXIT_ATR_TIMEFRAME}; falling back to 1m",
+            )
+        return atr_value
+    if not isinstance(price_data.index, pd.DatetimeIndex):
+        _warn_atr_timeframe_once(
+            "Price data missing datetime index; ATR guard reverting to 1m timeframe",
+        )
+        return atr_value
+    try:
+        resampled = (
+            price_data.resample(freq)
+            .agg(
+                {
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                }
+            )
+            .dropna()
+        )
+    except Exception:
+        _warn_atr_timeframe_once(
+            f"Failed to resample price data for ATR timeframe {EARLY_EXIT_ATR_TIMEFRAME}; using 1m",
+        )
+        return atr_value
+    if resampled.empty:
+        return atr_value
+    try:
+        ht_indicators = calculate_indicators(resampled)
+    except Exception:
+        _warn_atr_timeframe_once(
+            f"Unable to compute ATR for timeframe {EARLY_EXIT_ATR_TIMEFRAME}; using 1m",
+        )
+        return atr_value
+    ht_atr = _latest_indicator_value(ht_indicators.get("atr")) if hasattr(ht_indicators, "get") else None
+    if ht_atr is None:
+        _warn_atr_timeframe_once(
+            f"ATR unavailable for timeframe {EARLY_EXIT_ATR_TIMEFRAME}; using 1m",
+        )
+        return atr_value
+    return ht_atr
 
 
 def should_exit_early(
@@ -952,13 +1182,53 @@ def should_exit_early(
 
     indicators = calculate_indicators(price_data)
     current_price = price_data['close'].iloc[-1]
-    atr = indicators.get('atr', 0)
-    if hasattr(atr, 'iloc'):
-        atr = atr.iloc[-1]
-    if direction == "long" and atr and observed_price is not None:
-        drawdown = entry - observed_price
-        if drawdown > atr * ATR_MULTIPLIER:
-            return True, f"Drawdown {drawdown:.4f} exceeds {ATR_MULTIPLIER} ATR ({atr:.4f})"
+    atr_value = _compute_atr_for_guard(price_data, indicators)
+    direction_token = str(direction).lower()
+    entry_price = _to_float(entry)
+    observed_val = _to_float(observed_price) if observed_price is not None else None
+    drawdown_usd = 0.0
+    drawdown_pct = 0.0
+    atr_pct = 0.0
+    atr_reason = None
+    atr_triggered = False
+    if (
+        direction_token == "long"
+        and entry_price is not None
+        and observed_val is not None
+    ):
+        drawdown_usd = max(0.0, entry_price - observed_val)
+        if entry_price > 0:
+            drawdown_pct = drawdown_usd / entry_price
+            if atr_value is not None and atr_value > 0:
+                atr_pct = atr_value / entry_price
+        if (
+            atr_value is not None
+            and atr_value > 0
+            and atr_pct > 0
+            and drawdown_pct >= MIN_DRAWDOWN_PCT
+            and drawdown_pct >= atr_pct * ATR_MULTIPLIER
+        ):
+            atr_triggered = True
+            atr_reason = (
+                f"ATR drawdown {drawdown_pct:.3%} exceeds {ATR_MULTIPLIER:.2f}×ATR ({atr_pct:.3%})"
+            )
+    logger.debug(
+        "ATR early-exit check",
+        extra={
+            "symbol": trade.get("symbol"),
+            "entry": entry_price,
+            "observed": observed_val,
+            "drawdown_usd": drawdown_usd,
+            "drawdown_pct": drawdown_pct,
+            "atr": atr_value,
+            "atr_pct": atr_pct,
+            "atr_mult": ATR_MULTIPLIER,
+            "min_dd_pct": MIN_DRAWDOWN_PCT,
+            "triggered": atr_triggered,
+        },
+    )
+    if atr_triggered and atr_reason:
+        return True, atr_reason
 
     rsi = indicators.get("rsi", 50)
     macd_hist = indicators.get("macd", 0)
@@ -979,7 +1249,7 @@ def should_exit_early(
 
     score = 0.0
     reasons = []
-    if direction == "long":
+    if direction_token == "long":
         if rsi < 45:
             score += EARLY_EXIT_WEIGHTS["rsi"]
             reasons.append(f"RSI {rsi:.2f}")
@@ -1068,7 +1338,17 @@ def should_exit_position(
 
 
 def _manage_trades_body() -> None:
-    active_trades = load_active_trades()
+    raw_active = load_active_trades()
+    if isinstance(raw_active, dict):
+        logger.warning(
+            "Active trades snapshot was a mapping; normalising to list layout",
+        )
+        active_trades = [value for value in raw_active.values() if isinstance(value, dict)]
+        save_active_trades(active_trades)
+    elif isinstance(raw_active, list):
+        active_trades = list(raw_active)
+    else:
+        active_trades = []
     updated_trades: List[dict] = []
     for index, trade in enumerate(active_trades):
         symbol = trade.get("symbol")
@@ -1201,6 +1481,7 @@ def _manage_trades_body() -> None:
                 quantity=qty,
                 exit_time=exit_time,
             )
+            _log_trade_closed(trade, reason="max_holding_time", outcome="time_exit")
             _persist_active_snapshot(
                 updated_trades, active_trades, index, include_current=False
             )
@@ -1413,6 +1694,7 @@ def _manage_trades_body() -> None:
                 exit_time=exit_time,
                 maker=maker_flag,
             )
+            _log_trade_closed(trade, reason=reason, outcome="early_exit")
             _persist_active_snapshot(
                 updated_trades, active_trades, index, include_current=False
             )
@@ -1462,6 +1744,7 @@ def _manage_trades_body() -> None:
                         exit_time=exit_time,
                         maker=maker_flag,
                     )
+                    _log_trade_closed(trade, reason=reason_text, outcome="orderbook_exit")
                     _persist_active_snapshot(
                         updated_trades, active_trades, index, include_current=False
                     )
@@ -1650,6 +1933,7 @@ def _manage_trades_body() -> None:
                         quantity=qty,
                         exit_time=exit_time,
                     )
+                    _log_trade_closed(trade, reason=reason_text, outcome=outcome_label)
                     _persist_active_snapshot(
                         updated_trades, active_trades, index, include_current=False
                     )
@@ -1768,7 +2052,7 @@ def _manage_trades_body() -> None:
         logger.debug("%s actions: %s", symbol, actions if actions else "none")
         updated_trades.append(trade)
     # Persist updated trades to storage
-    save_active_trades(updated_trades)
+    _persist_active_snapshot(updated_trades)
 
 
 def manage_trades() -> None:

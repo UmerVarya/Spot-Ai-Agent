@@ -616,6 +616,14 @@ def log_trade_result(
         except Exception:
             return ERROR_VALUE
 
+    def _coerce_float(value: Optional[object]) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
     def _optional_bool_field(value: Optional[object]):
         if value is None or value == "":
             return MISSING_VALUE
@@ -769,25 +777,34 @@ def log_trade_result(
             pass
 
     # Compute net PnL and percentage
-    pnl_val = 0.0
-    if entry_val is not None and quantity is not None:
-        if str(trade.get("direction", "")).lower() == "short":
-            pnl_val = (entry_val - exit_price_val) * quantity
-        else:
-            pnl_val = (exit_price_val - entry_val) * quantity
-    pnl_val -= fees_val
-    pnl_val -= slippage_val
+    gross_pnl_val = _coerce_float(trade.get("gross_pnl"))
+    if gross_pnl_val is None:
+        gross_pnl_val = _coerce_float(trade.get("realized_gross_pnl"))
+    net_pnl_val = _coerce_float(trade.get("net_pnl"))
+    if net_pnl_val is None:
+        net_pnl_val = _coerce_float(trade.get("total_pnl"))
+    if net_pnl_val is None:
+        net_pnl_val = _coerce_float(trade.get("realized_pnl"))
 
-    pnl_override = trade.get("total_pnl", trade.get("realized_pnl"))
-    if pnl_override is not None:
-        try:
-            pnl_val = float(pnl_override)
-        except Exception:
-            pass
+    direction_token = str(trade.get("direction", "long")).lower()
+    if gross_pnl_val is None and entry_val is not None and quantity is not None:
+        if direction_token == "short":
+            gross_pnl_val = (entry_val - exit_price_val) * quantity
+        else:
+            gross_pnl_val = (exit_price_val - entry_val) * quantity
+    if net_pnl_val is None and gross_pnl_val is not None:
+        net_pnl_val = gross_pnl_val - fees_val - slippage_val
+    if net_pnl_val is None:
+        net_pnl_val = 0.0
+    pnl_val = net_pnl_val
 
     pnl_pct = None
-    if isinstance(notional, (int, float)) and notional not in (0, 0.0):
-        pnl_pct = (pnl_val / notional) * 100
+    if (
+        isinstance(notional, (int, float))
+        and notional not in (0, 0.0)
+        and net_pnl_val is not None
+    ):
+        pnl_pct = (net_pnl_val / notional) * 100
 
     def _parse_timestamp(value: Optional[object]) -> Optional[pd.Timestamp]:
         """Return a timezone-aware timestamp when ``value`` resembles a date."""
@@ -925,7 +942,11 @@ def log_trade_result(
         "size": _optional_numeric_field(size_val),
         "notional": _optional_numeric_field(notional),
         "fees": _optional_numeric_field(fees_val),
+        "fees_usdt": _optional_numeric_field(fees_val),
         "slippage": _optional_numeric_field(slippage_val),
+        "slippage_usdt": _optional_numeric_field(slippage_val),
+        "gross_pnl": _optional_numeric_field(gross_pnl_val),
+        "net_pnl": _optional_numeric_field(net_pnl_val),
         "pnl": _optional_numeric_field(pnl_val),
         "pnl_pct": _optional_numeric_field(pnl_pct),
         "outcome": _optional_text_field(outcome_text or None),
@@ -1238,6 +1259,18 @@ def log_trade_result(
 
     if os.path.abspath(history_path) == os.path.abspath(TRADE_HISTORY_FILE):
         _maybe_send_llm_performance_email()
+
+    logger.info(
+        "Trade history row written",
+        extra={
+            "trade_id": row.get("trade_id"),
+            "symbol": row.get("symbol"),
+            "net_pnl": net_pnl_val,
+            "pnl_pct": pnl_pct,
+            "slippage_usdt": slippage_val,
+            "path": history_path,
+        },
+    )
 
 
 def _deduplicate_history(df: pd.DataFrame) -> pd.DataFrame:
