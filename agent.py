@@ -417,7 +417,12 @@ from sequence_model import (
 from drawdown_guard import is_trading_blocked
 import numpy as np
 
-from trade_constants import ATR_STOP_MULTIPLIER, TP_ATR_MULTIPLIERS
+from trade_constants import (
+    ATR_STOP_MULTIPLIER,
+    DEFAULT_TAKE_PROFIT_STRATEGY,
+    TP1_TRAILING_ONLY_STRATEGY,
+    TP_ATR_MULTIPLIERS,
+)
 from rl_policy import RLPositionSizer
 from trade_utils import get_rl_state, set_symbol_tiers
 from microstructure import plan_execution
@@ -3339,6 +3344,8 @@ def run_agent_loop() -> None:
                     elif llm_decision_token in {"vetoed", "rejected", "no"}:
                         strategy_label = "PatternTrade-LLM"
 
+                    take_profit_strategy = DEFAULT_TAKE_PROFIT_STRATEGY
+
                     new_trade = {
                         "symbol": symbol,
                         "direction": "long",
@@ -3403,8 +3410,13 @@ def run_agent_loop() -> None:
                         "poc_target": poc_target_price,
                         "auction_state": auction_state,
                         "orderflow_analysis": orderflow_metadata,
-                        "take_profit_strategy": "atr_trailing",
+                        "take_profit_strategy": take_profit_strategy,
                     }
+                    if take_profit_strategy == TP1_TRAILING_ONLY_STRATEGY:
+                        new_trade["tp1_price"] = tp1
+                        new_trade["tp1_triggered"] = False
+                        new_trade["trail_mode"] = False
+                        new_trade["max_price"] = entry_price
                     if micro_plan:
                         logger.debug("Microstructure plan for %s: %s", symbol, micro_plan)
                         new_trade["microstructure_plan"] = micro_plan

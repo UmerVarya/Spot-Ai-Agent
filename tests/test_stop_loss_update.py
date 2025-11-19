@@ -5,7 +5,12 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pytest
 
-from trade_constants import TRAIL_INITIAL_ATR, TRAIL_TIGHT_ATR, TRAIL_LOCK_IN_RATIO
+from trade_constants import (
+    TRAIL_INITIAL_ATR,
+    TRAIL_TIGHT_ATR,
+    TRAIL_LOCK_IN_RATIO,
+    TP1_TRAILING_ONLY_STRATEGY,
+)
 
 
 def test_update_stop_loss_calls_util(monkeypatch):
@@ -236,3 +241,36 @@ def test_tp2_threshold_tightens_trailing_multiplier(monkeypatch):
     saved_trade = saved['trades'][0]
     assert saved_trade['status']['tp2'] is True
     assert saved_trade['trail_multiplier'] == pytest.approx(TRAIL_TIGHT_ATR)
+
+
+def test_tp1_trailing_only_activation_and_ratcheting(monkeypatch):
+    trade = {
+        'symbol': 'BTCUSDT',
+        'entry': 100.0,
+        'sl': 95.0,
+        'tp1_price': 105.0,
+        'tp1_triggered': False,
+        'trail_mode': False,
+        'max_price': 100.0,
+        'take_profit_strategy': TP1_TRAILING_ONLY_STRATEGY,
+    }
+    sl_updates = []
+
+    def fake_update_sl(tr, new_sl):
+        sl_updates.append(new_sl)
+        tr['sl'] = new_sl
+
+    monkeypatch.setattr(trade_manager, '_update_stop_loss', fake_update_sl)
+    armed = trade_manager._tp1_trailing_only_activate(
+        trade,
+        tp_price=105.0,
+        current_price=105.0,
+    )
+    assert armed == pytest.approx(102.5)
+    assert trade['trail_mode'] is True
+    assert trade['tp1_triggered'] is True
+
+    sl_move = trade_manager._tp1_trailing_only_update(trade, current_price=108.0)
+    assert sl_move == pytest.approx(107.2)
+    assert trade['max_price'] == pytest.approx(108.0)
+    assert sl_updates == [pytest.approx(102.5), pytest.approx(107.2)]
