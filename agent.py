@@ -60,6 +60,51 @@ from signal_audit import log_signal_audit
 
 logger = setup_logger(__name__)
 
+_NEWS_STATUS_HEARTBEAT_SECS = max(5, int(os.getenv("NEWS_STATUS_HEARTBEAT_SECS", "60")))
+_last_news_status_key: tuple[str, str, str, str] | None = None
+_last_news_status_write = 0.0
+
+
+def _maybe_log_news_status(now: float | None = None) -> None:
+    """Log the NEWS status when it changes without spamming the logs."""
+
+    global _last_news_status_key
+    try:
+        status = get_news_status(now)
+    except Exception:
+        logger.debug("Failed to fetch news status for logging", exc_info=True)
+        return
+
+    key = (
+        status.get("mode", ""),
+        status.get("category", ""),
+        status.get("last_event_headline", ""),
+        status.get("reason", ""),
+    )
+    if key == _last_news_status_key:
+        return
+    _last_news_status_key = key
+    try:
+        line = format_news_status_line(status=status)
+    except Exception:
+        logger.debug("Failed to format news status line", exc_info=True)
+        return
+    logger.info(line)
+
+
+def _maybe_write_news_status(now: float | None = None, *, force: bool = False) -> None:
+    """Persist the news status periodically as a heartbeat."""
+
+    global _last_news_status_write
+    timestamp = float(now if now is not None else time.time())
+    if not force and timestamp - _last_news_status_write < _NEWS_STATUS_HEARTBEAT_SECS:
+        return
+    try:
+        write_news_status(now=timestamp)
+        _last_news_status_write = timestamp
+    except Exception:
+        logger.debug("Failed to write news status heartbeat", exc_info=True)
+
 
 def log_simple_decision_metric(
     symbol: str,
@@ -362,7 +407,12 @@ from news_monitor import (
     get_news_monitor,
     start_background_news_monitor,
 )
-from news_risk import get_news_gate_state
+from news_risk import (
+    format_news_status_line,
+    get_news_gate_state,
+    get_news_status,
+    write_news_status,
+)
 from trade_utils import simulate_slippage, estimate_commission  # noqa: F401
 from trade_utils import (
     get_top_symbols,
@@ -1631,6 +1681,8 @@ def run_agent_loop() -> None:
             if monitor_state and monitor_state.get("alert_triggered"):
                 macro_reasons.append("LLM news alert")
             gate_state = get_news_gate_state()
+            _maybe_log_news_status()
+            _maybe_write_news_status()
             if gate_state.get("mode") == "HARD_HALT":
                 ttl = gate_state.get("ttl_secs", 0)
                 reason = gate_state.get("reason") or "News hard halt active"

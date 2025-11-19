@@ -35,6 +35,7 @@ from backtest import compute_buy_and_hold_pnl, generate_trades_from_ohlcv
 from ml_model import train_model
 import requests
 from daily_summary import generate_daily_summary
+from news_risk import load_news_status, format_news_status_line
 
 BINANCE_FEE_RATE = 0.00075
 
@@ -179,6 +180,32 @@ def arrow_safe_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if not safe.empty:
         safe = safe.applymap(_arrow_safe_scalar)
     return safe
+
+
+def render_news_status_banner() -> None:
+    """Display the latest news halt status."""
+
+    status = load_news_status()
+    mode = status.get("mode")
+    if mode == "HARD_HALT":
+        ttl = int(status.get("ttl_secs", 0))
+        mins = ttl // 60
+        secs = ttl % 60
+        ttl_str = f"{mins} min left" if mins > 0 else f"{secs} sec left"
+        headline = (
+            status.get("last_event_headline")
+            or status.get("reason")
+            or "Unknown event"
+        )
+        st.error(
+            f"📡 NEWS: HARD HALT\n\n"
+            f"**Category:** `{status.get('category', 'UNKNOWN')}`\n\n"
+            f"**Time remaining:** {ttl_str}\n\n"
+            f"**Trigger:** {headline}"
+        )
+    else:
+        st.success("📡 NEWS: OK – no active hard halt")
+    st.caption(format_news_status_line(status=status))
 
 
 def _fmt_money(val) -> str:
@@ -1419,6 +1446,7 @@ def render_live_tab() -> None:
     st.sidebar.markdown("Built for  **Spot AI Super Agent**")
     # Auto refresh
     st_autorefresh(interval=refresh_interval * 1000, key="refresh")
+    render_news_status_banner()
     # Load active trades and format into rows
     trades, source, error_message, filtered_closed = load_open_trades()
     if error_message:
