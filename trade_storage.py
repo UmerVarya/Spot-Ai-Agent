@@ -38,6 +38,7 @@ from trade_schema import (
     build_rename_map,
     normalise_history_columns,
 )
+from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 from config import (
     TRADE_DATA_DIR,
     TRADE_HISTORY_FILE,
@@ -641,6 +642,12 @@ def log_trade_result(
                 return False
         return ERROR_VALUE
 
+    def _coerce_bool_value(value: Optional[object]) -> Optional[bool]:
+        result = _optional_bool_field(value)
+        if isinstance(result, bool):
+            return result
+        return None
+
     def _serialise_extra_field(value: Optional[object]):
         if value is None:
             return MISSING_VALUE
@@ -872,12 +879,53 @@ def log_trade_result(
         ("session_name", "session_label"),
     )
 
+    take_profit_strategy_raw = trade.get("take_profit_strategy")
+    take_profit_strategy_value = None
+    if take_profit_strategy_raw not in (None, ""):
+        strategy_text = str(take_profit_strategy_raw).strip()
+        if strategy_text:
+            take_profit_strategy_value = strategy_text
+    take_profit_strategy_token = (take_profit_strategy_value or "").lower()
+    tp1_trailing_only = take_profit_strategy_token == TP1_TRAILING_ONLY_STRATEGY
+
     sentiment_conf = trade.get("sentiment_confidence")
     if sentiment_conf is None:
         sentiment_conf = trade.get("confidence")
     score_val = trade.get("score", trade.get("strength"))
     outcome_text = str(outcome or "")
     outcome_lower = outcome_text.lower()
+    exit_reason_raw = trade.get("exit_reason")
+    exit_reason_text = str(exit_reason_raw or "").strip()
+    exit_reason_lower = exit_reason_text.lower()
+    tp1_triggered_flag = _coerce_bool_value(trade.get("tp1_triggered")) is True
+    max_price_val = _coerce_float(trade.get("max_price"))
+
+    def _tp1_trailing_outcome_desc() -> Optional[str]:
+        if not tp1_trailing_only:
+            return None
+        trailing_exit = "trail" in exit_reason_lower or outcome_lower in {
+            "trailing_stop",
+            "trailing_sl",
+        }
+        stop_loss_exit = (
+            outcome_lower == "sl"
+            or "stop loss" in exit_reason_lower
+            or (
+                exit_reason_lower.startswith("stop")
+                and "trail" not in exit_reason_lower
+            )
+        )
+        if tp1_triggered_flag:
+            if trailing_exit:
+                return "Trailing Stop after TP1"
+            return "Risk Exit after TP1"
+        if stop_loss_exit:
+            return "Stop Loss (no TP trigger)"
+        return None
+
+    custom_outcome_desc = _tp1_trailing_outcome_desc()
+    outcome_desc_value = custom_outcome_desc or OUTCOME_DESCRIPTIONS.get(outcome, outcome)
+
     tp1_flag = bool(trade.get("tp1_partial")) or "tp1_partial" in outcome_lower
     tp2_flag = bool(trade.get("tp2_partial")) or "tp2_partial" in outcome_lower
     tp3_flag = (
@@ -950,10 +998,9 @@ def log_trade_result(
         "pnl": _optional_numeric_field(pnl_val),
         "pnl_pct": _optional_numeric_field(pnl_pct),
         "outcome": _optional_text_field(outcome_text or None),
-        "outcome_desc": _optional_text_field(
-            OUTCOME_DESCRIPTIONS.get(outcome, outcome)
-        ),
-        "exit_reason": _optional_text_field(trade.get("exit_reason")),
+        "outcome_desc": _optional_text_field(outcome_desc_value),
+        "exit_reason": _optional_text_field(exit_reason_raw),
+        "take_profit_strategy": _optional_text_field(take_profit_strategy_value),
         "strategy": _optional_text_field(strategy_value),
         "session": _optional_text_field(session_value),
         "confidence": _optional_numeric_field(trade.get("confidence")),
@@ -991,6 +1038,8 @@ def log_trade_result(
         "price_change_pct": _optional_numeric_field(trade.get("price_change_pct")),
         "spread_bps": _optional_numeric_field(trade.get("spread_bps")),
         "macro_indicator": _optional_numeric_field(trade.get("macro_indicator")),
+        "tp1_triggered": _optional_bool_field(trade.get("tp1_triggered")),
+        "max_price": _optional_numeric_field(max_price_val),
         "tp1_partial": tp1_flag,
         "tp2_partial": tp2_flag,
         "pnl_tp1": _optional_numeric_field(0.0),
@@ -1643,6 +1692,9 @@ def load_trade_history_df(path: Optional[str] = None) -> pd.DataFrame:
     # ------------------------------------------------------------------
     df = normalise_history_columns(df)
 
+    if "take_profit_strategy" not in df.columns:
+        df["take_profit_strategy"] = pd.Series(pd.NA, index=df.index, dtype="object")
+
     if "llm_approval" not in df.columns and "llm_decision" in df.columns:
         decisions = df["llm_decision"].astype(str).str.lower()
         positive = {"true", "1", "yes", "approved", "y"}
@@ -1719,6 +1771,13 @@ def load_trade_history_df(path: Optional[str] = None) -> pd.DataFrame:
         else:
             df[col] = False
 
+    if "tp1_triggered" in df.columns:
+        df["tp1_triggered"] = (
+            df["tp1_triggered"].astype(str).str.lower().isin(["true", "1", "yes", "y"])
+        )
+    else:
+        df["tp1_triggered"] = False
+
     if "llm_approval" in df.columns:
         approval_raw = df["llm_approval"].astype(str).str.lower()
         positive = {"true", "1", "yes", "approved", "y"}
@@ -1760,6 +1819,7 @@ def load_trade_history_df(path: Optional[str] = None) -> pd.DataFrame:
         "price_change_pct",
         "spread_bps",
         "macro_indicator",
+        "max_price",
         "pnl_tp1",
         "pnl_tp2",
         "size_tp1",

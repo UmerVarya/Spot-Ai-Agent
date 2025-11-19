@@ -6,6 +6,7 @@ import pytest
 
 import trade_storage
 import trade_manager
+from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 
 
 def test_assert_backtest_routing_allows_custom_path(tmp_path, monkeypatch):
@@ -149,6 +150,9 @@ def test_log_trade_result_extended_fields(tmp_path, monkeypatch):
     assert rows[0]["tp1_partial"] == "False"
     assert rows[0]["tp2_partial"] == "False"
     assert rows[0]["pattern"] == "double_bottom"
+    assert rows[0]["take_profit_strategy"] == "N/A"
+    assert rows[0]["tp1_triggered"] == "N/A"
+    assert rows[0]["max_price"] == "N/A"
 
 
 def test_log_trade_result_reassigns_misplaced_strategy_and_session(tmp_path, monkeypatch):
@@ -229,6 +233,60 @@ def test_log_trade_result_tp3_fields(tmp_path, monkeypatch):
     assert float(row["notional_tp3"]) == pytest.approx(1000.0)
     assert row["tp1_partial"] == "False"
     assert row["tp2_partial"] == "False"
+
+
+def test_tp1_trailing_only_sl_without_trigger(tmp_path, monkeypatch):
+    csv_path = tmp_path / "log.csv"
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
+    trade = {
+        "symbol": "BTCUSDT",
+        "direction": "long",
+        "entry": 100.0,
+        "size": 1000.0,
+        "position_size": 10.0,
+        "take_profit_strategy": TP1_TRAILING_ONLY_STRATEGY,
+        "tp1_triggered": False,
+        "max_price": 101.0,
+        "exit_reason": "Stop loss hit",
+    }
+
+    trade_storage.log_trade_result(trade, outcome="sl", exit_price=95.0)
+
+    with open(csv_path, newline="") as f:
+        row = next(csv.DictReader(f))
+
+    assert row["take_profit_strategy"] == TP1_TRAILING_ONLY_STRATEGY
+    assert row["tp1_triggered"] == "False"
+    assert float(row["max_price"]) == pytest.approx(101.0)
+    assert row["outcome_desc"] == "Stop Loss (no TP trigger)"
+
+
+def test_tp1_trailing_only_trailing_exit_description(tmp_path, monkeypatch):
+    csv_path = tmp_path / "log.csv"
+    monkeypatch.setattr(trade_storage, "TRADE_HISTORY_FILE", str(csv_path))
+    trade = {
+        "symbol": "ETHUSDT",
+        "direction": "long",
+        "entry": 1000.0,
+        "size": 1000.0,
+        "position_size": 1.0,
+        "take_profit_strategy": TP1_TRAILING_ONLY_STRATEGY,
+        "tp1_triggered": True,
+        "max_price": 1250.0,
+        "exit_reason": "TP1 trailing stop hit",
+    }
+
+    trade_storage.log_trade_result(trade, outcome="trailing_stop", exit_price=1200.0)
+
+    with open(csv_path, newline="") as f:
+        row = next(csv.DictReader(f))
+
+    assert row["take_profit_strategy"] == TP1_TRAILING_ONLY_STRATEGY
+    assert row["tp1_triggered"] == "True"
+    assert float(row["max_price"]) == pytest.approx(1250.0)
+    assert row["outcome_desc"] == "Trailing Stop after TP1"
+    assert float(row["gross_pnl"]) == pytest.approx(200.0)
+    assert float(row["net_pnl"]) == pytest.approx(200.0)
 
 
 def test_win_flag_negative_pnl(tmp_path, monkeypatch):

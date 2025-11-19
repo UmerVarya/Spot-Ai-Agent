@@ -30,6 +30,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from log_utils import setup_logger, LOG_FILE
 from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
+from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 from backtest import compute_buy_and_hold_pnl, generate_trades_from_ohlcv
 from ml_model import train_model
 import requests
@@ -1133,12 +1134,19 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     cannot be retrieved.
     """
     entry = data.get("entry", data.get("entry_price"))
+    tp_strategy_raw = data.get("take_profit_strategy")
+    tp_strategy_text = ""
+    if tp_strategy_raw not in (None, ""):
+        tp_strategy_text = str(tp_strategy_raw).strip()
+    tp_strategy_token = tp_strategy_text.lower()
+    tp1_trailing_only = tp_strategy_token == TP1_TRAILING_ONLY_STRATEGY
     direction_raw = data.get("direction")
     direction = str(direction_raw).lower() if direction_raw is not None else None
     sl = data.get("sl")
     size_field = data.get("size", data.get("position_size", 0))
     status = data.get("status", {})
     profit_riding = data.get("profit_riding", False)
+    tp1_triggered_flag = to_bool(data.get("tp1_triggered"))
     current_price = get_live_price(symbol)
     llm_signal = data.get("llm_decision")
     if isinstance(llm_signal, bool):
@@ -1288,6 +1296,11 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     if profit_riding:
         status_flags.append("🟦 Trailing (🚀 TP4 mode)")
 
+    if tp1_trailing_only:
+        status_flags.append("🟧 TP1 trailing only")
+        if tp1_triggered_flag:
+            status_flags.append("🟢 TP1 trail active")
+
     status_str = " | ".join(status_flags) if status_flags else "Running"
     approval_label = ""
     if llm_approval is True:
@@ -1316,6 +1329,7 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
     lvn_stop_val = _round_price_or_none(data.get("lvn_stop"))
     poc_target_val = _round_price_or_none(data.get("poc_target"))
     auction_state_val = str(data.get("auction_state") or "").strip()
+    max_price_observed = _round_price_or_none(data.get("max_price"))
     return {
         "Symbol": symbol,
         "Direction": direction_raw if direction_raw is not None else ("short" if is_short else "long"),
@@ -1331,6 +1345,9 @@ def format_active_row(symbol: str, data: dict) -> dict | None:
         "Strategy": data.get("strategy", data.get("pattern", "")),
         "Session": data.get("session", ""),
         "Status": status_str,
+        "TP Strategy": tp_strategy_text,
+        "TP1 Triggered": tp1_triggered_flag if tp_strategy_text else None,
+        "Max Price": max_price_observed,
         "LLM Decision": llm_signal or "",
         "LLM Approval": approval_label,
         "LLM Confidence Score": llm_conf_val,
@@ -2052,6 +2069,29 @@ def render_live_tab() -> None:
         hist_display["PnL (%)"] = hist_df["PnL (%)"]
         hist_display["Fees (USDT)"] = fees
         hist_display["Slippage (USDT)"] = slippage
+        if "take_profit_strategy" in hist_df.columns:
+            hist_display["TP Strategy"] = hist_df["take_profit_strategy"].fillna("")
+        if "tp1_triggered" in hist_df.columns:
+            tp1_series = hist_df["tp1_triggered"].astype(str).str.lower().isin(
+                {"true", "1", "yes", "y"}
+            )
+            hist_display["TP1 Triggered"] = tp1_series.map({True: "Yes", False: "No"})
+        if "max_price" in hist_df.columns:
+            hist_display["Max Price"] = numcol(hist_df, "max_price")
+        if "take_profit_strategy" in hist_df.columns:
+            note_series = pd.Series("", index=hist_df.index, dtype="object")
+            strategy_tokens = hist_df["take_profit_strategy"].astype(str).str.lower()
+            tp1_mask = strategy_tokens == TP1_TRAILING_ONLY_STRATEGY
+            if tp1_mask.any():
+                note_series.loc[tp1_mask] = "TP1 trailing only"
+                if "tp1_triggered" in hist_df.columns:
+                    triggered_series = hist_df["tp1_triggered"].astype(str).str.lower().isin(
+                        {"true", "1", "yes", "y"}
+                    )
+                    note_series.loc[tp1_mask & triggered_series] = (
+                        "TP1 trailing only (trailing stop active)"
+                    )
+                hist_display["TP1 Trail Note"] = note_series.replace("", np.nan)
         if "llm_decision" in hist_df.columns:
             hist_display["LLM Decision"] = hist_df["llm_decision"].fillna("")
         if "llm_approval" in hist_df.columns:
@@ -2097,6 +2137,10 @@ def render_live_tab() -> None:
             "Direction",
             "Strategy",
             "Session",
+            "TP Strategy",
+            "TP1 Trail Note",
+            "TP1 Triggered",
+            "Max Price",
             "Entry Price",
             "Exit Price",
             "Quantity",
@@ -2138,7 +2182,7 @@ def render_live_tab() -> None:
             return ""
 
         formatters: dict[str, object] = {}
-        for col in ("Entry Price", "Exit Price"):
+        for col in ("Entry Price", "Exit Price", "Max Price"):
             if col in hist_display.columns:
                 formatters[col] = _fmt_price
         for col in ("Quantity", "Take Profit Size"):
