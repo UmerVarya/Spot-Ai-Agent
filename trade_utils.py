@@ -80,6 +80,98 @@ STABLECOIN_BASES: set[str] = {
 _SYMBOL_TIER_MAP: Dict[str, str] = {}
 
 
+def _macro_float(value: Any) -> Optional[float]:
+    """Return ``value`` as a finite float when possible."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def compute_macro_score_adjustments(
+    macro_context: Optional[Mapping[str, Any]]
+) -> tuple[float, Dict[str, Any]]:
+    """Return additive score adjustment derived from macro context."""
+
+    snapshot: Dict[str, Any] = {
+        "fear_greed": None,
+        "fear_greed_age_sec": None,
+        "btc_dom": None,
+        "btc_dom_age_sec": None,
+        "macro_bias": None,
+        "macro_flags": [],
+    }
+    if not isinstance(macro_context, Mapping):
+        snapshot["score_adjustment"] = 0.0
+        return 0.0, snapshot
+
+    flags: list[str] = []
+    adjustment = 0.0
+
+    fg = _macro_float(macro_context.get("fear_greed"))
+    if fg is not None:
+        snapshot["fear_greed"] = fg
+        if fg <= 10:
+            adjustment -= 2.0
+            flags.append("extreme_fear")
+        elif fg < 20:
+            adjustment -= 1.0
+            flags.append("fear")
+        elif fg >= 70:
+            adjustment += 1.0
+            flags.append("euphoria")
+        elif fg >= 60:
+            adjustment += 0.5
+            flags.append("optimism")
+
+    fg_age = _macro_float(
+        macro_context.get("fear_greed_age_sec")
+        or macro_context.get("fear_greed_age")
+    )
+    if fg_age is not None:
+        snapshot["fear_greed_age_sec"] = fg_age
+
+    btc_dom = _macro_float(macro_context.get("btc_dom") or macro_context.get("btc_dominance"))
+    if btc_dom is not None:
+        snapshot["btc_dom"] = btc_dom
+        if btc_dom >= 60.0:
+            adjustment -= 2.0
+            flags.append("btc_dom_60")
+        elif btc_dom >= 58.0:
+            adjustment -= 1.0
+            flags.append("btc_dom_58")
+
+    btc_age = _macro_float(
+        macro_context.get("btc_dom_age_sec")
+        or macro_context.get("btc_age_sec")
+    )
+    if btc_age is not None:
+        snapshot["btc_dom_age_sec"] = btc_age
+
+    if fg is not None and fg <= 15 and btc_dom is not None and btc_dom >= 60.0:
+        adjustment -= 0.5
+        flags.append("macro_stack_bearish")
+
+    bias_raw = macro_context.get("macro_bias") or macro_context.get("bias")
+    bias = str(bias_raw).strip().lower() if bias_raw is not None else ""
+    snapshot["macro_bias"] = bias or None
+    if bias == "bullish":
+        adjustment += 0.5
+        flags.append("bias_support")
+    elif bias == "bearish":
+        adjustment -= 0.5
+        flags.append("bias_headwind")
+
+    adjustment = max(-3.0, min(3.0, adjustment))
+    snapshot["macro_flags"] = flags
+    snapshot["score_adjustment"] = round(adjustment, 2)
+    return adjustment, snapshot
+
+
 def set_symbol_tiers(tier_mapping: Optional[Mapping[str, str]]) -> None:
     """Update the in-memory symbol→tier lookup used by evaluators."""
 
@@ -1603,6 +1695,7 @@ def evaluate_signal(
     volume_profile: Optional[Any] = None,
     lvn_entry_level: Optional[float] = None,
     poc_target: Optional[float] = None,
+    macro_context: Optional[Mapping[str, Any]] = None,
 ):
     """Evaluate a trading signal given a price DataFrame."""
     try:
@@ -2164,7 +2257,6 @@ def evaluate_signal(
         sentiment_adjustment = normalized_score - pre_sentiment_score
         normalized_score = round(normalized_score, 2)
         direction = "long" if setup_type and normalized_score >= dynamic_threshold else None
-        position_size = get_position_size(normalized_score)
 
         def _trend_state(value: Any, strong_threshold: float = 0.001) -> str:
             try:
@@ -2465,6 +2557,13 @@ def evaluate_signal(
                 return 0, None, 0, None
             score_after_profile = final_score
 
+        score_pre_macro = normalized_score
+        macro_adjustment, macro_snapshot = compute_macro_score_adjustments(macro_context)
+        normalized_score = round(max(0.0, score_pre_macro + macro_adjustment), 2)
+        macro_snapshot["score_pre_macro"] = score_pre_macro
+        macro_snapshot["score_post_macro"] = normalized_score
+        position_size = get_position_size(normalized_score)
+
         zones = detect_support_resistance_zones(price_data)
         zones = zones.to_dict() if isinstance(zones, pd.Series) else (zones or {"support": [], "resistance": []})
         current_price = float(close.iloc[-1])
@@ -2642,8 +2741,12 @@ def evaluate_signal(
             "sentiment_bias": sentiment_bias,
             "sentiment_score_adjustment": _safe_float(sentiment_adjustment),
             "normalized_score": _safe_float(normalized_score),
-            "normalized_score_pre_profile": _safe_float(normalized_score),
+            "normalized_score_pre_macro": _safe_float(score_pre_macro),
+            "normalized_score_pre_profile": _safe_float(score_after_profile),
             "score_after_profile": _safe_float(score_after_profile),
+            "macro_score_adjustment": _safe_float(
+                macro_snapshot.get("score_adjustment")
+            ),
             "bars_5m_count": bars_count,
             "hourly_bar_age_min": _safe_float(hourly_bar_age_min),
             "data_ok": True,
@@ -2722,7 +2825,9 @@ def evaluate_signal(
             "near_support": int(bool(near_support)),
             "sr_required_min_score": _safe_float(sr_required_score),
         }
+        signal_snapshot["macro_context"] = dict(macro_snapshot)
         signal_snapshot.update(flow_snapshot)
+        price_data.attrs["macro_context"] = dict(macro_snapshot)
         price_data.attrs["signal_features"] = signal_snapshot
         indicator_flags = {
             "ema": ema_flag,

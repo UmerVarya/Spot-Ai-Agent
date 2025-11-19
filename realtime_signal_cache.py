@@ -1569,12 +1569,22 @@ class RealTimeSignalCache:
         with self._lock:
             return tuple(self._symbols)
 
-    def update_context(self, *, sentiment_bias: Optional[str] = None) -> None:
+    def update_context(
+        self,
+        *,
+        sentiment_bias: Optional[str] = None,
+        macro: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         """Update shared context used during signal evaluation."""
+
+        if sentiment_bias is None and macro is None:
+            return
 
         with self._lock:
             if sentiment_bias is not None:
                 self._context["sentiment_bias"] = sentiment_bias
+            if macro is not None:
+                self._context["macro_context"] = dict(macro)
 
     def pending_diagnostics(self, limit: Optional[int] = None) -> List[Dict[str, object]]:
         """Return diagnostic metadata for symbols missing fresh cache entries."""
@@ -2429,11 +2439,13 @@ class RealTimeSignalCache:
             with self._lock:
                 context = dict(self._context)
             sentiment_bias = str(context.get("sentiment_bias", "neutral"))
+            macro_snapshot = context.get("macro_context")
             eval_start = time.perf_counter()
             score, direction, position_size, pattern = self._evaluator(
                 price_data,
                 key,
                 sentiment_bias=sentiment_bias,
+                macro_context=macro_snapshot,
             )
             latency = time.perf_counter() - eval_start
         except Exception as exc:
