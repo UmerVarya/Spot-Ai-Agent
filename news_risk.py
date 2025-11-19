@@ -4,8 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import json
 import logging
 import os
+from pathlib import Path
 import time
 from typing import Dict, Optional
 
@@ -19,6 +21,10 @@ __all__ = [
     "should_apply_halt_for_event",
     "process_news_item",
     "get_news_gate_state",
+    "get_news_status",
+    "format_news_status_line",
+    "write_news_status",
+    "load_news_status",
     "reset_news_halt_state",
 ]
 
@@ -30,10 +36,28 @@ class NewsHaltState:
     halt_until: float = 0.0
     reason: str = ""
     category: str = ""
+    last_event_headline: str = ""
+    last_event_ts: float = 0.0
 
 
 halt_state = NewsHaltState()
 seen_events: Dict[str, float] = {}
+
+NEWS_STATUS_FILE = os.getenv(
+    "NEWS_STATUS_FILE",
+    "/home/ubuntu/spot_data/status/news_status.json",
+)
+
+
+def _base_status_template() -> dict:
+    return {
+        "mode": "NONE",
+        "category": "NONE",
+        "ttl_secs": 0,
+        "reason": "",
+        "last_event_headline": halt_state.last_event_headline,
+        "last_event_ts": halt_state.last_event_ts,
+    }
 
 
 def _clean_text(value: str | None) -> str:
@@ -191,12 +215,18 @@ def process_news_item(
         halt_state.halt_until = halt_until_candidate
         halt_state.reason = f"{category}: {headline}".strip()
         halt_state.category = category
+        halt_state.last_event_headline = headline
+        halt_state.last_event_ts = timestamp
         logger.warning(
             "[NEWS] HARD HALT %s for %sm (until %s)",
             category,
             halt_minutes,
             _format_ts(halt_state.halt_until),
         )
+        try:
+            write_news_status(now=timestamp)
+        except Exception:
+            logger.debug("Failed to write news status", exc_info=True)
         applied = True
     else:
         logger.info(
@@ -212,20 +242,107 @@ def process_news_item(
 def get_news_gate_state(*, now: Optional[float] = None) -> dict:
     """Return the current gate status for the trading pipeline."""
 
+    status = get_news_status(now)
+    if status["mode"] == "NONE":
+        return {"mode": "NONE", "reason": "", "ttl_secs": 0}
+
+    return {
+        "mode": "HARD_HALT",
+        "reason": status.get("reason") or "News hard halt in effect",
+        "ttl_secs": status.get("ttl_secs", 0),
+    }
+
+
+def get_news_status(now: float | None = None) -> dict:
+    """Return a normalized view of the current news risk state."""
+
     timestamp = float(now if now is not None else time.time())
     if timestamp >= halt_state.halt_until:
         if halt_state.halt_until:
             halt_state.halt_until = 0.0
             halt_state.reason = ""
             halt_state.category = ""
-        return {"mode": "NONE", "reason": "", "ttl_secs": 0}
+        base = _base_status_template()
+        return base
 
     ttl = int(max(0.0, halt_state.halt_until - timestamp))
     return {
         "mode": "HARD_HALT",
-        "reason": halt_state.reason or "News hard halt in effect",
+        "category": halt_state.category or "NONE",
         "ttl_secs": ttl,
+        "reason": halt_state.reason or "News hard halt in effect",
+        "last_event_headline": halt_state.last_event_headline,
+        "last_event_ts": halt_state.last_event_ts,
     }
+
+
+def format_news_status_line(
+    now: float | None = None,
+    *,
+    status: dict | None = None,
+) -> str:
+    """Return the standardized NEWS status log line."""
+
+    if status is None:
+        status = get_news_status(now)
+
+    if status.get("mode") != "HARD_HALT":
+        return "NEWS: OK (no active hard halt)"
+
+    category = status.get("category") or "NONE"
+    ttl = int(status.get("ttl_secs", 0))
+    mins = ttl // 60
+    secs = ttl % 60
+    headline = (
+        status.get("last_event_headline")
+        or status.get("reason")
+        or "Unknown event"
+    )
+    if mins > 0:
+        ttl_str = f"{mins}m left"
+    else:
+        ttl_str = f"{secs}s left"
+    return f"NEWS: HARD_HALT ({category}, {ttl_str}) – {headline}"
+
+
+def write_news_status(now: float | None = None) -> None:
+    """Persist the current news status for external consumers."""
+
+    status = get_news_status(now)
+    status["updated_at"] = time.time()
+    tmp_path = NEWS_STATUS_FILE + ".tmp"
+    os.makedirs(os.path.dirname(NEWS_STATUS_FILE) or ".", exist_ok=True)
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(status, handle)
+    os.replace(tmp_path, NEWS_STATUS_FILE)
+
+
+def load_news_status() -> dict:
+    """Load the persisted news status for the dashboard."""
+
+    path = os.getenv(
+        "NEWS_STATUS_FILE",
+        "/home/ubuntu/spot_data/status/news_status.json",
+    )
+    status_path = Path(path)
+    if not status_path.exists():
+        default = _base_status_template()
+        default["updated_at"] = 0.0
+        return default
+
+    try:
+        with status_path.open("r", encoding="utf-8") as handle:
+            status = json.load(handle)
+    except Exception:
+        default = _base_status_template()
+        default["reason"] = "Error reading news status"
+        default["updated_at"] = 0.0
+        return default
+
+    defaults = _base_status_template()
+    defaults["updated_at"] = 0.0
+    defaults.update(status)
+    return defaults
 
 
 def reset_news_halt_state() -> None:
@@ -234,4 +351,6 @@ def reset_news_halt_state() -> None:
     halt_state.halt_until = 0.0
     halt_state.reason = ""
     halt_state.category = ""
+    halt_state.last_event_headline = ""
+    halt_state.last_event_ts = 0.0
     seen_events.clear()

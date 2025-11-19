@@ -52,3 +52,43 @@ def test_shorter_event_does_not_shorten_existing_halt():
     news_risk.process_news_item("FOMC rate decision", "Fed signals pause", "Bloomberg", now=now + 30)
     assert news_risk.halt_state.halt_until == long_until
     assert news_risk.halt_state.category == "CRYPTO_SYSTEMIC"
+
+
+def test_get_news_status_reflects_active_halt():
+    now = 6_000.0
+    news_risk.process_news_item("SEC sues Binance", "", "Reuters", now=now)
+    status = news_risk.get_news_status(now=now + 60)
+    assert status["mode"] == "HARD_HALT"
+    assert status["category"] == "CRYPTO_SYSTEMIC"
+    assert status["ttl_secs"] == 120 * 60 - 60
+    assert status["last_event_headline"] == "SEC sues Binance"
+    assert status["last_event_ts"] == now
+
+
+def test_format_news_status_line_custom_status():
+    status = {
+        "mode": "HARD_HALT",
+        "category": "CRYPTO_SYSTEMIC",
+        "ttl_secs": 125,
+        "reason": "CRYPTO_SYSTEMIC: SEC sues Binance",
+        "last_event_headline": "SEC sues Binance",
+        "last_event_ts": 1_000.0,
+    }
+    line = news_risk.format_news_status_line(status=status)
+    assert "HARD_HALT" in line
+    assert "CRYPTO_SYSTEMIC" in line
+    assert "SEC sues Binance" in line
+    assert "2m" in line  # 125 seconds should round down to 2 minutes left
+
+
+def test_write_and_load_news_status(tmp_path, monkeypatch):
+    now = 7_000.0
+    news_risk.process_news_item("SEC sues Binance", "", "Reuters", now=now)
+    status_file = tmp_path / "news_status.json"
+    monkeypatch.setattr(news_risk, "NEWS_STATUS_FILE", str(status_file))
+    monkeypatch.setenv("NEWS_STATUS_FILE", str(status_file))
+    news_risk.write_news_status(now=now)
+    loaded = news_risk.load_news_status()
+    assert loaded["mode"] == "HARD_HALT"
+    assert loaded["category"] == "CRYPTO_SYSTEMIC"
+    assert loaded["last_event_headline"] == "SEC sues Binance"
