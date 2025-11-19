@@ -63,25 +63,42 @@ logger = setup_logger(__name__)
 _NEWS_STATUS_HEARTBEAT_SECS = max(5, int(os.getenv("NEWS_STATUS_HEARTBEAT_SECS", "60")))
 _last_news_status_key: tuple[str, str, str, str] | None = None
 _last_news_status_write = 0.0
+_last_news_status_active_log = 0.0
+_NEWS_STATUS_ACTIVE_LOG_SECS = max(
+    60, int(os.getenv("NEWS_STATUS_ACTIVE_LOG_SECS", "300"))
+)
 
 
 def _maybe_log_news_status(now: float | None = None) -> None:
     """Log the NEWS status when it changes without spamming the logs."""
 
-    global _last_news_status_key
+    global _last_news_status_key, _last_news_status_active_log
     try:
         status = get_news_status(now)
     except Exception:
         logger.debug("Failed to fetch news status for logging", exc_info=True)
         return
 
+    timestamp = float(now if now is not None else time.time())
     key = (
         status.get("mode", ""),
         status.get("category", ""),
         status.get("last_event_headline", ""),
         status.get("reason", ""),
     )
-    if key == _last_news_status_key:
+    active = (status.get("mode") or "").upper() == "HARD_HALT"
+    if not active:
+        _last_news_status_active_log = 0.0
+
+    should_log_change = key != _last_news_status_key
+    should_log_heartbeat = False
+    if active:
+        last = _last_news_status_active_log or 0.0
+        if not last or timestamp - last >= _NEWS_STATUS_ACTIVE_LOG_SECS:
+            should_log_heartbeat = True
+            _last_news_status_active_log = timestamp
+
+    if not should_log_change and not should_log_heartbeat:
         return
     _last_news_status_key = key
     try:
@@ -90,6 +107,8 @@ def _maybe_log_news_status(now: float | None = None) -> None:
         logger.debug("Failed to format news status line", exc_info=True)
         return
     logger.info(line)
+    if active:
+        _last_news_status_active_log = timestamp
 
 
 def _maybe_write_news_status(now: float | None = None, *, force: bool = False) -> None:
