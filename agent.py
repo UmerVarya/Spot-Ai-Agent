@@ -1882,6 +1882,25 @@ def run_agent_loop() -> None:
                         "risk_veto": False,
                         "final_trade_taken": False,
                     }
+                    audit_payload.update(
+                        {
+                            "trend_norm": signal_snapshot.get("trend_norm"),
+                            "mean_rev_norm": signal_snapshot.get("mean_rev_norm"),
+                            "normalized_score_pre_profile": signal_snapshot.get(
+                                "normalized_score_pre_profile",
+                                signal_snapshot.get("normalized_score"),
+                            ),
+                            "dynamic_threshold": signal_snapshot.get("dynamic_threshold"),
+                            "activation_threshold": signal_snapshot.get("activation_threshold"),
+                            "base_direction_from_signal": signal_snapshot.get(
+                                "base_direction_from_signal"
+                            ),
+                            "forced_long_applied": signal_snapshot.get("forced_long_applied"),
+                            "score_after_profile": signal_snapshot.get("score_after_profile"),
+                            "alt_adjustment": signal_snapshot.get("alt_adjustment"),
+                            "adjusted_score": signal_snapshot.get("adjusted_score"),
+                        }
+                    )
                     audit_payload.update(signal_snapshot)
                     _audit_update(symbol_key, **audit_payload)
                     _audit_update(
@@ -2262,6 +2281,11 @@ def run_agent_loop() -> None:
                         )
                         direction = "long"
                     breakdown_data["direction_final"] = direction
+                    _audit_update(
+                        symbol_key,
+                        final_direction_after_force=direction,
+                        size_bucket=position_size,
+                    )
                     if direction != "long" or position_size <= 0:
                         skip_reasons: list[str] = []
                         if direction != "long":
@@ -3008,6 +3032,7 @@ def run_agent_loop() -> None:
                     final_conf,
                     reason,
                 )
+                _audit_update(symbol_key, brain_veto=not bool(decision))
 
                 if not decision:
                     rejection_reason = reason or "Unknown reason"
@@ -3041,7 +3066,12 @@ def run_agent_loop() -> None:
                     llm_confidence=decision_obj.get("llm_confidence", 5.0),
                     micro_features=micro_feature_payload,
                 )
-                _audit_update(symbol_key, ml_probability=ml_prob)
+                ml_veto_flag = bool(ml_prob is not None and ml_prob < 0.5)
+                _audit_update(
+                    symbol_key,
+                    ml_probability=ml_prob,
+                    ml_veto=ml_veto_flag,
+                )
                 if ml_prob < 0.5:
                     logger.info(
                         "ML model predicted low success probability (%.2f) for %s. Skipping trade.",
@@ -3116,6 +3146,7 @@ def run_agent_loop() -> None:
                         "max_rr": 2.0,
                     }
                 risk_enter = bool(risk_review.get("enter", True))
+                _audit_update(symbol_key, risk_veto=not risk_enter)
                 conflicts = [str(item) for item in (risk_review.get("conflicts") or []) if item]
                 reasons_list = [str(item) for item in (risk_review.get("reasons") or []) if item]
                 decision_label = "approved" if risk_enter else "veto"
@@ -3399,6 +3430,7 @@ def run_agent_loop() -> None:
                     ):
                         active_trades.append(new_trade)
                         save_active_trades(active_trades)
+                        _audit_update(symbol_key, final_trade_taken=1)
                         try:
                             state.merge_narrative(
                                 symbol,
@@ -3445,6 +3477,7 @@ def run_agent_loop() -> None:
                             score_value=score,
                             reason_text=reason_text,
                         )
+                        _audit_update(symbol_key, final_trade_taken=0)
                         _audit_finalize(
                             symbol_key,
                             selected_for_candidate_list=True,
@@ -3454,6 +3487,7 @@ def run_agent_loop() -> None:
                         )
                 except Exception as e:
                     logger.error("Error opening trade for %s: %s", symbol, e, exc_info=True)
+                    _audit_update(symbol_key, final_trade_taken=0)
                     _audit_finalize(
                         symbol_key,
                         selected_for_candidate_list=True,
