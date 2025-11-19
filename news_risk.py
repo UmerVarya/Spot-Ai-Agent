@@ -60,6 +60,43 @@ CRISIS_KEYWORDS = [
     "bitcoin ban",
 ]
 
+# Crisis phrases that are generic enough to require an explicit crypto context.
+GENERIC_CRISIS_KEYWORDS = {
+    "enforcement action",
+    "security breach",
+    "insolvency",
+    "insolvent",
+    "bankrupt",
+    "bankruptcy",
+    "freeze accounts",
+    "freezes accounts",
+    "asset freeze",
+}
+
+CRYPTO_CONTEXT_TOKENS = {
+    "crypto",
+    "cryptocurrency",
+    "digital asset",
+    "digital assets",
+    "bitcoin",
+    "btc",
+    "ethereum",
+    "eth",
+    "stablecoin",
+    "stablecoins",
+    "tether",
+    "usdt",
+    "usdc",
+    "binance",
+    "coinbase",
+    "kraken",
+    "exchange",
+    "defi",
+    "token",
+    "tokens",
+    "blockchain",
+}
+
 REG_POLICY_KEYWORDS = [
     "fdic",
     "federal deposit insurance",
@@ -128,11 +165,22 @@ def _is_reg_policy_only(text: str) -> bool:
     return has_reg and not has_crisis
 
 
+def _has_crypto_context(text: str) -> bool:
+    text = (text or "").lower()
+    return any(token in text for token in CRYPTO_CONTEXT_TOKENS)
+
+
 def _is_crypto_systemic(text: str) -> bool:
     text = (text or "").lower()
     if _is_reg_policy_only(text):
         return False
-    return any(keyword in text for keyword in CRISIS_KEYWORDS)
+    for keyword in CRISIS_KEYWORDS:
+        if keyword not in text:
+            continue
+        if keyword in GENERIC_CRISIS_KEYWORDS and not _has_crypto_context(text):
+            continue
+        return True
+    return False
 
 
 def _env_int(name: str, default: int) -> int:
