@@ -15,6 +15,12 @@ from log_utils import setup_logger
 from decision_metrics import new_decision_breakdown
 
 from weight_optimizer import optimize_indicator_weights
+from alt_data import (
+    get_basis_cached,
+    get_funding_cached,
+    get_open_interest_cached,
+    get_taker_ratio_cached,
+)
 
 try:  # confidence guard is optional during unit tests
     from confidence_guard import get_adaptive_conf_threshold  # type: ignore
@@ -78,6 +84,29 @@ STABLECOIN_BASES: set[str] = {
 }
 
 _SYMBOL_TIER_MAP: Dict[str, str] = {}
+
+
+def _alt_env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(raw.strip())
+    except (TypeError, ValueError):
+        logger.warning("alt_data: invalid %s=%r – using default %.2f", name, raw, default)
+        return float(default)
+
+
+ALT_FUNDING_POS_EXTREME = _alt_env_float("ALT_FUNDING_POS_EXTREME", 0.01)
+ALT_FUNDING_NEG_EXTREME = _alt_env_float("ALT_FUNDING_NEG_EXTREME", -0.01)
+ALT_BASIS_POS_EXTREME = _alt_env_float("ALT_BASIS_POS_EXTREME", 0.01)
+ALT_BASIS_NEG_EXTREME = _alt_env_float("ALT_BASIS_NEG_EXTREME", -0.01)
+ALT_OI_POS_CHANGE = _alt_env_float("ALT_OI_POS_CHANGE", 10.0)
+ALT_OI_NEG_CHANGE = _alt_env_float("ALT_OI_NEG_CHANGE", -10.0)
+ALT_TAKER_RATIO_POS = _alt_env_float("ALT_TAKER_RATIO_POS", 1.3)
+ALT_TAKER_RATIO_NEG = _alt_env_float("ALT_TAKER_RATIO_NEG", 0.7)
+ALT_DATA_WEIGHT = _alt_env_float("ALT_DATA_WEIGHT", 1.0)
+ALT_ADJ_MAX_ABS = abs(_alt_env_float("ALT_ADJ_MAX_ABS", 2.0))
 
 
 def _macro_float(value: Any) -> Optional[float]:
@@ -198,6 +227,72 @@ def get_symbol_tier(symbol: str) -> Optional[str]:
     if not symbol:
         return None
     return _SYMBOL_TIER_MAP.get(str(symbol).upper())
+
+
+def compute_alt_adj(symbol: str, now: Optional[float] = None) -> Optional[float]:
+    """Return additive alternative-data adjustment for ``symbol``.
+
+    The adjustment aggregates Binance futures funding, basis, open interest and
+    taker ratio signals into a small additive tweak roughly within
+    ``[-ALT_ADJ_MAX_ABS, ALT_ADJ_MAX_ABS]``.  When no data is available,
+    ``None`` is returned so callers can distinguish "neutral" from "missing".
+    """
+
+    if not symbol:
+        return None
+
+    symbol_key = str(symbol).upper()
+    funding = get_funding_cached(symbol_key, now=now)
+    basis = get_basis_cached(symbol_key, now=now)
+    open_interest = get_open_interest_cached(symbol_key, now=now)
+    taker_ratio = get_taker_ratio_cached(symbol_key, now=now)
+
+    if not any((funding, basis, open_interest, taker_ratio)):
+        logger.info("alt_data: alt_adj=None (no alt-data available for %s)", symbol_key)
+        return None
+
+    adjustment = 0.0
+    funding_value = funding.value if funding else None
+    basis_value = basis.value if basis else None
+    oi_change = open_interest.change_24h_pct if open_interest else None
+    taker_value = taker_ratio.long_short_ratio if taker_ratio else None
+
+    if funding_value is not None:
+        if funding_value >= ALT_FUNDING_POS_EXTREME:
+            adjustment -= 1.0
+        elif funding_value <= ALT_FUNDING_NEG_EXTREME:
+            adjustment += 1.0
+
+    if basis_value is not None:
+        if basis_value >= ALT_BASIS_POS_EXTREME:
+            adjustment -= 0.5
+        elif basis_value <= ALT_BASIS_NEG_EXTREME:
+            adjustment += 0.5
+
+    if oi_change is not None:
+        if oi_change >= ALT_OI_POS_CHANGE:
+            adjustment += 0.5
+        elif oi_change <= ALT_OI_NEG_CHANGE:
+            adjustment -= 0.5
+
+    if taker_value is not None:
+        if taker_value >= ALT_TAKER_RATIO_POS:
+            adjustment -= 0.5
+        elif taker_value <= ALT_TAKER_RATIO_NEG:
+            adjustment += 0.5
+
+    weighted = adjustment * ALT_DATA_WEIGHT
+    capped = max(-ALT_ADJ_MAX_ABS, min(ALT_ADJ_MAX_ABS, weighted))
+    logger.info(
+        "alt_data: alt_adj=%.2f for %s (funding=%s basis=%s oi_change=%s taker_ratio=%s)",
+        capped,
+        symbol_key,
+        f"{funding_value:.5f}" if funding_value is not None else "None",
+        f"{basis_value:.5f}" if basis_value is not None else "None",
+        f"{oi_change:.2f}" if oi_change is not None else "None",
+        f"{taker_value:.2f}" if taker_value is not None else "None",
+    )
+    return capped
 
 
 def is_stable_symbol(symbol: str) -> bool:

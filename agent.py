@@ -374,6 +374,7 @@ from trade_utils import (
     load_symbol_scores,
     save_symbol_scores,
     SYMBOL_SCORES_FILE,
+    compute_alt_adj,
 )
 from trade_manager import (
     manage_trades,
@@ -1893,7 +1894,20 @@ def run_agent_loop() -> None:
                         auction_breakout_veto=not breakdown_data.get("auction_guard_pass", True),
                     )
                     alt_features: dict[str, object] = {}
-                    alt_adjustment = 0.0
+                    alt_adjustment_components: list[float] = []
+                    alt_public_adjustment: Optional[float] = None
+                    try:
+                        alt_public_adjustment = compute_alt_adj(symbol)
+                    except Exception as alt_exc:
+                        logger.warning(
+                            "alt_data: compute_alt_adj failed for %s: %s",
+                            symbol,
+                            alt_exc,
+                        )
+                        alt_public_adjustment = None
+                    if alt_public_adjustment is not None:
+                        alt_adjustment_components.append(alt_public_adjustment)
+                        alt_features["futures_alt_adj"] = alt_public_adjustment
                     try:
                         alt_bundle = get_alternative_data(
                             symbol, ttl=ALT_DATA_REFRESH_INTERVAL
@@ -1907,28 +1921,29 @@ def run_agent_loop() -> None:
                         alt_bundle = None
                     if alt_bundle is not None:
                         direction_for_alt = direction or "long"
-                        alt_adjustment = alt_bundle.score_adjustment(direction_for_alt)
-                        score += alt_adjustment
-                        alt_features = alt_bundle.to_features(direction_for_alt)
+                        bundle_adjustment = alt_bundle.score_adjustment(direction_for_alt)
+                        alt_adjustment_components.append(bundle_adjustment)
+                        bundle_features = alt_bundle.to_features(direction_for_alt)
+                        alt_features.update(bundle_features)
                         enriched_snapshot = dict(signal_snapshot)
                         enriched_snapshot.update(
                             {
-                                "social_sentiment_bias": alt_features.get(
+                                "social_sentiment_bias": bundle_features.get(
                                     "social_bias", "neutral"
                                 ),
-                                "social_sentiment_score": alt_features.get("social_score"),
-                                "social_sentiment_confidence": alt_features.get(
+                                "social_sentiment_score": bundle_features.get("social_score"),
+                                "social_sentiment_confidence": bundle_features.get(
                                     "social_confidence"
                                 ),
-                                "social_posts_analyzed": alt_features.get("social_posts"),
-                                "onchain_score": alt_features.get("onchain_score"),
-                                "onchain_net_exchange_flow": alt_features.get(
+                                "social_posts_analyzed": bundle_features.get("social_posts"),
+                                "onchain_score": bundle_features.get("onchain_score"),
+                                "onchain_net_exchange_flow": bundle_features.get(
                                     "onchain_net_flow"
                                 ),
-                                "onchain_whale_ratio": alt_features.get(
+                                "onchain_whale_ratio": bundle_features.get(
                                     "onchain_whale_ratio"
                                 ),
-                                "alternative_score_adjustment": alt_features.get(
+                                "alternative_score_adjustment": bundle_features.get(
                                     "score_adjustment"
                                 ),
                             }
@@ -1936,15 +1951,23 @@ def run_agent_loop() -> None:
                         signal_snapshot = enriched_snapshot
                         price_data.attrs["signal_features"] = enriched_snapshot
                         logger.info(
-                            "%s alt-data -> social=%s (score=%.2f conf=%.2f posts=%s) | on-chain=%.2f | adj=%.2f",
+                            "%s alt-data -> social=%s (score=%.2f conf=%.2f posts=%s) | on-chain=%.2f | bundle_adj=%.2f futures_adj=%s",
                             symbol,
-                            alt_features.get("social_bias", "neutral"),
-                            float(alt_features.get("social_score") or 0.0),
-                            float(alt_features.get("social_confidence") or 0.0),
-                            alt_features.get("social_posts"),
-                            float(alt_features.get("onchain_score") or 0.0),
-                            alt_adjustment,
+                            bundle_features.get("social_bias", "neutral"),
+                            float(bundle_features.get("social_score") or 0.0),
+                            float(bundle_features.get("social_confidence") or 0.0),
+                            bundle_features.get("social_posts"),
+                            float(bundle_features.get("onchain_score") or 0.0),
+                            bundle_adjustment,
+                            f"{alt_public_adjustment:.2f}"
+                            if alt_public_adjustment is not None
+                            else "None",
                         )
+                    if alt_adjustment_components:
+                        alt_adjustment = float(sum(alt_adjustment_components))
+                        score += alt_adjustment
+                    else:
+                        alt_adjustment = None
                     adjusted_score = float(raw_score + (alt_adjustment or 0.0))
                     try:
                         entry_cutoff = float(signal_snapshot.get("activation_threshold", 0.0))
@@ -2208,11 +2231,14 @@ def run_agent_loop() -> None:
                         _log_decision("skip")
                         _emit_metrics("skip", reason_text=reason_text, reason_key=reason_key)
                         continue
+                    alt_adj_display = (
+                        f"{alt_adjustment:.2f}" if alt_adjustment is not None else "None"
+                    )
                     logger.info(
-                        "%s: Score=%.2f (alt_adj=%.2f), Direction=%s, Pattern=%s, PosSize=%s, AuctionState=%s (age=%.2fs) | %s",
+                        "%s: Score=%.2f (alt_adj=%s), Direction=%s, Pattern=%s, PosSize=%s, AuctionState=%s (age=%.2fs) | %s",
                         symbol,
                         score,
-                        alt_adjustment,
+                        alt_adj_display,
                         direction,
                         pattern_name,
                         position_size,
@@ -2683,7 +2709,11 @@ def run_agent_loop() -> None:
                 auction_state = trade_candidate.get("auction_state", "unknown")
                 setup_type = trade_candidate.get("setup_type")
                 alt_features = trade_candidate.get("alternative_data") or {}
-                alt_adjustment = float(trade_candidate.get("alternative_adjustment", 0.0))
+                alt_adjustment_raw = trade_candidate.get("alternative_adjustment")
+                try:
+                    alt_adjustment = float(alt_adjustment_raw)
+                except (TypeError, ValueError):
+                    alt_adjustment = 0.0
                 try:
                     indicators_df = calculate_indicators(price_data)
                     indicators = {
