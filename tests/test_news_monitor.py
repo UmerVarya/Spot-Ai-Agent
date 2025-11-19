@@ -1,6 +1,7 @@
 import asyncio
 import time
 from datetime import datetime, timezone
+import news_monitor
 from news_monitor import LLMNewsMonitor
 
 
@@ -342,3 +343,39 @@ def test_monitor_does_not_cache_fallback_after_failure():
     state = asyncio.run(monitor.evaluate_now())
     assert state["reason"] == "Adverse regulatory action"
     assert call_count["value"] == 2
+
+
+def test_monitor_updates_news_risk_halt(monkeypatch):
+    events = [
+        {"event": "SEC sues Binance", "summary": "Regulatory crackdown", "source": "Reuters"},
+        {"title": "US CPI release", "body": "Inflation surprise", "provider": "Bloomberg"},
+    ]
+
+    async def fetcher():
+        return events
+
+    async def analyzer(received):
+        return {"safe": True, "sensitivity": 0.1, "reason": "Low risk"}
+
+    processed: list[tuple[str, str, str]] = []
+
+    def fake_process(headline, body, source, *, now=None):
+        processed.append((headline, body, source))
+        return {"category": "CRYPTO_SYSTEMIC", "halt_applied": False, "halt_minutes": 120}
+
+    monkeypatch.setattr(news_monitor, "process_news_item", fake_process)
+
+    monitor = LLMNewsMonitor(
+        interval=30,
+        alert_threshold=0.5,
+        halt_threshold=0.8,
+        fetcher=fetcher,
+        analyzer=analyzer,
+    )
+
+    asyncio.run(monitor.evaluate_now())
+
+    assert processed == [
+        ("SEC sues Binance", "Regulatory crackdown", "Reuters"),
+        ("US CPI release", "Inflation surprise", "Bloomberg"),
+    ]

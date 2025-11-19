@@ -30,6 +30,7 @@ import inspect
 from event_relevance import BASELINE_HALT_CATEGORIES, DEFAULT_EVENT_SCORER
 from fetch_news import analyze_news_with_llm_async, run_news_fetcher_async
 from log_utils import setup_logger
+from news_risk import process_news_item
 from risk_veto import minutes_until_next_event
 
 LOGGER = setup_logger(__name__)
@@ -198,6 +199,8 @@ class LLMNewsMonitor:
             LOGGER.warning("News monitor fetch failed: %s", exc, exc_info=True)
             events = []
 
+        self._apply_deterministic_halt_fallback(events)
+
         events_fingerprint = self._events_fingerprint(events)
         relevance_summary = EVENT_SCORER.score_events(events)
         scored_events = relevance_summary.get("events", [])
@@ -243,6 +246,45 @@ class LLMNewsMonitor:
         self._persist_state(state)
         await self._maybe_emit_alert(state, events)
         return state
+
+    def _apply_deterministic_halt_fallback(
+        self, events: Iterable[Mapping[str, Any]]
+    ) -> None:
+        """Update the deterministic news halt guard with freshly fetched events."""
+
+        for event in events:
+            if not isinstance(event, Mapping):
+                continue
+            headline = self._extract_first_value(
+                event,
+                ("event", "headline", "title", "summary", "text", "body"),
+            )
+            if not headline:
+                continue
+            body = self._extract_first_value(
+                event,
+                ("body", "summary", "description", "details"),
+            )
+            source = self._extract_first_value(
+                event,
+                ("source", "provider", "origin", "feed", "impact"),
+            )
+            if not source:
+                source = "news_monitor"
+            try:
+                process_news_item(headline, body, source)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                LOGGER.debug("Failed to process news item for halt guard: %s", exc)
+
+    @staticmethod
+    def _extract_first_value(event: Mapping[str, Any], keys: Iterable[str]) -> str:
+        for key in keys:
+            value = event.get(key)
+            if value:
+                text = str(value).strip()
+                if text:
+                    return text
+        return ""
 
     def _compose_state(
         self,
