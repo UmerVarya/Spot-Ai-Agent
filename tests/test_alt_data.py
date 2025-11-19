@@ -50,6 +50,56 @@ def test_compute_alt_adj_penalises_crowded_longs(monkeypatch):
     assert math.isclose(adjustment, -2.0)
 
 
+def test_compute_alt_adj_respects_symbol_tiers(monkeypatch):
+    monkeypatch.setattr(
+        trade_utils,
+        "get_funding_cached",
+        lambda *_, **__: FundingSnapshot(value=0.0022, ts=1),
+    )
+    monkeypatch.setattr(
+        trade_utils,
+        "get_basis_cached",
+        lambda *_, **__: BasisSnapshot(value=0.0022, ts=1),
+    )
+    monkeypatch.setattr(
+        trade_utils,
+        "get_open_interest_cached",
+        lambda *_, **__: OpenInterestSnapshot(value=5_000_000, change_24h_pct=6.0, ts=1),
+    )
+    monkeypatch.setattr(
+        trade_utils,
+        "get_taker_ratio_cached",
+        lambda *_, **__: TakerRatioSnapshot(long_short_ratio=1.35, ts=1),
+    )
+
+    btc_adj = trade_utils.compute_alt_adj("BTCUSDT")
+    assert btc_adj is not None
+    assert abs(btc_adj) <= 1.0
+
+    alt_adj = trade_utils.compute_alt_adj("PEPEUSDT")
+    assert alt_adj is not None
+    assert alt_adj < -0.5
+    assert abs(alt_adj) > abs(btc_adj)
+
+
+def test_compute_alt_adj_env_override_affects_thresholds(monkeypatch):
+    monkeypatch.setenv("ALT_FUND_POS_ALT", "0.0001")
+    monkeypatch.setattr(trade_utils, "ALT_THRESHOLDS", trade_utils._build_alt_thresholds())
+
+    monkeypatch.setattr(
+        trade_utils,
+        "get_funding_cached",
+        lambda *_, **__: FundingSnapshot(value=0.0002, ts=1),
+    )
+    monkeypatch.setattr(trade_utils, "get_basis_cached", lambda *_, **__: None)
+    monkeypatch.setattr(trade_utils, "get_open_interest_cached", lambda *_, **__: None)
+    monkeypatch.setattr(trade_utils, "get_taker_ratio_cached", lambda *_, **__: None)
+
+    adjustment = trade_utils.compute_alt_adj("DOGEUSDT")
+    assert adjustment is not None
+    assert adjustment < 0
+
+
 def test_compute_alt_adj_returns_none_without_data(monkeypatch):
     monkeypatch.setattr(trade_utils, "get_funding_cached", lambda *_, **__: None)
     monkeypatch.setattr(trade_utils, "get_basis_cached", lambda *_, **__: None)

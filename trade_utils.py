@@ -8,6 +8,7 @@ import time
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import Optional, Any, Mapping, Callable, Tuple, TypeVar, Dict, Iterable
 import traceback
 import asyncio
@@ -86,27 +87,72 @@ STABLECOIN_BASES: set[str] = {
 _SYMBOL_TIER_MAP: Dict[str, str] = {}
 
 
-def _alt_env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return float(default)
+class SymbolTier(str, Enum):
+    BTC = "btc"
+    MAJOR = "major"
+    ALT = "alt"
+
+
+def classify_symbol_tier(symbol: str) -> SymbolTier:
+    s = (symbol or "").upper()
+    if not s:
+        return SymbolTier.ALT
+    if s.startswith("BTC"):
+        return SymbolTier.BTC
+    if s.startswith(("ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "TON", "LINK", "AVAX")):
+        return SymbolTier.MAJOR
+    return SymbolTier.ALT
+
+
+def _env_float(name: str, default: float) -> float:
     try:
-        return float(raw.strip())
+        raw = os.getenv(name)
+        if raw is None:
+            return float(default)
+        return float(str(raw).strip())
     except (TypeError, ValueError):
-        logger.warning("alt_data: invalid %s=%r – using default %.2f", name, raw, default)
+        logger.warning("alt_data: invalid %s=%r – using default %.4f", name, raw, default)
         return float(default)
 
 
-ALT_FUNDING_POS_EXTREME = _alt_env_float("ALT_FUNDING_POS_EXTREME", 0.01)
-ALT_FUNDING_NEG_EXTREME = _alt_env_float("ALT_FUNDING_NEG_EXTREME", -0.01)
-ALT_BASIS_POS_EXTREME = _alt_env_float("ALT_BASIS_POS_EXTREME", 0.01)
-ALT_BASIS_NEG_EXTREME = _alt_env_float("ALT_BASIS_NEG_EXTREME", -0.01)
-ALT_OI_POS_CHANGE = _alt_env_float("ALT_OI_POS_CHANGE", 10.0)
-ALT_OI_NEG_CHANGE = _alt_env_float("ALT_OI_NEG_CHANGE", -10.0)
-ALT_TAKER_RATIO_POS = _alt_env_float("ALT_TAKER_RATIO_POS", 1.3)
-ALT_TAKER_RATIO_NEG = _alt_env_float("ALT_TAKER_RATIO_NEG", 0.7)
-ALT_DATA_WEIGHT = _alt_env_float("ALT_DATA_WEIGHT", 1.0)
-ALT_ADJ_MAX_ABS = abs(_alt_env_float("ALT_ADJ_MAX_ABS", 2.0))
+def _build_alt_thresholds() -> Dict[SymbolTier, Dict[str, float]]:
+    return {
+        SymbolTier.BTC: {
+            "fund_pos": _env_float("ALT_FUND_POS_BTC", 0.0025),
+            "fund_neg": _env_float("ALT_FUND_NEG_BTC", -0.0025),
+            "basis_pos": _env_float("ALT_BASIS_POS_BTC", 0.0025),
+            "basis_neg": _env_float("ALT_BASIS_NEG_BTC", -0.0025),
+            "oi_extreme": _env_float("ALT_OI_EXTREME_BTC", 5.0),
+            "taker_bull": _env_float("ALT_TAKER_BULL_BTC", 0.7),
+            "taker_bear": _env_float("ALT_TAKER_BEAR_BTC", 1.3),
+        },
+        SymbolTier.MAJOR: {
+            "fund_pos": _env_float("ALT_FUND_POS_MAJOR", 0.0020),
+            "fund_neg": _env_float("ALT_FUND_NEG_MAJOR", -0.0020),
+            "basis_pos": _env_float("ALT_BASIS_POS_MAJOR", 0.0020),
+            "basis_neg": _env_float("ALT_BASIS_NEG_MAJOR", -0.0020),
+            "oi_extreme": _env_float("ALT_OI_EXTREME_MAJOR", 5.0),
+            "taker_bull": _env_float("ALT_TAKER_BULL_MAJOR", 0.75),
+            "taker_bear": _env_float("ALT_TAKER_BEAR_MAJOR", 1.25),
+        },
+        SymbolTier.ALT: {
+            "fund_pos": _env_float("ALT_FUND_POS_ALT", 0.0015),
+            "fund_neg": _env_float("ALT_FUND_NEG_ALT", -0.0015),
+            "basis_pos": _env_float("ALT_BASIS_POS_ALT", 0.0015),
+            "basis_neg": _env_float("ALT_BASIS_NEG_ALT", -0.0015),
+            "oi_extreme": _env_float("ALT_OI_EXTREME_ALT", 4.0),
+            "taker_bull": _env_float("ALT_TAKER_BULL_ALT", 0.8),
+            "taker_bear": _env_float("ALT_TAKER_BEAR_ALT", 1.2),
+        },
+    }
+
+
+ALT_THRESHOLDS = _build_alt_thresholds()
+ALT_FUNDING_WEIGHT = _env_float("ALT_FUNDING_WEIGHT", 1.0)
+ALT_BASIS_WEIGHT = _env_float("ALT_BASIS_WEIGHT", 0.7)
+ALT_OI_WEIGHT = _env_float("ALT_OI_WEIGHT", 0.7)
+ALT_TAKER_WEIGHT = _env_float("ALT_TAKER_WEIGHT", 0.7)
+ALT_DATA_CAP = abs(_env_float("ALT_DATA_CAP", 2.0))
 
 
 def _macro_float(value: Any) -> Optional[float]:
@@ -251,48 +297,70 @@ def compute_alt_adj(symbol: str, now: Optional[float] = None) -> Optional[float]
         logger.info("alt_data: alt_adj=None (no alt-data available for %s)", symbol_key)
         return None
 
-    adjustment = 0.0
     funding_value = funding.value if funding else None
     basis_value = basis.value if basis else None
     oi_change = open_interest.change_24h_pct if open_interest else None
     taker_value = taker_ratio.long_short_ratio if taker_ratio else None
 
+    tier = classify_symbol_tier(symbol_key)
+    thresholds = ALT_THRESHOLDS.get(tier, ALT_THRESHOLDS[SymbolTier.ALT])
+    adjustment = 0.0
+    reasons: list[str] = []
+
     if funding_value is not None:
-        if funding_value >= ALT_FUNDING_POS_EXTREME:
-            adjustment -= 1.0
-        elif funding_value <= ALT_FUNDING_NEG_EXTREME:
-            adjustment += 1.0
+        if funding_value >= thresholds["fund_pos"]:
+            adjustment -= 1.0 * ALT_FUNDING_WEIGHT
+            reasons.append(f"funding_high={funding_value:.5f}")
+        elif funding_value <= thresholds["fund_neg"]:
+            adjustment += 1.0 * ALT_FUNDING_WEIGHT
+            reasons.append(f"funding_low={funding_value:.5f}")
 
     if basis_value is not None:
-        if basis_value >= ALT_BASIS_POS_EXTREME:
-            adjustment -= 0.5
-        elif basis_value <= ALT_BASIS_NEG_EXTREME:
-            adjustment += 0.5
+        if basis_value >= thresholds["basis_pos"]:
+            adjustment -= 0.5 * ALT_BASIS_WEIGHT
+            reasons.append(f"basis_high={basis_value:.5f}")
+        elif basis_value <= thresholds["basis_neg"]:
+            adjustment += 0.5 * ALT_BASIS_WEIGHT
+            reasons.append(f"basis_low={basis_value:.5f}")
 
     if oi_change is not None:
-        if oi_change >= ALT_OI_POS_CHANGE:
-            adjustment += 0.5
-        elif oi_change <= ALT_OI_NEG_CHANGE:
-            adjustment -= 0.5
+        if oi_change >= thresholds["oi_extreme"]:
+            adjustment += 0.5 * ALT_OI_WEIGHT
+            reasons.append(f"oi_up={oi_change:.2f}")
+        elif oi_change <= -thresholds["oi_extreme"]:
+            adjustment -= 0.5 * ALT_OI_WEIGHT
+            reasons.append(f"oi_down={oi_change:.2f}")
 
     if taker_value is not None:
-        if taker_value >= ALT_TAKER_RATIO_POS:
-            adjustment -= 0.5
-        elif taker_value <= ALT_TAKER_RATIO_NEG:
-            adjustment += 0.5
+        if taker_value >= thresholds["taker_bear"]:
+            adjustment -= 0.5 * ALT_TAKER_WEIGHT
+            reasons.append(f"taker_longs={taker_value:.2f}")
+        elif taker_value <= thresholds["taker_bull"]:
+            adjustment += 0.5 * ALT_TAKER_WEIGHT
+            reasons.append(f"taker_shorts={taker_value:.2f}")
 
-    weighted = adjustment * ALT_DATA_WEIGHT
-    capped = max(-ALT_ADJ_MAX_ABS, min(ALT_ADJ_MAX_ABS, weighted))
+    if reasons:
+        if adjustment > ALT_DATA_CAP:
+            adjustment = ALT_DATA_CAP
+        elif adjustment < -ALT_DATA_CAP:
+            adjustment = -ALT_DATA_CAP
+
+    log_value = adjustment if reasons else 0.0
     logger.info(
-        "alt_data: alt_adj=%.2f for %s (funding=%s basis=%s oi_change=%s taker_ratio=%s)",
-        capped,
+        "alt_data: alt_adj=%.2f for %s tier=%s (funding=%.5f basis=%.5f oi_change=%.2f taker_ratio=%s reasons=%s)",
+        log_value,
         symbol_key,
-        f"{funding_value:.5f}" if funding_value is not None else "None",
-        f"{basis_value:.5f}" if basis_value is not None else "None",
-        f"{oi_change:.2f}" if oi_change is not None else "None",
-        f"{taker_value:.2f}" if taker_value is not None else "None",
+        tier.value,
+        funding_value if funding_value is not None else float("nan"),
+        basis_value if basis_value is not None else float("nan"),
+        oi_change if oi_change is not None else float("nan"),
+        taker_value if taker_value is not None else None,
+        ",".join(reasons) if reasons else "none",
     )
-    return capped
+
+    if not reasons:
+        return None
+    return adjustment
 
 
 def is_stable_symbol(symbol: str) -> bool:
