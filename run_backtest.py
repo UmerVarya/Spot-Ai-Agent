@@ -70,8 +70,18 @@ def predict_prob(signal_dict, symbol: str) -> float:
 
     meta = signal_dict.get("metadata") or {}
     session = meta.get("session", "Backtest")
-    btc_dom = float(meta.get("btc_dominance", 50.0))
-    fear_greed = float(meta.get("fear_greed", 50.0))
+
+    def _to_float(value: object) -> float:
+        if value is None:
+            return float("nan")
+        try:
+            candidate = float(value)
+        except (TypeError, ValueError):
+            return float("nan")
+        return candidate
+
+    btc_dom = _to_float(meta.get("btc_dominance"))
+    fear_greed = _to_float(meta.get("fear_greed"))
     sentiment_conf = float(meta.get("sentiment_confidence", 5.0))
     pattern = str(meta.get("pattern", meta.get("setup_type", "unknown")))
     return float(
@@ -97,12 +107,17 @@ def macro_filter() -> bool:
     try:
         context = get_macro_context()
         bias = str(context.get("macro_sentiment", "neutral"))
-        btc_dom = float(context.get("btc_dominance", 50.0))
-        fear_greed = int(context.get("fear_greed", 50))
+        btc_raw = context.get("btc_dominance")
+        fg_raw = context.get("fear_greed")
+        btc_dom = float(btc_raw) if btc_raw is not None else None
+        try:
+            fear_greed = int(float(fg_raw)) if fg_raw is not None else None
+        except (TypeError, ValueError):
+            fear_greed = None
     except Exception:
         bias = "neutral"
-        btc_dom = 50.0
-        fear_greed = 50
+        btc_dom = None
+        fear_greed = None
     skip_all, skip_alt, _ = macro_filter_decision(btc_dom, fear_greed, bias, 7.0)
     return not skip_all
 
