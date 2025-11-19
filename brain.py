@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import os
 import re
@@ -269,6 +269,7 @@ class PreparedTradeDecision:
     sentiment_confidence: float
     fear_greed: Optional[int]
     macro_news: Dict[str, Any]
+    macro_context: Dict[str, Any] = field(default_factory=dict)
     news_summary: str
     symbol_news_summary: str
     orderflow: str
@@ -310,6 +311,7 @@ def _quantitative_fallback_decision(
         "llm_model": None,
         "technical_indicator_score": prepared.technical_score,
         "pattern_memory": prepared.pattern_memory_context,
+        "macro_context": prepared.macro_context,
         "fallback_auto_approval_threshold": LLM_FALLBACK_AUTO_APPROVAL_CONFIDENCE,
         "fallback_score_requirement": score_requirement,
     }
@@ -661,6 +663,7 @@ def prepare_trade_decision(
     orderflow: str,
     sentiment: Mapping[str, Any],
     macro_news: Mapping[str, Any],
+    macro_context: Optional[Mapping[str, Any]] = None,
     volatility: Optional[float],
     fear_greed: Optional[int],
     auction_state: Optional[str],
@@ -710,6 +713,37 @@ def prepare_trade_decision(
     symbol_news_summary = summarize_symbol_news(symbol)
     if not symbol_news_summary:
         symbol_news_summary = "No material symbol-specific headlines detected in the last 72 hours."
+
+    def _format_macro_age(value: Any) -> str:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return "N/A"
+        if not math.isfinite(number) or number < 0:
+            return "N/A"
+        return f"{int(number)}s"
+
+    def _format_macro_value(value: Any, suffix: str = "") -> str:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return "N/A"
+        if not math.isfinite(number):
+            return "N/A"
+        return f"{number:.2f}{suffix}"
+
+    macro_snapshot = dict(macro_context) if isinstance(macro_context, Mapping) else {}
+    if macro_snapshot.get("macro_bias") is None:
+        macro_snapshot["macro_bias"] = sentiment_bias
+    if macro_snapshot.get("fear_greed") is None:
+        macro_snapshot["fear_greed"] = fear_greed
+    macro_bias_label = macro_snapshot.get("macro_bias") or sentiment_bias
+    macro_fg_value = macro_snapshot.get("fear_greed", fear_greed)
+    macro_fg_text = f"{macro_fg_value}" if macro_fg_value is not None else "N/A"
+    macro_fg_age_text = _format_macro_age(macro_snapshot.get("fear_greed_age_sec"))
+    macro_btc_dom_text = _format_macro_value(macro_snapshot.get("btc_dom"), "%")
+    macro_btc_age_text = _format_macro_age(macro_snapshot.get("btc_dom_age_sec"))
+    macro_flag_text = ", ".join(macro_snapshot.get("macro_flags", [])) or "None"
 
     try:
         pattern_lower = pattern_name.lower() if isinstance(pattern_name, str) else ""
@@ -977,7 +1011,12 @@ def prepare_trade_decision(
         "### Macro Sentiment\n"
         f"Bias: {sentiment_bias}\n"
         f"Confidence: {sentiment_confidence}\n"
-        f"Fear & Greed Index: {fear_greed if fear_greed is not None else 'N/A'}\n"
+        f"Macro Bias: {macro_bias_label}\n"
+        f"Fear & Greed Index: {macro_fg_text}\n"
+        f"Fear & Greed Age: {macro_fg_age_text}\n"
+        f"BTC Dominance: {macro_btc_dom_text}\n"
+        f"BTC Dominance Age: {macro_btc_age_text}\n"
+        f"Macro Flags: {macro_flag_text}\n"
         f"Macro News Safe: {macro_news.get('safe', True)}\n"
         f"Macro News Notes: {macro_news.get('reason', 'N/A')}\n"
         f"Recent News Summary: {news_summary_value}\n\n"
@@ -1012,6 +1051,7 @@ def prepare_trade_decision(
         sentiment_confidence=sentiment_confidence,
         fear_greed=fear_greed,
         macro_news=dict(macro_news),
+        macro_context=dict(macro_snapshot),
         news_summary=news_summary_value,
         symbol_news_summary=symbol_news_summary,
         orderflow=orderflow,
@@ -1107,6 +1147,7 @@ def finalize_trade_decision(
         "llm_model": model,
         "technical_indicator_score": technical_score,
         "pattern_memory": pattern_memory_context,
+        "macro_context": prepared.macro_context,
     }
 
     if not parsed_decision:
@@ -1153,6 +1194,9 @@ def finalize_trade_decision(
         pattern=prepared.pattern_name,
         macro_reason=prepared.macro_news.get("reason", ""),
         news_summary=news_summary,
+        macro_sentiment=prepared.macro_context.get("macro_bias"),
+        btc_dominance=prepared.macro_context.get("btc_dom"),
+        fear_greed=prepared.macro_context.get("fear_greed"),
     ) or f"No major pattern, but macro/sentiment context favors {prepared.direction} setup."
 
     return {

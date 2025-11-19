@@ -1498,8 +1498,9 @@ def run_agent_loop() -> None:
                 continue
             macro_snapshot = _get_state_section("macro")
             macro_payload_raw = macro_snapshot.get("data")
+            now_ts = time.time()
             macro_timestamp = float(macro_snapshot.get("timestamp", 0.0))
-            macro_age = time.time() - macro_timestamp if macro_timestamp else float("inf")
+            macro_age = now_ts - macro_timestamp if macro_timestamp else float("inf")
             macro_payload = (
                 dict(macro_payload_raw) if isinstance(macro_payload_raw, dict) else {}
             )
@@ -1519,6 +1520,9 @@ def run_agent_loop() -> None:
                     macro_age,
                 )
                 macro_payload["stale"] = True
+            btc_timestamp = macro_payload.get("btc_timestamp")
+            fg_timestamp = macro_payload.get("fear_greed_timestamp")
+
             btc_d_raw = macro_payload.get("btc_dominance")
             btc_d: Optional[float]
             if btc_d_raw is None:
@@ -1535,9 +1539,13 @@ def run_agent_loop() -> None:
                 fg: Optional[int] = None
             else:
                 try:
-                    fg = int(float(fg_raw))
+                    fg_candidate = float(fg_raw)
                 except (TypeError, ValueError):
+                    fg_candidate = None
+                if fg_candidate is None or not math.isfinite(fg_candidate):
                     fg = None
+                else:
+                    fg = int(fg_candidate)
             sentiment_payload = macro_payload.get("sentiment") or {}
             if not isinstance(sentiment_payload, dict):
                 sentiment_payload = dict(DEFAULT_MACRO_SENTIMENT)
@@ -1565,16 +1573,30 @@ def run_agent_loop() -> None:
             sentiment["confidence"] = sentiment_confidence
             sentiment["summary"] = sentiment_summary.strip()
             # Convert BTC dominance and Fear & Greed to numeric values
-            try:
-                btc_d = float(btc_d)
-            except Exception:
-                btc_d = 0.0
-            try:
-                fg = int(fg)
-            except Exception:
-                fg = 0
             btc_log = f"{btc_d:.2f}%" if btc_d is not None else "n/a"
             fg_log = f"{fg}" if fg is not None else "n/a"
+            btc_age_sec: Optional[float]
+            try:
+                btc_ts_value = float(btc_timestamp) if btc_timestamp else 0.0
+            except (TypeError, ValueError):
+                btc_ts_value = 0.0
+            btc_age_sec = (now_ts - btc_ts_value) if btc_ts_value else None
+            fg_age_sec: Optional[float]
+            try:
+                fg_ts_value = float(fg_timestamp) if fg_timestamp else 0.0
+            except (TypeError, ValueError):
+                fg_ts_value = 0.0
+            fg_age_sec = (now_ts - fg_ts_value) if fg_ts_value else None
+            macro_context_live = {
+                "fear_greed": fg,
+                "fear_greed_age_sec": fg_age_sec,
+                "btc_dom": btc_d,
+                "btc_dom_age_sec": btc_age_sec,
+                "macro_bias": sentiment_bias,
+            }
+            macro_age_text = "n/a"
+            if math.isfinite(macro_age):
+                macro_age_text = f"{int(macro_age)}s"
             logger.info(
                 "BTC Dominance: %s | Fear & Greed: %s | Sentiment: %s (Confidence: %s)",
                 btc_log,
@@ -1582,6 +1604,10 @@ def run_agent_loop() -> None:
                 sentiment_bias,
                 sentiment_confidence,
             )
+            macro_log_line = (
+                f"[macro] FNG={fg_log} btc_dom={btc_log} bias={sentiment_bias} age={macro_age_text}"
+            )
+            logger.info(macro_log_line)
             skip_all, skip_alt, macro_reasons = macro_filter_decision(
                 btc_d, fg, sentiment_bias, sentiment_confidence
             )
@@ -1597,7 +1623,9 @@ def run_agent_loop() -> None:
                     logger.warning("LLM news monitor warning: %s", reason)
             if monitor_state and monitor_state.get("alert_triggered"):
                 macro_reasons.append("LLM news alert")
-            signal_cache.update_context(sentiment_bias=sentiment_bias)
+            signal_cache.update_context(
+                sentiment_bias=sentiment_bias, macro=macro_context_live
+            )
             if skip_all:
                 reason_text = " + ".join(macro_reasons) if macro_reasons else "unfavorable conditions"
                 logger.warning("Market unfavorable (%s). Skipping scan.", reason_text)
@@ -1801,6 +1829,11 @@ def run_agent_loop() -> None:
                     position_size = cached_signal.position_size
                     pattern_name = cached_signal.pattern
                     signal_snapshot = price_data.attrs.get("signal_features", {}) or {}
+                    macro_meta_raw = signal_snapshot.get("macro_context")
+                    if isinstance(macro_meta_raw, Mapping):
+                        macro_meta = dict(macro_meta_raw)
+                    else:
+                        macro_meta = dict(macro_context_live)
                     setup_type = signal_snapshot.get("setup_type")
                     record_signal_evaluated()
                     evaluation_started = True
@@ -2176,7 +2209,7 @@ def run_agent_loop() -> None:
                         _emit_metrics("skip", reason_text=reason_text, reason_key=reason_key)
                         continue
                     logger.info(
-                        "%s: Score=%.2f (alt_adj=%.2f), Direction=%s, Pattern=%s, PosSize=%s, AuctionState=%s (age=%.2fs)",
+                        "%s: Score=%.2f (alt_adj=%.2f), Direction=%s, Pattern=%s, PosSize=%s, AuctionState=%s (age=%.2fs) | %s",
                         symbol,
                         score,
                         alt_adjustment,
@@ -2185,6 +2218,7 @@ def run_agent_loop() -> None:
                         position_size,
                         auction_state,
                         cached_signal.age(),
+                        macro_log_line,
                     )
                     symbol_scores[symbol] = {
                         "score": score,
@@ -2819,6 +2853,7 @@ def run_agent_loop() -> None:
                         orderflow=orderflow,
                         sentiment=sentiment,
                         macro_news=macro_news_assessment,
+                        macro_context=macro_meta,
                         volatility=sym_vol_pct,
                         fear_greed=fg,
                         auction_state=auction_state,
@@ -2834,33 +2869,35 @@ def run_agent_loop() -> None:
                     }
                     prepared = None
 
-                context = {
-                    "symbol": symbol,
-                    "score": score,
-                    "position_size": position_size,
-                    "pattern_name": pattern_name,
-                    "price_data": price_data,
-                    "auction_state": auction_state,
-                    "setup_type": setup_type if isinstance(setup_type, str) else None,
-                    "alt_features": alt_features,
-                    "alt_adjustment": alt_adjustment,
-                    "indicators": indicators,
-                    "indicators_df": indicators_df,
-                    "volume_profile_result": volume_profile_result,
-                    "lvn_level": lvn_level,
-                    "orderflow": orderflow,
-                    "orderflow_metadata": orderflow_metadata,
-                    "micro_feature_payload": micro_feature_payload,
-                    "sym_vol_pct": sym_vol_pct,
-                    "sym_vol": sym_vol,
-                    "htf_trend_pct": htf_trend_pct,
-                    "signal_snapshot": signal_snapshot,
-                    "macro_ind": macro_ind,
-                    "pre_result": pre_result,
-                    "prepared": prepared,
-                    "tier": tier,
-                    "session": session,
-                    "news_severity": price_data.attrs.get("news_severity", 0),
+                    context = {
+                        "symbol": symbol,
+                        "score": score,
+                        "position_size": position_size,
+                        "pattern_name": pattern_name,
+                        "price_data": price_data,
+                        "auction_state": auction_state,
+                        "setup_type": setup_type if isinstance(setup_type, str) else None,
+                        "alt_features": alt_features,
+                        "alt_adjustment": alt_adjustment,
+                        "indicators": indicators,
+                        "indicators_df": indicators_df,
+                        "volume_profile_result": volume_profile_result,
+                        "lvn_level": lvn_level,
+                        "orderflow": orderflow,
+                        "orderflow_metadata": orderflow_metadata,
+                        "micro_feature_payload": micro_feature_payload,
+                        "sym_vol_pct": sym_vol_pct,
+                        "sym_vol": sym_vol,
+                        "htf_trend_pct": htf_trend_pct,
+                        "signal_snapshot": signal_snapshot,
+                        "macro_ind": macro_ind,
+                        "macro_context": macro_meta,
+                        "macro_log_line": macro_log_line,
+                        "pre_result": pre_result,
+                        "prepared": prepared,
+                        "tier": tier,
+                        "session": session,
+                        "news_severity": price_data.attrs.get("news_severity", 0),
                     "atr_15m_ratio": price_data.attrs.get("atr_15m_ratio"),
                 }
                 pending_trade_contexts.append(context)
@@ -3312,7 +3349,7 @@ def run_agent_loop() -> None:
                         new_trade["microstructure_plan"] = micro_plan
                     logger.info("Narrative:\n%s\n", narrative)
                     logger.info(
-                        "Trade Opened %s @ %s | Notional=%s USD | Qty=%s | TP1 %s / TP2 %s / TP3 %s",
+                        "Trade Opened %s @ %s | Notional=%s USD | Qty=%s | TP1 %s / TP2 %s / TP3 %s | %s",
                         symbol,
                         entry_price,
                         trade_usd,
@@ -3320,6 +3357,7 @@ def run_agent_loop() -> None:
                         tp1,
                         tp2,
                         tp3,
+                        context.get("macro_log_line", macro_log_line),
                     )
                     if create_new_trade(
                         new_trade,

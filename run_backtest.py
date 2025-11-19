@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import glob
+
 import json
+import math
 import os
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Mapping, Optional
 
 import numpy as np
 import pandas as pd
@@ -52,11 +54,58 @@ def load_csv_folder(path_pattern: str, symbol_col_from_name: bool = True) -> Dic
     return data
 
 
+def _coerce_float(value: object) -> Optional[float]:
+    try:
+        candidate = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(candidate):
+        return None
+    return candidate
+
+
+def _coerce_int(value: object) -> Optional[int]:
+    try:
+        candidate = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    if 0 <= candidate <= 100:
+        return candidate
+    return None
+
+
+def _build_macro_context(snapshot: Mapping[str, object]) -> Dict[str, object | None]:
+    """Normalize macro snapshot from :func:`get_macro_context`."""
+
+    fear_greed = _coerce_int(snapshot.get("fear_greed")) if snapshot else None
+    btc_dom = _coerce_float(snapshot.get("btc_dominance")) if snapshot else None
+    fg_age = _coerce_float(snapshot.get("fear_greed_age_seconds")) if snapshot else None
+    btc_age = _coerce_float(snapshot.get("btc_age_seconds")) if snapshot else None
+    bias_raw = None
+    if snapshot:
+        bias_candidate = snapshot.get("macro_sentiment") or snapshot.get("macro_bias")
+        if isinstance(bias_candidate, str) and bias_candidate.strip():
+            bias_raw = bias_candidate.strip().lower()
+
+    return {
+        "fear_greed": fear_greed,
+        "fear_greed_age_sec": fg_age,
+        "btc_dom": btc_dom,
+        "btc_dom_age_sec": btc_age,
+        "macro_bias": bias_raw,
+    }
+
+
 def evaluate_signal(df_slice: pd.DataFrame, symbol: str):
     """Wrapper around the live signal stack with no look-ahead."""
 
-    score, direction, confidence, meta = evaluate_signal_live(df_slice.copy(), symbol=symbol)
+    macro_snapshot = get_macro_context() or {}
+    macro_context = _build_macro_context(macro_snapshot)
+    score, direction, confidence, meta = evaluate_signal_live(
+        df_slice.copy(), symbol=symbol, macro_context=macro_context
+    )
     metadata = meta if isinstance(meta, dict) else {"detail": meta}
+    metadata.setdefault("macro_context", macro_context)
     return {
         "score": float(score or 0.0),
         "direction": direction,

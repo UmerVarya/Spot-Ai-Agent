@@ -233,3 +233,44 @@ def test_finalize_trade_decision_error_blocks_weak_signals(monkeypatch):
     assert result["decision"] is False
     assert result["llm_error"] is True
     assert "quantitative conviction insufficient" in result["reason"].lower()
+
+
+def test_prepare_trade_decision_embeds_macro_context(monkeypatch):
+    import brain
+
+    _patch_brain_defaults(monkeypatch)
+
+    sentiment = {"bias": "bearish", "score": 6.0}
+    macro_news = {"safe": True, "reason": "Calm"}
+    macro_context = {
+        "fear_greed": 15,
+        "fear_greed_age_sec": 300,
+        "btc_dom": 61.5,
+        "btc_dom_age_sec": 90,
+        "macro_bias": "bearish",
+        "macro_flags": ["extreme_fear"],
+    }
+
+    _, prepared = brain.prepare_trade_decision(
+        symbol="ETHUSDT",
+        score=7.2,
+        direction="long",
+        indicators={"rsi": 55.0, "macd": 0.4, "adx": 28.0},
+        session="US",
+        pattern_name="hammer",
+        orderflow="buyers",
+        sentiment=sentiment,
+        macro_news=macro_news,
+        macro_context=macro_context,
+        volatility=0.5,
+        fear_greed=macro_context["fear_greed"],
+        auction_state="trending",
+        setup_type="trend",
+        news_summary="Macro looks calm",
+    )
+
+    assert prepared is not None
+    prompt = prepared.advisor_prompt
+    assert "Macro Bias: bearish" in prompt
+    assert "BTC Dominance: 61.50%" in prompt
+    assert "Macro Flags: extreme_fear" in prompt
