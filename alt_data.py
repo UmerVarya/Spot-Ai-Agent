@@ -192,11 +192,24 @@ def fetch_taker_ratio_raw(symbol: str) -> Tuple[Optional[float], Optional[int]]:
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, list) or not payload:
-            raise ValueError("taker ratio payload missing entries")
+            logger.info("alt_data: taker ratio unavailable for %s (payload=%r)", symbol_key, payload)
+            return None, None
         latest = payload[-1]
-        ratio_raw = latest.get("longShortRatio") if isinstance(latest, dict) else None
-        ts_raw = latest.get("timestamp") if isinstance(latest, dict) else None
-        ratio = float(ratio_raw)
+        if not isinstance(latest, dict):
+            logger.info("alt_data: taker ratio unavailable for %s (payload=%r)", symbol_key, latest)
+            return None, None
+
+        ratio_raw = latest.get("longShortRatio")
+        if ratio_raw in (None, ""):
+            logger.info("alt_data: taker ratio unavailable for %s (payload=%r)", symbol_key, latest)
+            return None, None
+        try:
+            ratio = float(ratio_raw)
+        except (TypeError, ValueError):
+            logger.info("alt_data: taker ratio unavailable for %s (payload=%r)", symbol_key, latest)
+            return None, None
+
+        ts_raw = latest.get("timestamp")
         timestamp = int(float(ts_raw)) // 1000 if ts_raw is not None else int(time.time())
         return ratio, timestamp
     except Exception as exc:  # pylint: disable=broad-except
