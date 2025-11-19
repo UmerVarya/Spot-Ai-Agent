@@ -1,5 +1,9 @@
 """Shared configuration constants for trade sizing and management."""
 
+from __future__ import annotations
+
+import os
+
 ATR_STOP_MULTIPLIER = 1.5
 """Multiple of ATR used to position default stop-loss distances."""
 
@@ -17,3 +21,11 @@ TRAIL_TIGHT_ATR = 1.0
 
 TRAIL_FINAL_ATR = 0.5
 """ATR multiple used when momentum weakens or the final threshold is reached."""
+
+DEFAULT_TAKE_PROFIT_STRATEGY = (
+    os.getenv("TAKE_PROFIT_STRATEGY", "atr_trailing").strip().lower() or "atr_trailing"
+)
+"""Environment-controlled default take-profit strategy label."""
+
+TP1_TRAILING_ONLY_STRATEGY = "tp1_trailing_only"
+"""Identifier for the TP1-triggered trailing-only strategy."""

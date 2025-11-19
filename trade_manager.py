@@ -49,6 +49,7 @@ from rl_policy import RLPositionSizer
 from microstructure import plan_execution, detect_sell_pressure
 from orderflow import detect_aggression
 from trade_constants import (
+    TP1_TRAILING_ONLY_STRATEGY,
     TP_ATR_MULTIPLIERS,
     TRAIL_FINAL_ATR,
     TRAIL_INITIAL_ATR,
@@ -475,6 +476,13 @@ def _record_partial_exit(
 ) -> None:
     """Aggregate realised results from a partial exit on the trade object."""
 
+    if _is_tp1_trailing_only(trade):
+        logger.debug(
+            "Skipping partial exit for %s because tp1_trailing_only keeps full size",
+            trade.get("symbol"),
+        )
+        return
+
     try:
         fee_val = float(fees or 0.0)
     except Exception:
@@ -865,6 +873,115 @@ def _activate_trailing_mode(
     return lock_price
 
 
+def _is_tp1_trailing_only(trade: Mapping[str, Any]) -> bool:
+    """Return ``True`` when the trade uses the TP1-triggered trailing strategy."""
+
+    return (
+        str(trade.get("take_profit_strategy") or "").lower()
+        == TP1_TRAILING_ONLY_STRATEGY
+    )
+
+
+def _tp1_trailing_only_activate(
+    trade: dict,
+    *,
+    tp_price: Optional[float],
+    current_price: Optional[float],
+) -> Optional[float]:
+    """Arm the TP1-only trailing mode and return the new stop price."""
+
+    entry_price = _to_float(trade.get("entry"))
+    symbol = trade.get("symbol")
+    tp_value = _to_float(tp_price)
+    if entry_price is None or tp_value is None:
+        return None
+
+    trade["tp1_triggered"] = True
+    trade["trail_mode"] = True
+    trade["tp1_price"] = tp_value
+    max_price = _to_float(trade.get("max_price"))
+    try:
+        price_obs = float(current_price) if current_price is not None else None
+    except Exception:
+        price_obs = None
+    if max_price is None:
+        max_price = entry_price
+    if price_obs is None:
+        price_obs = tp_value
+    max_price = max(max_price, price_obs)
+    trade["max_price"] = max_price
+
+    initial_trail_sl = entry_price + 0.5 * (tp_value - entry_price)
+    if initial_trail_sl <= entry_price:
+        initial_trail_sl = entry_price
+    new_sl = round(initial_trail_sl, 6)
+    _update_stop_loss(trade, new_sl)
+    logger.info(
+        "%s TP1 trigger armed trailing-only mode | entry %.6f tp1 %.6f initial SL %.6f",
+        symbol,
+        entry_price,
+        tp_value,
+        new_sl,
+    )
+    return new_sl
+
+
+def _tp1_trailing_only_update(
+    trade: dict,
+    *,
+    current_price: Optional[float],
+) -> Optional[float]:
+    """Update the TP1-only trailing stop when price makes new highs."""
+
+    if not trade.get("trail_mode"):
+        return None
+
+    entry_price = _to_float(trade.get("entry"))
+    if entry_price is None:
+        return None
+
+    try:
+        price_obs = float(current_price) if current_price is not None else None
+    except Exception:
+        price_obs = None
+
+    max_price = _to_float(trade.get("max_price"))
+    if max_price is None:
+        max_price = entry_price
+    if price_obs is not None and price_obs > max_price:
+        max_price = price_obs
+        trade["max_price"] = max_price
+
+    move_from_entry = max_price - entry_price
+    if move_from_entry <= 0:
+        return None
+    move_pct = move_from_entry / entry_price if entry_price > 0 else 0.0
+    if move_pct <= 0.005:
+        lock_ratio = 0.50
+    elif move_pct <= 0.01:
+        lock_ratio = 0.70
+    elif move_pct <= 0.02:
+        lock_ratio = 0.80
+    else:
+        lock_ratio = 0.90
+
+    new_sl = entry_price + lock_ratio * move_from_entry
+    current_sl = _to_float(trade.get("sl"))
+    if current_sl is not None and new_sl <= current_sl + 1e-9:
+        return None
+
+    new_sl = round(new_sl, 6)
+    _update_stop_loss(trade, new_sl)
+    logger.info(
+        "%s tp1-trailing ratchet | max %.6f new SL %.6f lock %.0f%%",
+        trade.get("symbol"),
+        max_price,
+        new_sl,
+        lock_ratio * 100.0,
+    )
+    return new_sl
+
+
 def _adjust_trailing_multiplier(trade: dict, new_multiplier: float) -> bool:
     """Reduce the trailing ATR multiplier when the new value is tighter."""
 
@@ -890,7 +1007,9 @@ def _update_stop_loss(trade: dict, new_sl: float) -> None:
     tp_price = None
     strategy = str(trade.get("take_profit_strategy") or "").lower()
     trailing_mode = bool(trade.get("trailing_active"))
-    if strategy != "atr_trailing":
+    if strategy == TP1_TRAILING_ONLY_STRATEGY:
+        tp_price = None
+    elif strategy != "atr_trailing":
         if not status.get("tp1"):
             tp_price = trade.get("tp1")
         elif not status.get("tp2"):
@@ -1366,6 +1485,16 @@ def _manage_trades_body() -> None:
         trade.setdefault("trailing_active", False)
         if trade.get("trailing_active") and not _to_float(trade.get("trail_multiplier")):
             trade["trail_multiplier"] = TRAIL_INITIAL_ATR
+        strategy = str(trade.get("take_profit_strategy") or "atr_trailing").lower()
+        trade["take_profit_strategy"] = strategy
+        tp1_trailing_only = strategy == TP1_TRAILING_ONLY_STRATEGY
+        if tp1_trailing_only:
+            if "tp1_price" not in trade or trade.get("tp1_price") is None:
+                trade["tp1_price"] = _to_float(trade.get("tp1"))
+            trade.setdefault("tp1_triggered", False)
+            trade.setdefault("trail_mode", False)
+            if trade.get("max_price") is None:
+                trade["max_price"] = _to_float(trade.get("entry"))
         fallback_exit_price: Optional[float] = None
         for price_key in ("last_price", "current_price", "entry"):
             price_val = trade.get(price_key)
@@ -1812,6 +1941,16 @@ def _manage_trades_body() -> None:
                     if status_flags.get("tp1") or target_price is None:
                         continue
                     status_flags["tp1"] = True
+                    if tp1_trailing_only:
+                        lock_price = _tp1_trailing_only_activate(
+                            trade,
+                            tp_price=target_price,
+                            current_price=current_price,
+                        )
+                        if lock_price is not None:
+                            actions.append("tp1_trailing_only_activate")
+                            _persist_active_snapshot(updated_trades, active_trades, index)
+                        continue
                     lock_price = _activate_trailing_mode(
                         trade,
                         target_price,
@@ -1852,6 +1991,8 @@ def _manage_trades_body() -> None:
                         },
                     )
                 elif label == "tp2" and direction == "long":
+                    if tp1_trailing_only:
+                        continue
                     if status_flags.get("tp2") or target_price is None:
                         continue
                     status_flags["tp2"] = True
@@ -1885,6 +2026,8 @@ def _manage_trades_body() -> None:
                             },
                         )
                 elif label == "tp3" and direction == "long":
+                    if tp1_trailing_only:
+                        continue
                     if status_flags.get("tp3") or target_price is None:
                         continue
                     status_flags["tp3"] = True
@@ -1923,8 +2066,13 @@ def _manage_trades_body() -> None:
                     qty = _to_float(trade.get('position_size', 1)) or 0.0
                     exit_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                     trailing_flag = bool(trade.get("trailing_active"))
-                    outcome_label = "trailing_sl" if trailing_flag else "sl"
-                    reason_text = "Trailing stop hit" if trailing_flag else "Stop loss hit"
+                    tp1_trailing_exit = tp1_trailing_only and trade.get("trail_mode")
+                    if tp1_trailing_exit:
+                        outcome_label = "trailing_stop"
+                        reason_text = "TP1 trailing stop hit"
+                    else:
+                        outcome_label = "trailing_sl" if trailing_flag else "sl"
+                        reason_text = "Trailing stop hit" if trailing_flag else "Stop loss hit"
                     execute_exit_trade(
                         trade,
                         exit_price=target_price,
@@ -1933,6 +2081,15 @@ def _manage_trades_body() -> None:
                         quantity=qty,
                         exit_time=exit_time,
                     )
+                    if tp1_trailing_exit:
+                        logger.info(
+                            "%s tp1 trailing stop exit | exit %.6f sl %.6f gross %.4f net %.4f",
+                            symbol,
+                            target_price,
+                            _to_float(trade.get("sl")),
+                            trade.get("gross_pnl"),
+                            trade.get("net_pnl", trade.get("realized_pnl")),
+                        )
                     _log_trade_closed(trade, reason=reason_text, outcome=outcome_label)
                     _persist_active_snapshot(
                         updated_trades, active_trades, index, include_current=False
@@ -1948,6 +2105,15 @@ def _manage_trades_body() -> None:
         if trade_closed:
             logger.debug("%s actions: %s", symbol, actions)
             continue
+
+        if tp1_trailing_only and trade.get("trail_mode"):
+            updated_sl = _tp1_trailing_only_update(
+                trade,
+                current_price=current_price,
+            )
+            if updated_sl is not None:
+                actions.append("tp1_trailing_only_sl_move")
+                _persist_active_snapshot(updated_trades, active_trades, index)
 
         sl = _to_float(trade.get('sl'))
         trailing_active_now = bool(trade.get("trailing_active"))
