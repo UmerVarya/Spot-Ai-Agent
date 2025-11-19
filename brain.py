@@ -255,31 +255,28 @@ def call_llm_with_fallbacks(
 symbol_context_cache: Dict[str, Dict[str, Any]] = {}
 
 
-@dataclass(slots=True)
+@dataclass
 class PreparedTradeDecision:
-    """Container holding deterministic context before querying the LLM."""
-
     symbol: str
+    timeframe: str
+    side: str
     direction: str
-    session: str
-    setup_type: Optional[str]
-    score: float
     indicators: Dict[str, float]
     sentiment_bias: str
-    sentiment_confidence: float
-    fear_greed: Optional[int]
+    fear_greed: float
     macro_news: Dict[str, Any]
-    macro_context: Dict[str, Any] = field(default_factory=dict)
     news_summary: str
     symbol_news_summary: str
     orderflow: str
-    auction_state: Optional[str]
+    action_state: Optional[str]
     pattern_name: str
     pattern_memory_context: Dict[str, Any]
     technical_score: float
     final_confidence: float
     score_threshold: float
-    advisor_prompt: str
+    # fields with defaults MUST come last
+    macro_context: Dict[str, Any] = field(default_factory=dict)
+    advisor_prompt: str = ""
 
 
 def _quantitative_fallback_decision(
