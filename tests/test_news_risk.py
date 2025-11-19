@@ -92,3 +92,41 @@ def test_write_and_load_news_status(tmp_path, monkeypatch):
     assert loaded["mode"] == "HARD_HALT"
     assert loaded["category"] == "CRYPTO_SYSTEMIC"
     assert loaded["last_event_headline"] == "SEC sues Binance"
+
+
+def test_classify_news_crypto_systemic_and_policy_detections():
+    assert (
+        news_risk.classify_news(
+            "SEC sues Binance for unregistered securities violations",
+            "",
+        )
+        == "CRYPTO_SYSTEMIC"
+    )
+    assert (
+        news_risk.classify_news(
+            "USDT depeg: Tether falls to $0.92 on major exchange",
+            "",
+        )
+        == "CRYPTO_SYSTEMIC"
+    )
+    assert (
+        news_risk.classify_news(
+            "Senate banking panel advances Trump’s FDIC pick Travis Hill as agency shifts its crypto approach",
+            "",
+        )
+        == "CRYPTO_MEDIUM"
+    )
+    assert (
+        news_risk.classify_news(
+            "Senate banking committee holds hearing on FDIC’s approach to crypto oversight",
+            "",
+        )
+        == "CRYPTO_MEDIUM"
+    )
+    assert (
+        news_risk.classify_news(
+            "FDIC orders major crypto exchange to halt withdrawals amid insolvency concerns",
+            "",
+        )
+        == "CRYPTO_SYSTEMIC"
+    )
