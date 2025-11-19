@@ -11,3 +11,11 @@ def test_macro_filter_alt_risk():
     skip_all, skip_alt, reasons = macro_filter_decision(65.0, 15, "bearish", 7.0)
     assert not skip_all and skip_alt
     assert "very high BTC dominance" in " ".join(reasons)
+
+
+def test_macro_filter_alt_risk_missing_fear_greed():
+    skip_all, skip_alt, reasons = macro_filter_decision(65.0, None, "bearish", 7.0)
+    assert not skip_all and skip_alt
+    joined = " ".join(reasons)
+    assert "very high BTC dominance" in joined
+    assert "Fear & Greed" not in joined
