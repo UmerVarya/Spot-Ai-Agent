@@ -28,6 +28,61 @@ __all__ = [
     "reset_news_halt_state",
 ]
 
+CRISIS_KEYWORDS = [
+    "etf approval",
+    "etf approved",
+    "etf denied",
+    "etf rejected",
+    "sec sues",
+    "sec charges",
+    "sec files lawsuit",
+    "enforcement action",
+    "tether depeg",
+    "usdt depeg",
+    "usdc depeg",
+    "stablecoin depeg",
+    "halts withdrawals",
+    "suspends withdrawals",
+    "withdrawals halted",
+    "exchange hacked",
+    "exchange hack",
+    "security breach",
+    "insolvency",
+    "insolvent",
+    "bankrupt",
+    "bankruptcy",
+    "freeze accounts",
+    "freezes accounts",
+    "asset freeze",
+    "ban crypto",
+    "crypto ban",
+    "bans bitcoin",
+    "bitcoin ban",
+]
+
+REG_POLICY_KEYWORDS = [
+    "fdic",
+    "federal deposit insurance",
+    "senate banking committee",
+    "senate banking panel",
+    "senate banking",
+    "banking panel",
+    "banking committee",
+    "nominee",
+    "nomination",
+    "pick",
+    "confirmed by the senate",
+    "confirmation vote",
+    "confirmation hearing",
+    "hearing on crypto",
+    "hearing on cryptocurrency",
+    "oversight of crypto",
+    "crypto oversight",
+    "regulatory approach",
+    "approach to crypto",
+    "crypto policy",
+]
+
 
 @dataclass
 class NewsHaltState:
@@ -66,6 +121,20 @@ def _clean_text(value: str | None) -> str:
     return " ".join(value.strip().lower().split())
 
 
+def _is_reg_policy_only(text: str) -> bool:
+    text = (text or "").lower()
+    has_reg = any(keyword in text for keyword in REG_POLICY_KEYWORDS)
+    has_crisis = any(keyword in text for keyword in CRISIS_KEYWORDS)
+    return has_reg and not has_crisis
+
+
+def _is_crypto_systemic(text: str) -> bool:
+    text = (text or "").lower()
+    if _is_reg_policy_only(text):
+        return False
+    return any(keyword in text for keyword in CRISIS_KEYWORDS)
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -79,10 +148,17 @@ def _env_int(name: str, default: int) -> int:
 def classify_news(headline: str, body: str) -> str:
     """Classify ``headline``/``body`` into a deterministic news bucket."""
 
-    text = f"{headline or ''} {body or ''}".strip().lower()
+    text = f"{headline or ''} {body or ''}"
+    text = text.lower()
     compact = " ".join(text.split())
     if not compact:
         return "IRRELEVANT"
+
+    if _is_crypto_systemic(compact):
+        return "CRYPTO_SYSTEMIC"
+
+    if _is_reg_policy_only(compact):
+        return "CRYPTO_MEDIUM"
 
     stables = {"tether", "usdt", "usdc", "busd", "dai"}
     if "etf" in compact and any(
