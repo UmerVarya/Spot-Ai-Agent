@@ -825,9 +825,9 @@ def macro_filter_decision(
 
     if not skip_all and alt_risk_score >= 2:
         skip_alt = True
-        if btc_dom > 60.0:
+        if btc_dom is not None and btc_dom > 60.0:
             reasons.append("very high BTC dominance")
-        if fear_greed < 20:
+        if fear_greed is not None and fear_greed < 20:
             reasons.append("low Fear & Greed")
         if bias == "bearish" and conf >= 6.0:
             reasons.append("bearish sentiment")
