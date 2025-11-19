@@ -9,6 +9,8 @@ from alt_data import (
     FundingSnapshot,
     OpenInterestSnapshot,
     TakerRatioSnapshot,
+    fetch_taker_ratio_raw,
+    get_taker_ratio_cached,
 )
 
 
@@ -60,3 +62,33 @@ def test_compute_alt_adj_returns_none_without_data(monkeypatch):
     raw_score = 5.5
     final_score = raw_score + (adjustment or 0.0)
     assert final_score == pytest.approx(raw_score)
+
+
+def test_fetch_taker_ratio_handles_null_payload(monkeypatch):
+    class DummyResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    payload = [{"timestamp": 1_700_000_000_000, "longShortRatio": None}]
+    monkeypatch.setattr(
+        "alt_data.requests.get",
+        lambda *_, **__: DummyResponse(payload),
+    )
+
+    value, ts = fetch_taker_ratio_raw("BTCUSDT")
+    assert value is None
+    assert ts is None
+
+
+def test_get_taker_ratio_cached_returns_none_when_raw_unavailable(monkeypatch):
+    monkeypatch.setattr("alt_data._TAKER_CACHE", {})
+    monkeypatch.setattr("alt_data.fetch_taker_ratio_raw", lambda *_, **__: (None, None))
+
+    snapshot = get_taker_ratio_cached("BTCUSDT", now=0)
+    assert snapshot is None
