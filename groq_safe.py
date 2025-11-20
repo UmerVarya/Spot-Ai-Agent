@@ -150,7 +150,10 @@ def safe_chat_completion(client, *, messages: list[dict[str, Any]], model: str |
     if client is None:
         raise RuntimeError("Groq client unavailable")
 
-    api_key = require_groq_api_key()
+    if "api_key" in kwargs:
+        api_key = kwargs.get("api_key")
+    else:
+        api_key = require_groq_api_key()
 
     requested_model = (model or config.get_groq_model()).strip()
     if not requested_model:
