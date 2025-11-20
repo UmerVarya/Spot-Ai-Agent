@@ -85,6 +85,56 @@ def test_llm_rejection_prevents_halt_and_suppresses_event(reload_news):
     assert not news_risk.should_apply_halt_for_event(event_id, now + 30)
 
 
+def test_llm_upgrade_blocked_when_disallowed_in_confirm_mode(reload_news):
+    news_risk, news_llm = reload_news(
+        NEWS_LLM_ENABLED=True,
+        NEWS_LLM_CONFIRM_FOR_HALT=True,
+        NEWS_LLM_ALLOW_UPGRADE=False,
+    )
+    now = 2_500.0
+
+    news_risk.process_news_item("Bank expands crypto services", "", "wire", now=now)
+    event_id = news_risk.make_event_id("Bank expands crypto services", "wire")
+
+    news_risk.apply_llm_decision(
+        news_llm.NewsLLMDecision(
+            event_id=event_id,
+            systemic_risk=3,
+            direction="bearish",
+            suggested_category="CRYPTO_SYSTEMIC",
+            reason="",
+        )
+    )
+
+    assert news_risk.halt_state.halt_until == 0
+    assert not news_risk.should_apply_halt_for_event(event_id, now + 60)
+
+
+def test_llm_upgrade_allowed_when_enabled_in_confirm_mode(reload_news):
+    news_risk, news_llm = reload_news(
+        NEWS_LLM_ENABLED=True,
+        NEWS_LLM_CONFIRM_FOR_HALT=True,
+        NEWS_LLM_ALLOW_UPGRADE=True,
+    )
+    now = 2_700.0
+
+    news_risk.process_news_item("Bank expands crypto services", "", "wire", now=now)
+    event_id = news_risk.make_event_id("Bank expands crypto services", "wire")
+
+    news_risk.apply_llm_decision(
+        news_llm.NewsLLMDecision(
+            event_id=event_id,
+            systemic_risk=3,
+            direction="bearish",
+            suggested_category="CRYPTO_SYSTEMIC",
+            reason="",
+        )
+    )
+
+    assert news_risk.halt_state.category == "CRYPTO_SYSTEMIC"
+    assert news_risk.halt_state.halt_until == pytest.approx(now + 120 * 60)
+
+
 def test_llm_disabled_with_confirmation_prevents_rule_halt(reload_news):
     news_risk, _ = reload_news(NEWS_LLM_ENABLED=False, NEWS_LLM_CONFIRM_FOR_HALT=True)
     now = 3_000.0
