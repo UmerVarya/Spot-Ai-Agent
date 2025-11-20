@@ -119,3 +119,37 @@ def test_apply_llm_decision_upgrade_and_downgrade(monkeypatch):
     )
     news_risk.apply_llm_decision(downgrade)
     assert sys_event_id in news_risk._LLM_SUPPRESS_REHALT
+
+
+def test_apply_llm_decision_persists_halt(monkeypatch):
+    news_risk.reset_news_halt_state()
+    monkeypatch.setattr(news_risk, "NEWS_LLM_ALLOW_UPGRADE", True)
+
+    writes: list[float | None] = []
+
+    def fake_write_news_status(*, now=None):
+        writes.append(now)
+
+    monkeypatch.setattr(news_risk, "write_news_status", fake_write_news_status)
+
+    result = news_risk.process_news_item(
+        headline="Bank expands crypto services",
+        body="",
+        source="wire",
+        now=123,
+    )
+    event_id = news_risk.make_event_id("Bank expands crypto services", "wire")
+
+    decision = news_llm.NewsLLMDecision(
+        event_id=event_id,
+        systemic_risk=2,
+        direction="bearish",
+        suggested_category="CRYPTO_SYSTEMIC",
+        reason="",
+    )
+
+    news_risk.apply_llm_decision(decision)
+
+    assert news_risk.halt_state.category == "CRYPTO_SYSTEMIC"
+    assert result["status"] == "HARD_HALT"
+    assert writes == [123]
