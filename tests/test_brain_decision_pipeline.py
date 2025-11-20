@@ -1,4 +1,4 @@
-import json
+from llm_approval import LLMTradeDecision
 
 
 def _patch_brain_defaults(monkeypatch):
@@ -73,16 +73,15 @@ def test_prepare_and_finalize_trade_decision(monkeypatch):
     assert pre_result is None
     assert prepared is not None
 
-    response = json.dumps(
-        {
-            "decision": "Yes",
-            "confidence": 8.0,
-            "reason": "Momentum aligned",
-            "thesis": "Upside momentum building.",
-        }
+    llm_decision = LLMTradeDecision(
+        decision="approved",
+        approved=True,
+        confidence=0.8,
+        model="test-model",
+        rationale="Momentum aligned",
     )
 
-    result = brain.finalize_trade_decision(prepared, response)
+    result = brain.finalize_trade_decision(prepared, llm_decision)
 
     assert result["decision"] is True
     assert result["llm_approval"] is True
@@ -117,9 +116,15 @@ def test_finalize_trade_decision_parses_markdown_json(monkeypatch):
 
     assert prepared is not None
 
-    response = """```json\n{\n  \"decision\": \"Yes\",\n  \"confidence\": 7.5,\n  \"reason\": \"Supports breakout\",\n  \"thesis\": \"Trend continuation expected.\"\n}\n```"""
+    llm_decision = LLMTradeDecision(
+        decision="approved",
+        approved=True,
+        confidence=0.75,
+        model="test-model",
+        rationale="Supports breakout",
+    )
 
-    result = brain.finalize_trade_decision(prepared, response)
+    result = brain.finalize_trade_decision(prepared, llm_decision)
 
     assert result["decision"] is True
     assert result["llm_approval"] is True
@@ -156,11 +161,19 @@ def test_finalize_trade_decision_handles_error(monkeypatch):
     # Ensure the fallback sees a truly high conviction quantitative score.
     prepared.final_confidence = 8.6
 
-    result = brain.finalize_trade_decision(prepared, "LLM error: unavailable")
+    llm_decision = LLMTradeDecision(
+        decision="LLM unavailable",
+        approved=None,
+        confidence=None,
+        model=None,
+        rationale=None,
+    )
+
+    result = brain.finalize_trade_decision(prepared, llm_decision)
 
     assert result["decision"] is True
     assert result["llm_error"] is True
-    assert "quant-only auto-approval" in result["reason"].lower()
+    assert "llm unavailable" in result["reason"].lower()
 
 
 def test_finalize_trade_decision_handles_json_error(monkeypatch):
@@ -192,12 +205,18 @@ def test_finalize_trade_decision_handles_json_error(monkeypatch):
 
     prepared.final_confidence = 8.6
 
-    response = json.dumps({"error": "service unavailable"})
-    result = brain.finalize_trade_decision(prepared, response)
+    llm_decision = LLMTradeDecision(
+        decision="LLM unavailable",
+        approved=None,
+        confidence=None,
+        model=None,
+        rationale="service unavailable",
+    )
+    result = brain.finalize_trade_decision(prepared, llm_decision)
 
     assert result["decision"] is True
     assert result["llm_error"] is True
-    assert "quant-only auto-approval" in result["reason"].lower()
+    assert "llm unavailable" in result["reason"].lower()
 
 
 def test_finalize_trade_decision_error_blocks_weak_signals(monkeypatch):
@@ -228,11 +247,18 @@ def test_finalize_trade_decision_error_blocks_weak_signals(monkeypatch):
         advisor_prompt="",
     )
 
-    result = brain.finalize_trade_decision(prepared, "LLM error: unavailable")
+    llm_decision = LLMTradeDecision(
+        decision="rejected",
+        approved=False,
+        confidence=0.2,
+        model="test-model",
+        rationale="Model veto",
+    )
+    result = brain.finalize_trade_decision(prepared, llm_decision)
 
     assert result["decision"] is False
-    assert result["llm_error"] is True
-    assert "quantitative conviction insufficient" in result["reason"].lower()
+    assert result["llm_error"] is False
+    assert "llm veto" in result["reason"].lower()
 
 
 def test_prepare_trade_decision_embeds_macro_context(monkeypatch):

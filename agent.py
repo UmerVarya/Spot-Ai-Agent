@@ -476,8 +476,8 @@ from volume_profile import (
     compute_reversion_leg_volume_profile,
 )
 from diversify import select_diversified_signals
-from groq_llm import async_batch_llm_judgment
 from groq_client import get_groq_client
+from llm_approval import get_llm_trade_decision
 from ml_model import predict_success_probability
 from sequence_model import (
     SEQ_PKL,
@@ -2809,7 +2809,6 @@ def run_agent_loop() -> None:
                         final_skip_reason="not selected after diversification",
                     )
             pending_trade_contexts: list[dict] = []
-            batched_prompts: dict[str, str] = {}
 
             for trade_candidate in selected:
                 symbol = trade_candidate['symbol']
@@ -3042,21 +3041,6 @@ def run_agent_loop() -> None:
                     "atr_15m_ratio": price_data.attrs.get("atr_15m_ratio"),
                 }
                 pending_trade_contexts.append(context)
-                if prepared is not None:
-                    batched_prompts[symbol] = prepared.advisor_prompt
-
-            llm_batch_results: dict[str, str] = {}
-            if batched_prompts:
-                try:
-                    llm_batch_results = _run_async_task(
-                        lambda: async_batch_llm_judgment(batched_prompts)
-                    )
-                except Exception as batch_exc:
-                    logger.error("Batch LLM evaluation failed: %s", batch_exc, exc_info=True)
-                    llm_batch_results = {
-                        symbol: "LLM error: batch request failed"
-                        for symbol in batched_prompts
-                    }
 
             # Iterate over prepared contexts and open trades once LLM responses are ready
             for context in pending_trade_contexts:
@@ -3074,10 +3058,25 @@ def run_agent_loop() -> None:
                         continue
                     decision_obj = pre_result
                 else:
-                    response = llm_batch_results.get(
-                        symbol, "LLM error: missing batch response"
-                    )
-                    decision_obj = finalize_trade_decision(prepared, response)
+                    trade_context = {
+                        "symbol": symbol,
+                        "direction": context.get("direction") or "long",
+                        "score": score,
+                        "confidence": getattr(prepared, "final_confidence", score),
+                        "technical_score": getattr(prepared, "technical_score", score),
+                        "session": session,
+                        "pattern": pattern_name,
+                        "orderflow": orderflow,
+                        "sentiment_bias": sentiment_bias,
+                        "sentiment_confidence": sentiment_confidence,
+                        "volatility": context.get("sym_vol_pct"),
+                        "fear_greed": fg,
+                        "macro_news_safe": macro_news_assessment.get("safe") if macro_news_assessment else None,
+                        "macro_news_reason": macro_news_assessment.get("reason") if macro_news_assessment else None,
+                        "news_summary": macro_news_summary,
+                    }
+                    llm_decision = get_llm_trade_decision(trade_context)
+                    decision_obj = finalize_trade_decision(prepared, llm_decision)
 
                 score = context["score"]
                 position_size = context["position_size"]
