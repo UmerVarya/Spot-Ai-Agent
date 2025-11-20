@@ -482,6 +482,10 @@ def apply_llm_decision(decision: NewsLLMDecision) -> None:
                         halt_minutes,
                         _format_ts(halt_state.halt_until),
                     )
+                    try:
+                        write_news_status(now=timestamp)
+                    except Exception:
+                        logger.debug("Failed to write news status", exc_info=True)
 
         if (
             NEWS_LLM_ALLOW_DOWNGRADE
