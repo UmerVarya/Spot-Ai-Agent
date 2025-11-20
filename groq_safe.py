@@ -1,14 +1,12 @@
 """Utility helpers for resilient Groq LLM calls.
 
-This module centralises common logic for interacting with the Groq API.  It
+This module centralises common logic for interacting with the Groq API. It
 provides helpers that detect when a requested model has been decommissioned and
-automatically fall back to the supported default.  The logic is shared across
+automatically fall back to the supported default. The logic is shared across
 both the high-level ``Groq`` SDK usage (``safe_chat_completion``) and the raw
-HTTP clients used elsewhere in the codebase.
-"""Utility helpers for resilient Groq LLM calls.
-
-This module centralises Groq authentication checks, error handling, and safe
-fallback behaviour for Groq model interactions.
+HTTP clients used elsewhere in the codebase. It also contains Groq
+authentication checks, error handling, and safe fallback behaviour for Groq
+model interactions.
 """
 
 from __future__ import annotations
