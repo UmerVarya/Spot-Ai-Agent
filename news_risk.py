@@ -11,6 +11,15 @@ from pathlib import Path
 import time
 from typing import Dict, Optional
 
+from news_llm import (
+    NEWS_LLM_ALLOW_DOWNGRADE,
+    NEWS_LLM_ALLOW_UPGRADE,
+    NEWS_LLM_ENABLED,
+    NewsLLMDecision,
+    NewsLLMInput,
+    queue_for_llm,
+)
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -26,6 +35,7 @@ __all__ = [
     "write_news_status",
     "load_news_status",
     "reset_news_halt_state",
+    "apply_llm_decision",
 ]
 
 CRISIS_KEYWORDS = [
@@ -160,6 +170,9 @@ class NewsHaltState:
 
 halt_state = NewsHaltState()
 seen_events: Dict[str, float] = {}
+_LLM_RULE_CATEGORY: Dict[str, str] = {}
+_LLM_SUPPRESS_REHALT: set[str] = set()
+_LLM_EVENT_CONTEXT: Dict[str, Dict[str, str]] = {}
 
 NEWS_STATUS_FILE = os.getenv(
     "NEWS_STATUS_FILE",
@@ -221,6 +234,18 @@ def _env_int(name: str, default: int) -> int:
         return int(str(raw).strip())
     except (TypeError, ValueError):
         return int(default)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def classify_news(headline: str, body: str) -> str:
@@ -332,6 +357,8 @@ def should_apply_halt_for_event(event_id: str, now: float) -> bool:
     """Return True if ``event_id`` is eligible for a new halt at ``now``."""
 
     suppress_window = max(0, _env_int("NEWS_REHALT_SUPPRESS_WINDOW_MINS", 240)) * 60
+    if event_id in _LLM_SUPPRESS_REHALT:
+        return False
     previous = seen_events.get(event_id)
     if previous is not None and now - previous < suppress_window:
         return False
@@ -356,13 +383,36 @@ def process_news_item(
 
     timestamp = float(now if now is not None else time.time())
     category = classify_news(headline, body)
+    event_id = make_event_id(headline, source)
+    _LLM_RULE_CATEGORY[event_id] = category
+    _LLM_EVENT_CONTEXT[event_id] = {
+        "headline": headline,
+        "body": body,
+        "source": source,
+        "ts": timestamp,
+    }
+
+    if NEWS_LLM_ENABLED and _is_ambiguous_for_llm(category, f"{headline} {body}"):
+        try:
+            queue_for_llm(
+                NewsLLMInput(
+                    event_id=event_id,
+                    headline=headline,
+                    body=body,
+                    source=source,
+                    rule_category=category,
+                    ts=timestamp,
+                )
+            )
+        except Exception:
+            logger.debug("Failed to enqueue news item for LLM", exc_info=True)
+
     halt_minutes = get_halt_duration_for_category(category)
 
     if halt_minutes <= 0:
         logger.info("[NEWS] %s: %s", category, headline)
         return {"category": category, "halt_applied": False, "halt_minutes": 0}
 
-    event_id = make_event_id(headline, source)
     if not should_apply_halt_for_event(event_id, timestamp):
         logger.info("[NEWS] Duplicate HARD HALT event suppressed: %s", headline)
         return {"category": category, "halt_applied": False, "halt_minutes": halt_minutes}
@@ -394,6 +444,54 @@ def process_news_item(
         applied = False
 
     return {"category": category, "halt_applied": applied, "halt_minutes": halt_minutes}
+
+
+def _is_ambiguous_for_llm(rule_category: str, text: str) -> bool:
+    compact = (text or "").lower()
+    if rule_category == "CRYPTO_MEDIUM":
+        return True
+    return False
+
+
+def apply_llm_decision(decision: NewsLLMDecision) -> None:
+    """Adjust classification or halt behavior based on LLM output."""
+
+    try:
+        rule_category = _LLM_RULE_CATEGORY.get(decision.event_id, decision.suggested_category)
+        context = _LLM_EVENT_CONTEXT.get(decision.event_id, {})
+
+        if (
+            NEWS_LLM_ALLOW_UPGRADE
+            and rule_category == "CRYPTO_MEDIUM"
+            and decision.suggested_category == "CRYPTO_SYSTEMIC"
+            and decision.systemic_risk >= 2
+        ):
+            headline = context.get("headline", "")
+            timestamp = float(context.get("ts", time.time()))
+            halt_minutes = get_halt_duration_for_category("CRYPTO_SYSTEMIC")
+            if halt_minutes > 0 and should_apply_halt_for_event(decision.event_id, timestamp):
+                halt_until_candidate = timestamp + halt_minutes * 60
+                if halt_until_candidate > halt_state.halt_until:
+                    halt_state.halt_until = halt_until_candidate
+                    halt_state.reason = f"CRYPTO_SYSTEMIC: {headline}".strip()
+                    halt_state.category = "CRYPTO_SYSTEMIC"
+                    halt_state.last_event_headline = headline
+                    halt_state.last_event_ts = timestamp
+                    logger.warning(
+                        "[NEWS] LLM UPGRADE HARD HALT CRYPTO_SYSTEMIC for %sm (until %s)",
+                        halt_minutes,
+                        _format_ts(halt_state.halt_until),
+                    )
+
+        if (
+            NEWS_LLM_ALLOW_DOWNGRADE
+            and rule_category == "CRYPTO_SYSTEMIC"
+            and decision.systemic_risk <= 1
+            and decision.suggested_category == "CRYPTO_MEDIUM"
+        ):
+            _LLM_SUPPRESS_REHALT.add(decision.event_id)
+    except Exception:
+        logger.debug("Error while applying LLM decision", exc_info=True)
 
 
 def get_news_gate_state(*, now: Optional[float] = None) -> dict:
@@ -511,3 +609,6 @@ def reset_news_halt_state() -> None:
     halt_state.last_event_headline = ""
     halt_state.last_event_ts = 0.0
     seen_events.clear()
+    _LLM_RULE_CATEGORY.clear()
+    _LLM_SUPPRESS_REHALT.clear()
+    _LLM_EVENT_CONTEXT.clear()
