@@ -132,6 +132,37 @@ def test_classify_news_crypto_systemic_and_policy_detections():
     )
 
 
+def test_macro_t1_releases_vs_previews():
+    assert (
+        news_risk.classify_news(
+            "Gold remains on the defensive below $4,100 amid sustained USD buying, ahead of US NFP",
+            "",
+        )
+        == "MACRO_USD_T2"
+    )
+    assert (
+        news_risk.classify_news(
+            "US nonfarm payrolls rise by 250K in October, beating expectations",
+            "",
+        )
+        == "MACRO_USD_T1"
+    )
+    assert (
+        news_risk.classify_news(
+            "FOMC leaves rates unchanged, signals higher for longer",
+            "",
+        )
+        == "MACRO_USD_T1"
+    )
+    assert (
+        news_risk.classify_news(
+            "US CPI data: inflation cools more than expected in November",
+            "",
+        )
+        == "MACRO_USD_T1"
+    )
+
+
 def test_expansion_news_classified_as_crypto_medium():
     assert (
         news_risk.classify_news(
