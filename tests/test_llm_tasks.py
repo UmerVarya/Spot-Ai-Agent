@@ -28,6 +28,8 @@ def test_iter_models_for_task_defaults(monkeypatch):
 
 
 def test_call_llm_for_task_success(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    reset_auth_state()
     monkeypatch.setattr(llm_tasks, "get_groq_client", lambda: object())
     monkeypatch.setattr(llm_tasks, "iter_models_for_task", lambda _task: ["primary"])
     monkeypatch.setattr(llm_tasks, "_soft_limit_check", lambda *_args, **_kwargs: True)
@@ -46,6 +48,8 @@ def test_call_llm_for_task_success(monkeypatch):
 
 
 def test_call_llm_for_task_fallback(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    reset_auth_state()
     monkeypatch.setattr(llm_tasks, "get_groq_client", lambda: object())
     monkeypatch.setattr(llm_tasks, "iter_models_for_task", lambda _task: ["bad", "good"])
     monkeypatch.setattr(llm_tasks, "_soft_limit_check", lambda *_args, **_kwargs: True)
@@ -71,6 +75,8 @@ def test_call_llm_for_task_fallback(monkeypatch):
 
 
 def test_call_llm_for_task_all_fail(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    reset_auth_state()
     monkeypatch.setattr(llm_tasks, "get_groq_client", lambda: object())
     monkeypatch.setattr(llm_tasks, "iter_models_for_task", lambda _task: ["only"])
     monkeypatch.setattr(llm_tasks, "_soft_limit_check", lambda *_args, **_kwargs: True)
@@ -86,6 +92,8 @@ def test_call_llm_for_task_all_fail(monkeypatch):
 
 
 def test_soft_limit_blocks_model(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    reset_auth_state()
     monkeypatch.setenv("GROQ_SOFT_RPM_DEFAULT", "1")
     llm_tasks._MODEL_CALLS.clear()
 
