@@ -28,13 +28,6 @@ def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> 
 _HTTP_TIMEOUT = _env_float("GROQ_HTTP_TIMEOUT", 10.0, minimum=1.0, maximum=60.0)
 
 
-def get_groq_api_key() -> str | None:
-    """Return the Groq API key from the environment, if present."""
-
-    key = os.getenv("GROQ_API_KEY", "").strip()
-    return key or None
-
-
 def groq_api_url() -> str:
     """Return the Groq API URL, defaulting to the official OpenAI-style endpoint."""
 
@@ -91,17 +84,17 @@ def http_chat_completion(
     messages: List[Mapping[str, str]],
     temperature: float,
     max_tokens: int,
-    api_key: Optional[str] = None,
+    api_key: str,
     api_url: Optional[str] = None,
     timeout: Optional[float] = None,
 ) -> Tuple[Optional[str], Optional[int], Any]:
     """Execute a Groq chat completion via the OpenAI-compatible HTTP API."""
 
-    from groq_safe import GroqAuthError, require_groq_api_key
+    from groq_safe import GroqAuthError
 
-    key = require_groq_api_key()
-    if api_key is not None:
-        key = api_key
+    key = api_key
+    if not key:
+        raise GroqAuthError("Groq API key missing")
 
     url = api_url if api_url is not None else groq_api_url()
 
@@ -153,7 +146,6 @@ def http_chat_completion(
 
 __all__ = [
     "extract_error_payload",
-    "get_groq_api_key",
     "groq_api_url",
     "http_chat_completion",
     "is_auth_error",

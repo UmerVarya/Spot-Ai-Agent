@@ -13,7 +13,7 @@ from typing import Optional
 
 from groq import Groq
 
-from groq_http import get_groq_api_key
+from groq_safe import get_groq_api_key
 from log_utils import setup_logger
 
 logger = setup_logger(__name__)

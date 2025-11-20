@@ -62,6 +62,8 @@ def test_http_client_disables_on_401(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "gsk_valid")
     groq_safe.reset_auth_state()
 
+    api_key = groq_safe.require_groq_api_key()
+
     class DummyResponse:
         status_code = 401
 
@@ -76,6 +78,7 @@ def test_http_client_disables_on_401(monkeypatch):
             messages=[{"role": "user", "content": "hi"}],
             temperature=0.0,
             max_tokens=1,
+            api_key=api_key,
         )
 
     assert groq_safe._groq_auth_disabled is True
