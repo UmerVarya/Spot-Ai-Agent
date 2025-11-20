@@ -140,3 +140,13 @@ def test_expansion_news_classified_as_crypto_medium():
         )
         == "CRYPTO_MEDIUM"
     )
+
+
+def test_systemic_classification_not_masked_by_expansion_terms():
+    assert (
+        news_risk.classify_news(
+            "SEC launches enforcement action against Binance",
+            "",
+        )
+        == "CRYPTO_SYSTEMIC"
+    )
