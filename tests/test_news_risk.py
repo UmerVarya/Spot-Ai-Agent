@@ -85,6 +85,56 @@ def test_llm_rejection_prevents_halt_and_suppresses_event(reload_news):
     assert not news_risk.should_apply_halt_for_event(event_id, now + 30)
 
 
+def test_llm_rejection_cannot_downgrade_systemic_when_disallowed(reload_news):
+    news_risk, news_llm = reload_news(
+        NEWS_LLM_ENABLED=True,
+        NEWS_LLM_CONFIRM_FOR_HALT=True,
+        NEWS_LLM_ALLOW_DOWNGRADE=False,
+    )
+    now = 2_100.0
+
+    news_risk.process_news_item("SEC sues Binance", "", "Reuters", now=now)
+
+    event_id = news_risk.make_event_id("SEC sues Binance", "Reuters")
+    news_risk.apply_llm_decision(
+        news_llm.NewsLLMDecision(
+            event_id=event_id,
+            systemic_risk=0,
+            direction="neutral",
+            suggested_category="CRYPTO_MEDIUM",
+            reason="Not systemic",
+        )
+    )
+
+    assert news_risk.halt_state.category == "CRYPTO_SYSTEMIC"
+    assert news_risk.halt_state.halt_until == pytest.approx(now + 120 * 60)
+
+
+def test_llm_rejection_can_downgrade_systemic_when_allowed(reload_news):
+    news_risk, news_llm = reload_news(
+        NEWS_LLM_ENABLED=True,
+        NEWS_LLM_CONFIRM_FOR_HALT=True,
+        NEWS_LLM_ALLOW_DOWNGRADE=True,
+    )
+    now = 2_150.0
+
+    news_risk.process_news_item("SEC sues Binance", "", "Reuters", now=now)
+
+    event_id = news_risk.make_event_id("SEC sues Binance", "Reuters")
+    news_risk.apply_llm_decision(
+        news_llm.NewsLLMDecision(
+            event_id=event_id,
+            systemic_risk=0,
+            direction="neutral",
+            suggested_category="CRYPTO_MEDIUM",
+            reason="Not systemic",
+        )
+    )
+
+    assert news_risk.halt_state.halt_until == 0
+    assert not news_risk.should_apply_halt_for_event(event_id, now + 30)
+
+
 def test_llm_upgrade_blocked_when_disallowed_in_confirm_mode(reload_news):
     news_risk, news_llm = reload_news(
         NEWS_LLM_ENABLED=True,
