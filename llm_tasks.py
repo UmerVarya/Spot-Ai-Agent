@@ -9,7 +9,13 @@ from enum import Enum
 from typing import Any, Iterable, Optional, Tuple
 
 from groq_client import get_groq_client
-from groq_safe import GroqAuthError, describe_error, is_model_decommissioned_error, safe_chat_completion
+from groq_safe import (
+    GroqAuthError,
+    describe_error,
+    is_model_decommissioned_error,
+    require_groq_api_key,
+    safe_chat_completion,
+)
 from log_utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -103,6 +109,13 @@ def _log_warning(task: LLMTask, model_name: str, error: Exception) -> None:
 
 def call_llm_for_task(task: LLMTask, messages: list[dict[str, Any]], **kwargs: Any) -> Tuple[Any | None, str | None]:
     models = iter_models_for_task(task)
+
+    try:
+        require_groq_api_key()
+    except GroqAuthError as exc:
+        logger.warning("Groq disabled for task=%s: %s", task.value, exc)
+        return None, None
+
     client = get_groq_client()
     if client is None:
         logger.warning("Groq client unavailable for task=%s", task.value)
@@ -133,12 +146,7 @@ def call_llm_for_task(task: LLMTask, messages: list[dict[str, Any]], **kwargs: A
             )
             return response, model_name
         except GroqAuthError as e:
-            logger.warning(
-                "Groq auth error for task=%s model=%s: %s",
-                task.value,
-                model_name,
-                e,
-            )
+            logger.warning("Groq disabled for task=%s: %s", task.value, e)
             last_error = e
             break
         except Exception as e:  # noqa: BLE001

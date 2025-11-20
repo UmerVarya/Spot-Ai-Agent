@@ -37,13 +37,14 @@ import config
 from groq_client import get_groq_client
 from groq_http import http_chat_completion
 from groq_safe import (
-    safe_chat_completion,
-    is_model_decommissioned_error,
+    GroqAuthError,
     describe_error,
+    is_model_decommissioned_error,
+    require_groq_api_key,
+    safe_chat_completion,
 )
 from log_utils import setup_logger
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 _HTTP_TIMEOUT_SECONDS = 10
 
 _DEFAULT_RATE_LIMIT_BACKOFF_SECONDS = 2.0
@@ -94,12 +95,6 @@ _BATCH_SYSTEM_MESSAGE = (
     "- Write a thesis of 2-3 sentences consistent with the decision and reason.\n"
     "- Confirm the final reply is valid JSON mapping each symbol to an object with keys decision, confidence, reason, and thesis."
 )
-
-
-if GROQ_API_KEY:
-    logger.info("LLM backend active: Groq (model=%s)", config.get_groq_model())
-else:
-    logger.info("LLM backend inactive: GROQ_API_KEY not provided")
 
 
 def _normalise_header_name(name: str) -> str:
@@ -337,14 +332,17 @@ def _http_chat_completion(
 ) -> tuple[str | None, Any | None]:
     """Send a chat completion request via raw HTTP."""
 
-    if not GROQ_API_KEY:
-        return None, None
+    try:
+        api_key = require_groq_api_key()
+    except GroqAuthError as exc:
+        return None, exc
 
     content, status_code, error_payload = http_chat_completion(
         model=model,
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
+        api_key=api_key,
         timeout=_HTTP_TIMEOUT_SECONDS,
     )
 
@@ -446,9 +444,6 @@ def get_llm_judgment(
         + " Ensure the JSON is valid and contains no additional commentary."
     )
 
-    if not GROQ_API_KEY:
-        return "LLM error: Groq API key missing."
-
     client = get_groq_client()
     if client is None:
         return "LLM error: Groq client unavailable."
@@ -480,6 +475,9 @@ def get_llm_judgment(
             getattr(response, "model", model_name),
         )
         return _extract_choice_content(response)
+    except GroqAuthError as err:
+        logger.warning("Groq authentication unavailable: %s", err)
+        return "LLM error: Groq authentication disabled."
     except RateLimitError as err:
         latency = time.perf_counter() - start
         logger.warning("Groq rate limit after %.2fs: %s", latency, _format_exception(err))
@@ -555,9 +553,6 @@ async def async_get_llm_judgment(
         + " Ensure the JSON is valid and contains no additional commentary."
     )
 
-    if not GROQ_API_KEY:
-        return "LLM error: Groq API key missing."
-
     client = get_groq_client()
     if client is None:
         return "LLM error: Groq client unavailable."
@@ -590,6 +585,9 @@ async def async_get_llm_judgment(
             getattr(response, "model", model_name),
         )
         return _extract_choice_content(response)
+    except GroqAuthError as err:
+        logger.warning("Groq authentication unavailable: %s", err)
+        return "LLM error: Groq authentication disabled."
     except RateLimitError as err:
         latency = time.perf_counter() - start
         logger.warning("Async Groq rate limit after %.2fs: %s", latency, _format_exception(err))
@@ -638,9 +636,12 @@ async def async_batch_llm_judgment(
     if not prompts:
         return {}
     items = [(symbol, _sanitize_prompt(prompt)) for symbol, prompt in prompts.items()]
-    if not GROQ_API_KEY:
-        logger.warning("Groq API key missing. Unable to execute %d prompts", len(items))
-        return {symbol: "LLM error: Groq API key missing." for symbol, _ in items}
+
+    try:
+        require_groq_api_key()
+    except GroqAuthError as err:
+        logger.warning("Groq authentication unavailable: %s", err)
+        return {symbol: "LLM error: Groq authentication disabled." for symbol, _ in items}
 
     client = get_groq_client()
     if client is None:

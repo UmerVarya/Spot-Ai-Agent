@@ -28,10 +28,34 @@ def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> 
 _HTTP_TIMEOUT = _env_float("GROQ_HTTP_TIMEOUT", 10.0, minimum=1.0, maximum=60.0)
 
 
-def groq_api_key() -> str:
-    """Return the Groq API key from the environment or an empty string."""
+_KEY_LOGGED = False
 
-    return os.getenv("GROQ_API_KEY", "")
+
+def reset_groq_key_state() -> None:
+    """Reset logging state (used in tests)."""
+
+    global _KEY_LOGGED
+    _KEY_LOGGED = False
+
+
+def get_groq_api_key() -> str | None:
+    """Return the Groq API key from the environment, if present."""
+
+    key = os.getenv("GROQ_API_KEY", "").strip()
+
+    global _KEY_LOGGED
+    if not _KEY_LOGGED:
+        logger.info(
+            "Groq setup: key_present=%s key_prefix=%s",
+            bool(key),
+            (key[:4] if key else "None"),
+        )
+        _KEY_LOGGED = True
+
+    if key:
+        return key
+
+    return None
 
 
 def groq_api_url() -> str:
@@ -96,7 +120,7 @@ def http_chat_completion(
 ) -> Tuple[Optional[str], Optional[int], Any]:
     """Execute a Groq chat completion via the OpenAI-compatible HTTP API."""
 
-    key = api_key if api_key is not None else groq_api_key()
+    key = api_key if api_key is not None else get_groq_api_key()
     if not key:
         logger.debug("Groq API key unavailable; skipping HTTP chat completion")
         return None, None, None
@@ -140,9 +164,10 @@ def http_chat_completion(
 
 __all__ = [
     "extract_error_payload",
-    "groq_api_key",
+    "get_groq_api_key",
     "groq_api_url",
     "http_chat_completion",
     "is_auth_error",
+    "reset_groq_key_state",
 ]
 
