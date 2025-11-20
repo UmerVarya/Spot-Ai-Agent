@@ -232,13 +232,13 @@ def classify_news(headline: str, body: str) -> str:
     if not compact:
         return "IRRELEVANT"
 
-    if _is_expansion_news(compact):
-        return "CRYPTO_MEDIUM"
-
     if _is_crypto_systemic(compact):
         return "CRYPTO_SYSTEMIC"
 
     if _is_reg_policy_only(compact):
+        return "CRYPTO_MEDIUM"
+
+    if _is_expansion_news(compact):
         return "CRYPTO_MEDIUM"
 
     stables = {"tether", "usdt", "usdc", "busd", "dai"}
