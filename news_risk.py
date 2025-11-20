@@ -409,13 +409,22 @@ def process_news_item(
 
     halt_minutes = get_halt_duration_for_category(category)
 
+    def _result(applied: bool, minutes: float) -> dict:
+        status = get_news_status(now=timestamp)["mode"]
+        return {
+            "category": category,
+            "halt_applied": applied,
+            "halt_minutes": minutes,
+            "status": status,
+        }
+
     if halt_minutes <= 0:
         logger.info("[NEWS] %s: %s", category, headline)
-        return {"category": category, "halt_applied": False, "halt_minutes": 0}
+        return _result(False, 0)
 
     if not should_apply_halt_for_event(event_id, timestamp):
         logger.info("[NEWS] Duplicate HARD HALT event suppressed: %s", headline)
-        return {"category": category, "halt_applied": False, "halt_minutes": halt_minutes}
+        return _result(False, halt_minutes)
 
     halt_until_candidate = timestamp + halt_minutes * 60
     if halt_until_candidate > halt_state.halt_until:
@@ -443,7 +452,7 @@ def process_news_item(
         )
         applied = False
 
-    return {"category": category, "halt_applied": applied, "halt_minutes": halt_minutes}
+    return _result(applied, halt_minutes)
 
 
 def _is_ambiguous_for_llm(rule_category: str, text: str) -> bool:
