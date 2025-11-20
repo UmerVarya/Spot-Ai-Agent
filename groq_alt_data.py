@@ -48,9 +48,6 @@ _REQUEST_TIMEOUT = _env_float("GROQ_ALT_DATA_TIMEOUT", 10.0, minimum=1.0, maximu
 
 _DEFAULT_GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-_ALT_DATA_DISABLED = False
-_AUTH_FAILURE_LOGGED = False
-
 _SYSTEM_MESSAGE = (
     "You are a crypto alternative-data analyst."
     " Combine the supplied on-chain metrics and social chatter to produce"
@@ -143,17 +140,6 @@ def _format_posts(posts: Sequence[str] | None) -> tuple[str, int]:
     return formatted, len(sample)
 
 
-def _handle_auth_failure(error_payload: Any) -> None:
-    global _ALT_DATA_DISABLED, _AUTH_FAILURE_LOGGED
-    _ALT_DATA_DISABLED = True
-    if not _AUTH_FAILURE_LOGGED:
-        logger.error(
-            "Groq alt-data authentication failed (401). Disabling alt-data requests: %s",
-            describe_error(error_payload),
-        )
-        _AUTH_FAILURE_LOGGED = True
-
-
 def _build_defaults(
     model_name: str,
     posts_count: int,
@@ -205,10 +191,6 @@ def analyze_alt_data(
     onchain_text = _format_onchain_snapshot(onchain_snapshot)
     posts_text, posts_count = _format_posts(social_posts)
     defaults = _build_defaults(model_name, posts_count, onchain_snapshot)
-
-    global _ALT_DATA_DISABLED
-    if _ALT_DATA_DISABLED:
-        return _neutral_payload(defaults)
 
     user_prompt = (
         f"Symbol: {symbol}\n\n"

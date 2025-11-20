@@ -8,12 +8,12 @@ initialisation remain consistent across the codebase.
 
 from __future__ import annotations
 
-import os
 from functools import lru_cache
 from typing import Optional
 
 from groq import Groq
 
+from groq_http import get_groq_api_key
 from log_utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -33,7 +33,7 @@ def _build_client(api_key: Optional[str]) -> Optional[Groq]:
 def get_groq_client() -> Optional[Groq]:
     """Return the shared Groq SDK client if the API key is configured."""
 
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = get_groq_api_key()
     return _build_client(api_key)
 
 

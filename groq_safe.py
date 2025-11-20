@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any, List, Mapping
 
 import config
-from groq_http import http_chat_completion, is_auth_error
+from groq_http import get_groq_api_key, http_chat_completion, is_auth_error
 from log_utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -62,6 +62,7 @@ class _LLMResponse:
 
 _AUTH_DISABLED = False
 _AUTH_WARNING_LOGGED = False
+_MISSING_KEY_LOGGED = False
 
 
 def _normalise_text(text: str | None) -> str:
@@ -113,10 +114,41 @@ def _disable_auth(error: Any) -> None:
     _AUTH_DISABLED = True
     if not _AUTH_WARNING_LOGGED:
         logger.error(
-            "Groq authentication failed (401). Disabling Groq requests: %s",
+            "Groq authentication failed (401). Disabling Groq requests for this process: %s",
             describe_error(error),
         )
         _AUTH_WARNING_LOGGED = True
+
+
+def _disable_missing_key() -> None:
+    global _AUTH_DISABLED, _MISSING_KEY_LOGGED
+    _AUTH_DISABLED = True
+    if not _MISSING_KEY_LOGGED:
+        logger.warning("Groq disabled: no GROQ_API_KEY in environment")
+        _MISSING_KEY_LOGGED = True
+
+
+def reset_auth_state() -> None:
+    """Reset authentication state (primarily for tests)."""
+
+    global _AUTH_DISABLED, _AUTH_WARNING_LOGGED, _MISSING_KEY_LOGGED
+    _AUTH_DISABLED = False
+    _AUTH_WARNING_LOGGED = False
+    _MISSING_KEY_LOGGED = False
+
+
+def require_groq_api_key() -> str:
+    """Return the configured Groq API key or raise when unavailable."""
+
+    if _AUTH_DISABLED:
+        raise GroqAuthError("Groq authentication disabled")
+
+    key = get_groq_api_key()
+    if not key:
+        _disable_missing_key()
+        raise GroqAuthError("Groq authentication disabled")
+
+    return key
 
 
 def _build_response(content: str, model: str) -> _LLMResponse:
@@ -129,8 +161,7 @@ def safe_chat_completion(client, *, messages: list[dict[str, Any]], model: str |
     if client is None:
         raise RuntimeError("Groq client unavailable")
 
-    if _AUTH_DISABLED:
-        raise GroqAuthError("Groq authentication disabled")
+    api_key = require_groq_api_key()
 
     requested_model = (model or config.get_groq_model()).strip()
     if not requested_model:
@@ -151,6 +182,7 @@ def safe_chat_completion(client, *, messages: list[dict[str, Any]], model: str |
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            api_key=api_key,
             timeout=timeout,
         )
 
@@ -184,3 +216,13 @@ def extract_error_payload(response: Any) -> Any:
         return response.json()
     except Exception:  # pragma: no cover - requests/aiohttp differences
         return getattr(response, "text", "")
+
+
+__all__ = [
+    "GroqAuthError",
+    "describe_error",
+    "is_model_decommissioned_error",
+    "safe_chat_completion",
+    "require_groq_api_key",
+    "reset_auth_state",
+]
