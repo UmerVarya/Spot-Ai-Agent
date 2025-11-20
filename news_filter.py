@@ -3,8 +3,7 @@ import os
 from dotenv import load_dotenv
 from log_utils import setup_logger
 import config
-from groq_client import get_groq_client
-from groq_safe import safe_chat_completion
+from llm_tasks import LLMTask, call_llm_for_task
 from news_guardrails import (
     parse_llm_json,
     quantify_event_risk,
@@ -52,15 +51,9 @@ def format_events_for_prompt(events, metrics):
 
 
 def analyze_news_with_llm(prompt, metrics):
-    client = get_groq_client()
-    if client is None:
-        logger.warning("Groq client unavailable for news filter; assuming safe")
-        return {"safe": True, "sensitivity": 0, "reason": "LLM unavailable"}
-
     try:
-        response = safe_chat_completion(
-            client,
-            model=config.get_news_model(),
+        response, model_used = call_llm_for_task(
+            LLMTask.NEWS,
             messages=[
                 {
                     "role": "system",
@@ -72,6 +65,10 @@ def analyze_news_with_llm(prompt, metrics):
                 {"role": "user", "content": prompt},
             ],
         )
+        if response is None:
+            logger.warning("Groq client unavailable for news filter; assuming safe")
+            return {"safe": True, "sensitivity": 0, "reason": "LLM unavailable"}
+
         reply = response.choices[0].message.content
         safe_decision, reason = parse_llm_json(reply, logger)
         if safe_decision is None:
@@ -79,6 +76,12 @@ def analyze_news_with_llm(prompt, metrics):
 
         safe, sensitivity, reconciled_reason = reconcile_with_quant_filters(
             safe_decision, reason or "No reason provided.", metrics
+        )
+        logger.info(
+            "News LLM decision: task=news model=%s safe=%s reason=%s",
+            model_used,
+            safe,
+            reconciled_reason,
         )
         return {"safe": safe, "sensitivity": sensitivity, "reason": reconciled_reason}
     except Exception as e:

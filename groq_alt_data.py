@@ -13,13 +13,7 @@ import os
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import config
-from groq_http import (
-    extract_error_payload,
-    groq_api_key,
-    groq_api_url,
-    http_chat_completion,
-)
-from groq_safe import describe_error
+from llm_tasks import LLMTask, call_llm_for_task, iter_models_for_task
 from json_utils import parse_llm_json_response
 from log_utils import setup_logger
 
@@ -206,12 +200,8 @@ def analyze_alt_data(
     cannot be parsed into JSON.
     """
 
-    api_key = groq_api_key()
-    if not api_key:
-        logger.debug("Groq API key unavailable; skipping Groq alt-data request")
-        return None
-
-    model_name = config.get_groq_model()
+    models = iter_models_for_task(LLMTask.ALT_DATA)
+    model_name = models[0] if models else config.get_groq_model()
     onchain_text = _format_onchain_snapshot(onchain_snapshot)
     posts_text, posts_count = _format_posts(social_posts)
     defaults = _build_defaults(model_name, posts_count, onchain_snapshot)
@@ -232,32 +222,22 @@ def analyze_alt_data(
         {"role": "user", "content": user_prompt},
     ]
 
-    api_url = groq_api_url()
-    content, status_code, error_payload = http_chat_completion(
-        model=model_name,
+    response, model_used = call_llm_for_task(
+        LLMTask.ALT_DATA,
         messages=messages,
         temperature=0.2,
         max_tokens=_MAX_TOKENS,
-        api_key=api_key,
-        api_url=api_url,
         timeout=_REQUEST_TIMEOUT,
+        response_format={"type": "json_object"},
     )
 
-    if not content:
-        if status_code == 401:
-            _handle_auth_failure(error_payload)
-            return _neutral_payload(defaults)
-        if status_code is not None:
-            logger.warning(
-                "Groq alt-data request failed: HTTP %s (%s)",
-                status_code,
-                describe_error(error_payload),
-            )
-        elif isinstance(error_payload, Exception):
-            logger.warning("Groq alt-data request failed: %s", error_payload)
-        else:
-            logger.debug("Groq alt-data response missing content: %s", error_payload)
-        return None
+    if response is None:
+        logger.warning("Groq alt-data unavailable; returning neutral payload")
+        return _neutral_payload(defaults)
+
+    model_name = model_used or model_name
+    defaults = _build_defaults(model_name, posts_count, onchain_snapshot)
+    content = getattr(response.choices[0].message, "content", "") if getattr(response, "choices", None) else ""
 
     parsed, success = parse_llm_json_response(content, defaults=defaults, logger=logger)
     if not success:
@@ -304,11 +284,21 @@ def analyze_alt_data(
     sources = parsed.get("sources", [])
     sources_list = _normalise_list(sources, ["groq", model_name])
 
-    return {
+    payload = {
         "social": social_map,
         "onchain": onchain_map,
         "sources": sources_list,
     }
+
+    logger.info(
+        "Alt-data LLM: task=alt_data model=%s bias=%s score=%s confidence=%s",
+        model_name,
+        social_map.get("bias"),
+        social_map.get("score"),
+        social_map.get("confidence"),
+    )
+
+    return payload
 
 
 __all__ = ["analyze_alt_data"]

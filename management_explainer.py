@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-import config
-from groq_client import get_groq_client
-from groq_safe import safe_chat_completion
+from llm_tasks import LLMTask, call_llm_for_task
 from log_utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -36,10 +34,6 @@ def explain_trailing_action(
 ) -> str:
     """Return a short natural language explanation for a trailing action."""
 
-    client = get_groq_client()
-    if client is None:
-        return ""
-
     symbol = str(trade.get("symbol", "Unknown")).upper()
     direction = str(trade.get("direction", "")).lower() or "long"
     system_prompt = (
@@ -61,9 +55,8 @@ def explain_trailing_action(
     )
 
     try:
-        response = safe_chat_completion(
-            client,
-            model=config.get_narrative_model(),
+        response, model_used = call_llm_for_task(
+            LLMTask.EXPLAIN,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -71,6 +64,8 @@ def explain_trailing_action(
             temperature=0.35,
             max_tokens=180,
         )
+        if response is None:
+            return ""
     except Exception:  # pragma: no cover - SDK level failures
         logger.debug("Trailing explanation generation failed", exc_info=True)
         return ""

@@ -8,8 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Iterable, List
 
-import config
-from groq_safe import safe_chat_completion
+from llm_tasks import LLMTask, call_llm_for_task
 from log_utils import setup_logger
 
 
@@ -172,10 +171,10 @@ async def _call_llm_batch(items: List[NewsLLMInput]) -> List[NewsLLMDecision]:
     ]
 
     try:
-        response = await safe_chat_completion(
-            client=None,
-            model=config.get_news_model(),
-            messages=messages,
+        response, model_used = await asyncio.to_thread(
+            call_llm_for_task,
+            LLMTask.NEWS,
+            messages,
             temperature=0.0,
             max_tokens=800,
             response_format={"type": "json_object"},
@@ -222,6 +221,13 @@ async def _call_llm_batch(items: List[NewsLLMInput]) -> List[NewsLLMDecision]:
                 suggested_category=suggested_category or (original.rule_category if original else ""),
                 reason=reason,
             )
+        )
+
+        logger.info(
+            "News LLM decision: task=news model=%s systemic=%s reason=%s",
+            model_used,
+            systemic_risk,
+            reason,
         )
 
     return decisions
