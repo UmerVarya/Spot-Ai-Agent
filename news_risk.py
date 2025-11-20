@@ -107,6 +107,42 @@ CRYPTO_CONTEXT_TOKENS = {
     "blockchain",
 }
 
+MACRO_T1_CORE = [
+    "fomc decision",
+    "fed rate decision",
+    "federal reserve decision",
+    "interest rate decision",
+    "rate decision",
+    "cpi data",
+    "core cpi data",
+    "inflation data",
+    "pce data",
+    "core pce data",
+    "nonfarm payrolls",
+    "nfp report",
+    "jobs report",
+    "nfp data",
+    "nfp results",
+    "nfp figures",
+]
+
+MACRO_PREVIEW_MARKERS = [
+    "ahead of nfp",
+    "ahead of the nfp",
+    "ahead of nonfarm payrolls",
+    "ahead of the jobs report",
+    "ahead of us nfp",
+    "ahead of data",
+    "before nfp",
+    "before the nfp",
+    "preview",
+    "preview:",
+    "what to expect",
+    "eyes on nfp",
+    "eyes on jobs data",
+    "awaiting nfp",
+]
+
 REG_POLICY_KEYWORDS = [
     "fdic",
     "federal deposit insurance",
@@ -226,6 +262,21 @@ def _is_expansion_news(text: str) -> bool:
     return any(k in text for k in EXPANSION_KEYWORDS)
 
 
+def _is_macro_preview(text: str) -> bool:
+    return any(k in text for k in MACRO_PREVIEW_MARKERS)
+
+
+def _is_macro_t1_release(text: str) -> bool:
+    if _is_macro_preview(text):
+        # explicit: previews are not T1
+        return False
+    return any(k in text for k in MACRO_T1_CORE)
+
+
+def _is_gold_fx_preview(text: str) -> bool:
+    return ("gold " in text or "xau" in text) and _is_macro_preview(text)
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -284,36 +335,30 @@ def classify_news(headline: str, body: str) -> str:
     if "ban" in compact and "crypto" in compact:
         return "CRYPTO_SYSTEMIC"
 
-    macro_t1_terms = (
-        "fomc",
-        "federal reserve",
-        "fed meeting",
-        "fed rate",
-        "rate decision",
-        "cpi",
-        "core cpi",
-        "pce",
-        "core pce",
-        "nfp",
-        "nonfarm payroll",
-        "jobs report",
-        "powell",
-        "inflation",
-    )
-    if any(term in compact for term in macro_t1_terms):
+    # Gold/FX preview headlines should never be MACRO_USD_T1
+    if _is_gold_fx_preview(compact):
+        return "MACRO_USD_T2"
+
+    # True Tier-1 macro events: actual data/decision releases
+    if _is_macro_t1_release(compact):
         return "MACRO_USD_T1"
 
-    macro_t2_terms = (
-        "ism",
-        "pmi",
-        "retail sales",
-        "consumer confidence",
-        "housing starts",
-        "jobless claims",
-        "initial claims",
-        "continuing claims",
-    )
-    if any(term in compact for term in macro_t2_terms):
+    # Tier-2 macro: previews, positioning, softer US data
+    if "us " in compact and (
+        _is_macro_preview(compact)
+        or any(
+            k in compact
+            for k in [
+                "ism",
+                "pmi",
+                "retail sales",
+                "consumer confidence",
+                "housing starts",
+                "initial jobless claims",
+                "jobless claims",
+            ]
+        )
+    ):
         return "MACRO_USD_T2"
 
     crypto_medium_terms = (
