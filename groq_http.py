@@ -28,34 +28,11 @@ def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> 
 _HTTP_TIMEOUT = _env_float("GROQ_HTTP_TIMEOUT", 10.0, minimum=1.0, maximum=60.0)
 
 
-_KEY_LOGGED = False
-
-
-def reset_groq_key_state() -> None:
-    """Reset logging state (used in tests)."""
-
-    global _KEY_LOGGED
-    _KEY_LOGGED = False
-
-
 def get_groq_api_key() -> str | None:
     """Return the Groq API key from the environment, if present."""
 
     key = os.getenv("GROQ_API_KEY", "").strip()
-
-    global _KEY_LOGGED
-    if not _KEY_LOGGED:
-        logger.info(
-            "Groq setup: key_present=%s key_prefix=%s",
-            bool(key),
-            (key[:4] if key else "None"),
-        )
-        _KEY_LOGGED = True
-
-    if key:
-        return key
-
-    return None
+    return key or None
 
 
 def groq_api_url() -> str:
@@ -120,10 +97,11 @@ def http_chat_completion(
 ) -> Tuple[Optional[str], Optional[int], Any]:
     """Execute a Groq chat completion via the OpenAI-compatible HTTP API."""
 
-    key = api_key if api_key is not None else get_groq_api_key()
-    if not key:
-        logger.debug("Groq API key unavailable; skipping HTTP chat completion")
-        return None, None, None
+    from groq_safe import GroqAuthError, require_groq_api_key
+
+    key = require_groq_api_key()
+    if api_key is not None:
+        key = api_key
 
     url = api_url if api_url is not None else groq_api_url()
 
@@ -149,7 +127,18 @@ def http_chat_completion(
         return None, None, exc
 
     if response.status_code >= 400:
-        return None, response.status_code, extract_error_payload(response)
+        error_payload = extract_error_payload(response)
+        if is_auth_error(response.status_code, error_payload):
+            # Explicitly disable Groq usage on authentication failures.
+            import groq_safe
+
+            groq_safe._groq_auth_disabled = True
+            logger.error(
+                "Groq authentication failed (401). Disabling Groq requests: invalid_api_key"
+            )
+            raise GroqAuthError("Groq authentication disabled")
+
+        return None, response.status_code, error_payload
 
     try:
         data = response.json()
@@ -168,6 +157,5 @@ __all__ = [
     "groq_api_url",
     "http_chat_completion",
     "is_auth_error",
-    "reset_groq_key_state",
 ]
 

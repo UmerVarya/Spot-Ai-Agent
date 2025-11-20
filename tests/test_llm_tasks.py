@@ -1,10 +1,9 @@
 import builtins
 from types import SimpleNamespace
 
-import llm_tasks
 import groq_safe
+import llm_tasks
 from groq_safe import GroqAuthError, reset_auth_state
-from groq_http import reset_groq_key_state
 
 
 def _mock_response(content: str, model: str = "model-x"):
@@ -108,7 +107,6 @@ def test_soft_limit_blocks_model(monkeypatch):
 
 def test_call_llm_missing_key(monkeypatch, caplog):
     reset_auth_state()
-    reset_groq_key_state()
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.setattr(llm_tasks, "get_groq_client", lambda: object())
     monkeypatch.setattr(llm_tasks, "iter_models_for_task", lambda _task: ["primary"])
@@ -118,21 +116,18 @@ def test_call_llm_missing_key(monkeypatch, caplog):
 
     assert response is None
     assert model is None
-    assert any("Groq disabled for task=approval" in rec.message for rec in caplog.records)
+    assert any("Groq auth error for task=approval" in rec.message for rec in caplog.records)
 
 
 def test_call_llm_auth_failure_disables(monkeypatch):
     reset_auth_state()
-    reset_groq_key_state()
     monkeypatch.setenv("GROQ_API_KEY", "gsk_live")
     monkeypatch.setattr(llm_tasks, "get_groq_client", lambda: object())
     monkeypatch.setattr(llm_tasks, "iter_models_for_task", lambda _task: ["primary"])
 
     def _auth_fail(*_args, **_kwargs):
-        from groq_safe import _disable_auth
-
-        _disable_auth({"error": {"code": "invalid_api_key"}})
-        raise GroqAuthError("Groq authentication failed")
+        groq_safe._groq_auth_disabled = True
+        raise GroqAuthError("Groq authentication disabled")
 
     monkeypatch.setattr(llm_tasks, "safe_chat_completion", _auth_fail)
 
@@ -140,4 +135,4 @@ def test_call_llm_auth_failure_disables(monkeypatch):
 
     assert response is None
     assert model is None
-    assert groq_safe._AUTH_DISABLED is True
+    assert groq_safe._groq_auth_disabled is True
