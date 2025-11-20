@@ -33,6 +33,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 NEWS_LLM_ENABLED = _env_bool("NEWS_LLM_ENABLED", False)
+NEWS_LLM_CONFIRM_FOR_HALT = _env_bool("NEWS_LLM_CONFIRM_FOR_HALT", True)
 NEWS_LLM_ALLOW_UPGRADE = _env_bool("NEWS_LLM_ALLOW_UPGRADE", False)
 NEWS_LLM_ALLOW_DOWNGRADE = _env_bool("NEWS_LLM_ALLOW_DOWNGRADE", False)
 NEWS_LLM_MAX_ITEMS_PER_BATCH = max(1, int(os.getenv("NEWS_LLM_MAX_ITEMS_PER_BATCH", "5")))
@@ -274,6 +275,7 @@ async def run_llm_batch_loop(*, stop_event: asyncio.Event) -> None:
 
 __all__ = [
     "NEWS_LLM_ENABLED",
+    "NEWS_LLM_CONFIRM_FOR_HALT",
     "NEWS_LLM_ALLOW_UPGRADE",
     "NEWS_LLM_ALLOW_DOWNGRADE",
     "NEWS_LLM_MAX_ITEMS_PER_BATCH",
