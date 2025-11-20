@@ -3052,6 +3052,33 @@ def run_agent_loop() -> None:
                 prepared = context["prepared"]
                 pre_result = context["pre_result"]
 
+                score = context["score"]
+                position_size = context["position_size"]
+                pattern_name = context["pattern_name"]
+                price_data = context["price_data"]
+                auction_state = context["auction_state"]
+                setup_type = context["setup_type"]
+                alt_features = context["alt_features"]
+                indicators = context["indicators"]
+                indicators_df = context["indicators_df"]
+                volume_profile_result = context["volume_profile_result"]
+                lvn_level = context["lvn_level"]
+                orderflow = context["orderflow"]
+                orderflow_metadata = context["orderflow_metadata"]
+                micro_feature_payload = context["micro_feature_payload"]
+                sym_vol_pct = context["sym_vol_pct"]
+                sym_vol = context["sym_vol"]
+                htf_trend_pct = context["htf_trend_pct"]
+                signal_snapshot = context["signal_snapshot"]
+                macro_ind = context["macro_ind"]
+                session = context.get("session")
+                macro_context = context.get("macro_context")
+                macro_log_line = context.get("macro_log_line")
+                tier = context.get("tier")
+                news_severity = context.get("news_severity", 0)
+                atr_15m_ratio = context.get("atr_15m_ratio")
+                direction = context.get("direction") or "long"
+
                 if prepared is None:
                     if not isinstance(pre_result, dict):
                         logger.error("No decision object generated for %s; skipping", symbol)
@@ -3077,27 +3104,6 @@ def run_agent_loop() -> None:
                     }
                     llm_decision = get_llm_trade_decision(trade_context)
                     decision_obj = finalize_trade_decision(prepared, llm_decision)
-
-                score = context["score"]
-                position_size = context["position_size"]
-                pattern_name = context["pattern_name"]
-                price_data = context["price_data"]
-                auction_state = context["auction_state"]
-                setup_type = context["setup_type"]
-                alt_features = context["alt_features"]
-                indicators = context["indicators"]
-                indicators_df = context["indicators_df"]
-                volume_profile_result = context["volume_profile_result"]
-                lvn_level = context["lvn_level"]
-                orderflow = context["orderflow"]
-                orderflow_metadata = context["orderflow_metadata"]
-                micro_feature_payload = context["micro_feature_payload"]
-                sym_vol_pct = context["sym_vol_pct"]
-                sym_vol = context["sym_vol"]
-                htf_trend_pct = context["htf_trend_pct"]
-                signal_snapshot = context["signal_snapshot"]
-                macro_ind = context["macro_ind"]
-                direction = context.get("direction") or "long"
 
                 ml_prob: Optional[float] = None
 
