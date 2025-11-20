@@ -5,6 +5,10 @@ provides helpers that detect when a requested model has been decommissioned and
 automatically fall back to the supported default.  The logic is shared across
 both the high-level ``Groq`` SDK usage (``safe_chat_completion``) and the raw
 HTTP clients used elsewhere in the codebase.
+"""Utility helpers for resilient Groq LLM calls.
+
+This module centralises Groq authentication checks, error handling, and safe
+fallback behaviour for Groq model interactions.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from __future__ import annotations
 from typing import Any, List, Mapping
 
 import config
-from groq_http import get_groq_api_key, http_chat_completion, is_auth_error
+from groq_http import get_groq_api_key, http_chat_completion
 from log_utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -60,9 +64,14 @@ class _LLMResponse:
         self.model = model
 
 
-_AUTH_DISABLED = False
-_AUTH_WARNING_LOGGED = False
-_MISSING_KEY_LOGGED = False
+_groq_auth_disabled: bool = False
+
+_initial_key = get_groq_api_key()
+logger.info(
+    "Groq setup: key_present=%s key_prefix=%s",
+    bool(_initial_key),
+    (_initial_key[:4] if _initial_key else "None"),
+)
 
 
 def _normalise_text(text: str | None) -> str:
@@ -109,43 +118,26 @@ def is_model_decommissioned_error(error: Any) -> bool:
     return any(hint in lowered for hint in _DECOMMISSIONED_HINTS)
 
 
-def _disable_auth(error: Any) -> None:
-    global _AUTH_DISABLED, _AUTH_WARNING_LOGGED
-    _AUTH_DISABLED = True
-    if not _AUTH_WARNING_LOGGED:
-        logger.error(
-            "Groq authentication failed (401). Disabling Groq requests for this process: %s",
-            describe_error(error),
-        )
-        _AUTH_WARNING_LOGGED = True
-
-
-def _disable_missing_key() -> None:
-    global _AUTH_DISABLED, _MISSING_KEY_LOGGED
-    _AUTH_DISABLED = True
-    if not _MISSING_KEY_LOGGED:
-        logger.warning("Groq disabled: no GROQ_API_KEY in environment")
-        _MISSING_KEY_LOGGED = True
-
-
 def reset_auth_state() -> None:
     """Reset authentication state (primarily for tests)."""
 
-    global _AUTH_DISABLED, _AUTH_WARNING_LOGGED, _MISSING_KEY_LOGGED
-    _AUTH_DISABLED = False
-    _AUTH_WARNING_LOGGED = False
-    _MISSING_KEY_LOGGED = False
+    global _groq_auth_disabled
+    _groq_auth_disabled = False
 
 
 def require_groq_api_key() -> str:
     """Return the configured Groq API key or raise when unavailable."""
 
-    if _AUTH_DISABLED:
+    global _groq_auth_disabled
+
+    # If we've already decided this process cannot use Groq, short-circuit
+    if _groq_auth_disabled:
         raise GroqAuthError("Groq authentication disabled")
 
     key = get_groq_api_key()
     if not key:
-        _disable_missing_key()
+        _groq_auth_disabled = True
+        logger.warning("Groq disabled: no GROQ_API_KEY in environment")
         raise GroqAuthError("Groq authentication disabled")
 
     return key
@@ -188,10 +180,6 @@ def safe_chat_completion(client, *, messages: list[dict[str, Any]], model: str |
 
         if content:
             return _build_response(content, model_name)
-
-        if is_auth_error(status_code, error_payload):
-            _disable_auth(error_payload)
-            raise GroqAuthError("Groq authentication failed")
 
         if model_name != fallback_model and is_model_decommissioned_error(error_payload):
             logger.warning(

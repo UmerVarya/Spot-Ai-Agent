@@ -113,7 +113,12 @@ def call_llm_for_task(task: LLMTask, messages: list[dict[str, Any]], **kwargs: A
     try:
         require_groq_api_key()
     except GroqAuthError as exc:
-        logger.warning("Groq disabled for task=%s: %s", task.value, exc)
+        logger.warning(
+            "Groq auth error for task=%s model=%s: %s",
+            task.value,
+            models[0] if models else "unknown",
+            exc,
+        )
         return None, None
 
     client = get_groq_client()
@@ -146,7 +151,12 @@ def call_llm_for_task(task: LLMTask, messages: list[dict[str, Any]], **kwargs: A
             )
             return response, model_name
         except GroqAuthError as e:
-            logger.warning("Groq disabled for task=%s: %s", task.value, e)
+            logger.warning(
+                "Groq auth error for task=%s model=%s: %s",
+                task.value,
+                model_name,
+                e,
+            )
             last_error = e
             break
         except Exception as e:  # noqa: BLE001
