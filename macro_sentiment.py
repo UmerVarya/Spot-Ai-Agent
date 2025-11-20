@@ -1,12 +1,7 @@
-import os
 from news_scraper import get_combined_headlines
 from news_retriever import build_retrieval_context, load_structured_events
 from log_utils import setup_logger
-
-# Centralised configuration loader
-import config
-from groq_client import get_groq_client
-from groq_safe import safe_chat_completion
+from llm_tasks import LLMTask, call_llm_for_task
 
 logger = setup_logger(__name__)
 
@@ -51,24 +46,22 @@ Bias: <bullish / bearish / neutral>
 Confidence: <0-10 score>
 """
 
-    client = get_groq_client()
-    if client is None:
-        logger.warning("Groq client unavailable for macro sentiment; returning default")
-        return {
-            "summary": "LLM analysis unavailable.",
-            "bias": "neutral",
-            "confidence": 0,
-        }
-
     try:
-        response = safe_chat_completion(
-            client,
-            model=config.get_macro_model(),
+        response, model_used = call_llm_for_task(
+            LLMTask.NEWS,
             messages=[
                 {"role": "system", "content": "You are a crypto macro market analyst."},
                 {"role": "user", "content": prompt}
             ],
         )
+
+        if response is None:
+            logger.warning("Groq client unavailable for macro sentiment; returning default")
+            return {
+                "summary": "LLM analysis unavailable.",
+                "bias": "neutral",
+                "confidence": 0,
+            }
 
         result = response.choices[0].message.content.strip()
         logger.debug("Raw LLM Response: %s", result)
@@ -90,6 +83,13 @@ Confidence: <0-10 score>
                     confidence = float(line.split(":", 1)[-1].strip())
                 except:
                     confidence = 0
+
+        logger.info(
+            "News LLM decision: task=news model=%s bias=%s confidence=%s",
+            model_used,
+            bias,
+            confidence,
+        )
 
         return {
             "summary": summary,

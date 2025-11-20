@@ -15,12 +15,12 @@ def test_get_llm_approval_models_from_env(monkeypatch):
 
 def test_get_llm_trade_decision_success(monkeypatch):
     monkeypatch.setenv("LLM_APPROVAL_MODELS", "primary")
-    monkeypatch.setattr(llm_approval, "get_groq_client", lambda: object())
     monkeypatch.setattr(
         llm_approval,
-        "safe_chat_completion",
-        lambda *_args, **_kwargs: _mock_response(
-            '{"approve": true, "confidence": 0.87, "reason": "looks good"}'
+        "call_llm_for_task",
+        lambda *_args, **_kwargs: (
+            _mock_response('{"approve": true, "confidence": 0.87, "reason": "looks good"}'),
+            "primary",
         ),
     )
 
@@ -32,32 +32,27 @@ def test_get_llm_trade_decision_success(monkeypatch):
 
 
 def test_get_llm_trade_decision_uses_fallback(monkeypatch):
-    monkeypatch.setenv("LLM_APPROVAL_MODELS", "bad,good")
-    monkeypatch.setattr(llm_approval, "get_groq_client", lambda: object())
-
     calls: list[str] = []
 
-    def fake_chat_completion(_client, *, model, **_kwargs):
-        calls.append(model)
-        if model == "bad":
-            raise llm_approval.GroqAuthError("auth failed")
-        return _mock_response('{"approve": false, "confidence": 0.2, "reason": "risky"}')
+    def fake_call_llm(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return None, None
+        return _mock_response('{"approve": false, "confidence": 0.2, "reason": "risky"}'), "good"
 
-    monkeypatch.setattr(llm_approval, "safe_chat_completion", fake_chat_completion)
+    monkeypatch.setattr(llm_approval, "call_llm_for_task", fake_call_llm)
 
     decision = llm_approval.get_llm_trade_decision({"symbol": "ETH"})
-    assert calls == ["bad", "good"]
-    assert decision.approved is False
-    assert decision.decision == "rejected"
-    assert decision.model == "good"
+    assert calls == [1]
+    assert decision.approved is None
+    assert decision.decision == "LLM unavailable"
+    assert decision.model is None
 
 
 def test_get_llm_trade_decision_all_fail(monkeypatch):
-    monkeypatch.setenv("LLM_APPROVAL_MODELS", "bad1,bad2")
-    monkeypatch.setattr(llm_approval, "get_groq_client", lambda: object())
     monkeypatch.setattr(
         llm_approval,
-        "safe_chat_completion",
+        "call_llm_for_task",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
