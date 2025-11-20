@@ -640,10 +640,7 @@ def apply_llm_decision(decision: NewsLLMDecision) -> None:
                 if NEWS_LLM_ALLOW_DOWNGRADE:
                     _mark_event_reviewed_non_halting(decision.event_id)
                 else:
-                    if decision.systemic_risk == 0:
-                        _mark_event_reviewed_non_halting(decision.event_id)
-                    else:
-                        _apply_hard_halt_for(decision, rule_category)
+                    _apply_hard_halt_for(decision, rule_category)
             return
 
         if not NEWS_LLM_ALLOW_UPGRADE:
