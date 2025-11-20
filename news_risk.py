@@ -422,6 +422,47 @@ def _is_halt_candidate(rule_category: str) -> bool:
     return rule_category in {"CRYPTO_SYSTEMIC", "MACRO_USD_T1"}
 
 
+def _mark_event_reviewed_non_halting(event_id: str) -> None:
+    _LLM_SUPPRESS_REHALT.add(event_id)
+
+
+def _apply_hard_halt_for(decision: NewsLLMDecision, category: str | None = None) -> None:
+    context = _LLM_EVENT_CONTEXT.get(decision.event_id, {})
+    timestamp = float(context.get("ts", time.time()))
+    headline = context.get("headline", "")
+    target_category = (
+        category
+        or decision.suggested_category
+        or _LLM_RULE_CATEGORY.get(decision.event_id, "")
+    )
+
+    halt_minutes = get_halt_duration_for_category(target_category)
+    if halt_minutes <= 0:
+        _mark_event_reviewed_non_halting(decision.event_id)
+        return
+
+    if not should_apply_halt_for_event(decision.event_id, timestamp):
+        return
+
+    halt_until_candidate = timestamp + halt_minutes * 60
+    if halt_until_candidate > halt_state.halt_until:
+        halt_state.halt_until = halt_until_candidate
+        halt_state.reason = f"{target_category}: {headline}".strip()
+        halt_state.category = target_category
+        halt_state.last_event_headline = headline
+        halt_state.last_event_ts = timestamp
+        logger.warning(
+            "[NEWS] LLM CONFIRMED HARD HALT %s for %sm (until %s)",
+            target_category,
+            halt_minutes,
+            _format_ts(halt_state.halt_until),
+        )
+        try:
+            write_news_status(now=timestamp)
+        except Exception:
+            logger.debug("Failed to write news status", exc_info=True)
+
+
 def process_news_item(
     headline: str,
     body: str,
@@ -541,20 +582,27 @@ def apply_llm_decision(decision: NewsLLMDecision) -> None:
     """Adjust classification or halt behavior based on LLM output."""
 
     try:
+        rule_category = _LLM_RULE_CATEGORY.get(
+            decision.event_id, decision.suggested_category or "IRRELEVANT"
+        )
+        is_systemic_rule = rule_category in {"CRYPTO_SYSTEMIC", "MACRO_USD_T1"}
+        is_systemic_suggestion = decision.suggested_category in {
+            "CRYPTO_SYSTEMIC",
+            "MACRO_USD_T1",
+        }
+        high_risk = decision.systemic_risk >= 2
+
         if not NEWS_LLM_CONFIRM_FOR_HALT:
-            rule_category = _LLM_RULE_CATEGORY.get(
-                decision.event_id, decision.suggested_category
-            )
             context = _LLM_EVENT_CONTEXT.get(decision.event_id, {})
 
             if (
                 NEWS_LLM_ALLOW_UPGRADE
                 and rule_category == "CRYPTO_MEDIUM"
                 and decision.suggested_category == "CRYPTO_SYSTEMIC"
-                and decision.systemic_risk >= 2
+                and high_risk
             ):
-                headline = context.get("headline", "")
                 timestamp = float(context.get("ts", time.time()))
+                headline = context.get("headline", "")
                 halt_minutes = get_halt_duration_for_category("CRYPTO_SYSTEMIC")
                 if halt_minutes > 0 and should_apply_halt_for_event(
                     decision.event_id, timestamp
@@ -582,47 +630,30 @@ def apply_llm_decision(decision: NewsLLMDecision) -> None:
                 and decision.systemic_risk <= 1
                 and decision.suggested_category == "CRYPTO_MEDIUM"
             ):
-                _LLM_SUPPRESS_REHALT.add(decision.event_id)
+                _mark_event_reviewed_non_halting(decision.event_id)
             return
 
-        context = _LLM_EVENT_CONTEXT.get(decision.event_id, {})
-        suggested_category = decision.suggested_category or _LLM_RULE_CATEGORY.get(
-            decision.event_id, ""
-        )
+        if is_systemic_rule:
+            if high_risk and is_systemic_suggestion:
+                _apply_hard_halt_for(decision, decision.suggested_category)
+            else:
+                if NEWS_LLM_ALLOW_DOWNGRADE:
+                    _mark_event_reviewed_non_halting(decision.event_id)
+                else:
+                    if decision.systemic_risk == 0:
+                        _mark_event_reviewed_non_halting(decision.event_id)
+                    else:
+                        _apply_hard_halt_for(decision, rule_category)
+            return
 
-        if (
-            decision.systemic_risk >= 2
-            and suggested_category in {"CRYPTO_SYSTEMIC", "MACRO_USD_T1"}
-        ):
-            timestamp = float(context.get("ts", time.time()))
-            headline = context.get("headline", "")
-            halt_minutes = get_halt_duration_for_category(suggested_category)
-            if halt_minutes <= 0:
-                _LLM_SUPPRESS_REHALT.add(decision.event_id)
-                return
+        if not NEWS_LLM_ALLOW_UPGRADE:
+            _mark_event_reviewed_non_halting(decision.event_id)
+            return
 
-            if not should_apply_halt_for_event(decision.event_id, timestamp):
-                return
-
-            halt_until_candidate = timestamp + halt_minutes * 60
-            if halt_until_candidate > halt_state.halt_until:
-                halt_state.halt_until = halt_until_candidate
-                halt_state.reason = f"{suggested_category}: {headline}".strip()
-                halt_state.category = suggested_category
-                halt_state.last_event_headline = headline
-                halt_state.last_event_ts = timestamp
-                logger.warning(
-                    "[NEWS] LLM CONFIRMED HARD HALT %s for %sm (until %s)",
-                    suggested_category,
-                    halt_minutes,
-                    _format_ts(halt_state.halt_until),
-                )
-                try:
-                    write_news_status(now=timestamp)
-                except Exception:
-                    logger.debug("Failed to write news status", exc_info=True)
+        if high_risk and is_systemic_suggestion:
+            _apply_hard_halt_for(decision, decision.suggested_category)
         else:
-            _LLM_SUPPRESS_REHALT.add(decision.event_id)
+            _mark_event_reviewed_non_halting(decision.event_id)
     except Exception:
         logger.debug("Error while applying LLM decision", exc_info=True)
 
