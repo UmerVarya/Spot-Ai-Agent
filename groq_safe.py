@@ -12,11 +12,10 @@ fallback behaviour for Groq model interactions.
 """
 
 from __future__ import annotations
-
-import os
 from typing import Any, List, Mapping
 
 import config
+from groq_client import get_groq_api_key
 from groq_http import http_chat_completion
 from log_utils import setup_logger
 
@@ -66,19 +65,6 @@ class _LLMResponse:
 
 
 _groq_auth_disabled: bool = False
-
-
-def get_groq_api_key() -> str | None:
-    """
-    Return the Groq API key from the environment, or None if not set.
-
-    This is the single source of truth for whether Groq auth is possible.
-    """
-
-    key = os.getenv("GROQ_API_KEY", "").strip()
-    return key or None
-
-
 _initial_key = get_groq_api_key()
 logger.info(
     "Groq_setup: key_present=%s key_prefix=%s",

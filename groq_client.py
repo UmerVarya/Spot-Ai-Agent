@@ -8,12 +8,12 @@ initialisation remain consistent across the codebase.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import Optional
 
 from groq import Groq
 
-from groq_safe import get_groq_api_key
 from log_utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -41,4 +41,11 @@ def reset_groq_client_cache() -> None:
     """Clear the cached client (primarily for use in tests)."""
 
     _build_client.cache_clear()
+
+
+def get_groq_api_key() -> Optional[str]:
+    """Return the Groq API key from the environment, or ``None`` if unset."""
+
+    key = os.getenv("GROQ_API_KEY", "").strip()
+    return key or None
 
