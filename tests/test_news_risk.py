@@ -130,3 +130,13 @@ def test_classify_news_crypto_systemic_and_policy_detections():
         )
         == "CRYPTO_SYSTEMIC"
     )
+
+
+def test_expansion_news_classified_as_crypto_medium():
+    assert (
+        news_risk.classify_news(
+            "Another Bank Secures Key Hong Kong License to Launch Institutional Crypto Trading Services",
+            "",
+        )
+        == "CRYPTO_MEDIUM"
+    )

@@ -120,6 +120,32 @@ REG_POLICY_KEYWORDS = [
     "crypto policy",
 ]
 
+EXPANSION_KEYWORDS = [
+    "secures license",
+    "secures key license",
+    "obtains license",
+    "granted license",
+    "approved license",
+    "launch institutional",
+    "launches",
+    "launching",
+    "introducing",
+    "introduces",
+    "expands",
+    "expanding",
+    "rolls out",
+    "crypto trading services",
+    "institutional crypto",
+    "hong kong license",
+    "hk license",
+    "virtual asset license",
+    "crypto platform",
+    "crypto division",
+    "crypto trading desk",
+    "bank secures",
+    "crypto unit",
+]
+
 
 @dataclass
 class NewsHaltState:
@@ -183,6 +209,10 @@ def _is_crypto_systemic(text: str) -> bool:
     return False
 
 
+def _is_expansion_news(text: str) -> bool:
+    return any(k in text for k in EXPANSION_KEYWORDS)
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -201,6 +231,9 @@ def classify_news(headline: str, body: str) -> str:
     compact = " ".join(text.split())
     if not compact:
         return "IRRELEVANT"
+
+    if _is_expansion_news(compact):
+        return "CRYPTO_MEDIUM"
 
     if _is_crypto_systemic(compact):
         return "CRYPTO_SYSTEMIC"
