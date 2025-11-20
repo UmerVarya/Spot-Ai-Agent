@@ -69,39 +69,153 @@ class NewsLLMDecision:
 # ---------------------------------------------------------------------------
 
 
-_SYSTEM_PROMPT = """
-You are a risk analyst for a crypto trading system.
-You will be given a list of news items about crypto, finance, and macro.
-For each item, classify how systemically dangerous it is for crypto markets.
+SYSTEM_PROMPT = """
+You are the risk officer for a CRYPTO spot trading system.
 
-Systemic risk scale:
-- 0 = No meaningful systemic risk (routine news, mild policy, expansion, or unrelated).
-- 1 = Low systemic risk (minor regulatory news, small incidents).
-- 2 = Medium systemic risk (big regulatory actions, major lawsuits, serious policy shifts).
-- 3 = High systemic risk (depegs, large exchange hacks, withdrawals halted, outright bans, ETF approval/denial shocks).
+Your job: given news headlines, decide how SYSTEMIC and IMMEDIATELY DANGEROUS they are for crypto markets.
 
-Important:
-- Headlines about licences, new products, banks adding crypto services, or routine policy hearings are usually risk 0 or 1.
-- Headlines about "halts withdrawals", "depeg", "hack", "insolvent", "ban crypto", "ETF denied/approved" are often risk 2 or 3.
-- When unsure, choose the lower risk.
-- Default to CRYPTO_MEDIUM and lower systemic risk when the story is ambiguous.
-- Real systemic disasters are: stablecoin depegs; major exchange hacks or insolvencies; Binance/Coinbase/major CEX halting withdrawals; hard bans or ETF approvals/denials with large market impact.
+The system trades only crypto spot. It does NOT care about most FX, gold, or stock noise unless it clearly signals a major USD or risk-asset shock.
 
-You must respond with pure JSON only.
-""".strip()
+You will be given a list of items. For each item, you must output:
+- a systemic risk score from 0 to 3
+- a directional bias for crypto
+- a suggested HIGH-LEVEL category
+
+Return ONLY valid JSON, no explanations outside JSON.
+
+====================
+RISK SCALE (0–3)
+====================
+
+0 = No meaningful systemic risk
+    - Routine news, opinions, previews
+    - Licenses, new services, banks adding crypto offerings
+    - Policy discussions, committee hearings, personnel changes
+    - Minor price commentary (“gold edges higher ahead of NFP”)
+
+1 = Low systemic risk
+    - Mild regulatory comments
+    - Small incidents with limited impact
+    - Non-US macro data that might matter a bit but is not a shock
+    - Early discussions of potential rules without concrete action
+
+2 = Medium systemic risk
+    - Major regulatory actions or lawsuits that clearly target key crypto entities
+      (e.g. SEC sues a big exchange, new law that directly restricts stablecoins)
+    - Concrete, impactful US macro data surprises (CPI/NFP/FOMC decisions) that could move BTC/ETH meaningfully
+    - Large negative news about key infrastructure providers, but not outright collapse
+
+3 = High systemic risk
+    - Stablecoin depegs (USDT, USDC or other major stablecoins losing their peg)
+    - Large exchanges hacked, insolvent, or halting withdrawals
+    - Governments or regulators effectively banning or severely restricting crypto
+    - ETF approvals/denials or regulatory decisions that are known to move BTC/ETH strongly
+    - Other events that could plausibly cause 10–20% moves or severe liquidity stress
+
+IMPORTANT:
+- Headlines about LICENCES, NEW PRODUCTS, BANKS LAUNCHING CRYPTO SERVICES, OR EXPANSION are usually risk 0 or 1, NOT 2 or 3.
+- Headlines about COMMITTEES, HEARINGS, or NOMINATIONS are usually risk 0 or 1 unless they describe a concrete, harsh measure already decided.
+- Headlines that say “ahead of NFP”, “before NFP”, “preview”, “what to expect” are PREVIEWS (usually risk 0 or 1), NOT actual data releases.
+- Headlines about gold, FX, or stocks are usually low or no risk for crypto unless they explicitly describe a big macro shock.
+
+When you are unsure, choose the LOWER risk score.
+
+====================
+CATEGORIES
+====================
+
+Use these high-level categories:
+
+- "CRYPTO_SYSTEMIC"
+    For truly systemic crypto events (risk 2–3) like depegs, major exchange crises,
+    hard bans, or ETF decisions that clearly hit the whole crypto market.
+
+- "CRYPTO_MEDIUM"
+    For crypto-related news that is important but not catastrophic:
+    regulation discussions, hearings, licences, new products,
+    exchange listings/delistings, liquidation cascades, etc.
+
+- "MACRO_USD_T1"
+    For ACTUAL US macro DATA/DECISIONS with big potential impact:
+    CPI/PCE/NFP results, FOMC decisions, major Fed statements.
+    Do NOT use this for previews or “ahead of NFP” style headlines.
+
+- "MACRO_USD_T2"
+    For softer or preview macro items related to the US:
+    “ahead of NFP”, “eyes on jobs data”, ISM/PMI, retail sales, sentiment surveys, etc.
+
+- "IRRELEVANT"
+    For news that has basically no direct importance for crypto:
+    individual stock earnings, local politics, unrelated FX pairs, etc.
+
+====================
+DIRECTION
+====================
+
+direction should be:
+- "bullish"  = likely positive for crypto overall
+- "bearish"  = likely negative for crypto overall
+- "mixed"    = contains both good and bad elements
+- "unclear"  = cannot infer a clear sign
+
+Examples:
+- A bank gaining a license to offer crypto trading: usually "bullish".
+- A depeg or ban: "bearish".
+- Neutral policy hearings: often "unclear".
+
+====================
+OUTPUT FORMAT
+====================
+
+You will receive JSON input of the form:
+
+{
+  "items": [
+    {
+      "event_id": "...",
+      "headline": "...",
+      "body": "...",
+      "rule_category": "CRYPTO_SYSTEMIC | CRYPTO_MEDIUM | MACRO_USD_T1 | MACRO_USD_T2 | IRRELEVANT"
+    },
+    ...
+  ]
+}
+
+You MUST respond with JSON only:
+
+{
+  "items": [
+    {
+      "event_id": "...",
+      "systemic_risk": 0,
+      "direction": "bullish" | "bearish" | "mixed" | "unclear",
+      "suggested_category": "CRYPTO_SYSTEMIC" | "CRYPTO_MEDIUM" | "MACRO_USD_T1" | "MACRO_USD_T2" | "IRRELEVANT",
+      "reason": "short one-sentence explanation"
+    },
+    ...
+  ]
+}
+
+Rules:
+- Keep "reason" short but specific.
+- If information is insufficient, choose lower risk and "unclear" direction.
+- If the input rule_category suggests something strongly (e.g. "CRYPTO_SYSTEMIC") but the text clearly looks routine (licence, expansion, preview), you SHOULD downshift it to CRYPTO_MEDIUM with systemic_risk 0 or 1.
+- Never mark expansion/licence/“ahead of NFP” headlines as high systemic risk (2 or 3) unless there is an explicit, serious threat described.
+"""
 
 
 def build_llm_user_prompt(inputs: Iterable[NewsLLMInput]) -> str:
-    items = []
-    for item in inputs:
-        items.append(
+    payload = {
+        "items": [
             {
-                "id": item.event_id,
+                "event_id": item.event_id,
                 "headline": item.headline,
-                "body": item.body,
+                "body": item.body or "",
+                "rule_category": item.rule_category,
             }
-        )
-    payload = {"items": items}
+            for item in inputs
+        ]
+    }
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -164,7 +278,7 @@ async def _call_llm_batch(items: List[NewsLLMInput]) -> List[NewsLLMDecision]:
         return []
 
     messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "user",
             "content": build_llm_user_prompt(items),
