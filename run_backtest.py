@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import glob
-
 import json
 import math
 import os
@@ -14,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from backtest import Backtester, grid_search
+from backtest.data import load_csv_folder
 
 # Import live modules -------------------------------------------------------
 import trade_utils as trade_utils_module
@@ -28,30 +27,6 @@ os.environ.setdefault("TRAINING_MODE", "true")
 trade_utils_module.get_market_stream = None  # type: ignore[attr-defined]
 trade_utils_module.get_order_book = lambda *args, **kwargs: None  # type: ignore
 trade_utils_module._get_binance_client = lambda *args, **kwargs: None  # type: ignore
-
-
-def load_csv_folder(path_pattern: str, symbol_col_from_name: bool = True) -> Dict[str, pd.DataFrame]:
-    """Load OHLCV CSV files into a dictionary keyed by symbol."""
-
-    data: Dict[str, pd.DataFrame] = {}
-    for fp in glob.glob(path_pattern):
-        csv_path = Path(fp)
-        if not csv_path.is_file():
-            continue
-        symbol = None
-        if symbol_col_from_name:
-            symbol = csv_path.stem.split("_")[0].upper()
-        df = pd.read_csv(csv_path)
-        time_col = "open_time" if "open_time" in df.columns else "timestamp"
-        df[time_col] = pd.to_datetime(df[time_col], utc=True)
-        df.set_index(time_col, inplace=True)
-        for col in ("open", "high", "low", "close", "volume", "quote_volume"):
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        df.dropna(subset=["open", "high", "low", "close"], inplace=True)
-        df.sort_index(inplace=True)
-        data[symbol or "UNKNOWN"] = df
-    return data
 
 
 def _coerce_float(value: object) -> Optional[float]:
