@@ -31,15 +31,7 @@ from datetime import datetime, timezone
 from log_utils import setup_logger, LOG_FILE
 from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
-from backtest import (
-    BacktestConfig,
-    ResearchBacktester,
-    aggregate_symbol_metrics,
-    compute_buy_and_hold_pnl,
-    generate_trades_from_ohlcv,
-    run_fee_slippage_scenarios,
-    run_parameter_scenarios,
-)
+from backtest import BacktestConfig, BacktestResult, ResearchBacktester, compute_buy_and_hold_pnl, generate_trades_from_ohlcv
 from backtest.data import load_csv_folder
 from ml_model import train_model
 import requests
@@ -2266,119 +2258,351 @@ def render_live_tab() -> None:
             "trade_history.csv",
             "text/csv",
         )
-def render_backtest_tab() -> None:
-    """Interactive research backtesting surface."""
+def _format_pct(value: float) -> str:
+    return f"{value:.1f}%" if pd.notna(value) else "–"
 
-    st.subheader("Research Backtester")
+
+def _format_ratio(value: float) -> str:
+    if value == float("inf"):
+        return "∞"
+    return f"{value:.2f}" if pd.notna(value) else "–"
+
+
+def _run_default_scenarios(bt: ResearchBacktester, base_cfg: BacktestConfig) -> pd.DataFrame:
+    presets = {
+        "Base": {},
+        "High fee": {"fee_bps": base_cfg.fee_bps * 2},
+        "High slippage": {"slippage_bps": base_cfg.slippage_bps * 2},
+        "Aggressive score": {"min_score": base_cfg.min_score + 0.2},
+        "Conservative score": {"min_score": max(0.0, base_cfg.min_score - 0.1)},
+    }
+    rows: list[dict[str, object]] = []
+    for name, overrides in presets.items():
+        cfg = BacktestConfig(**{**base_cfg.__dict__, **overrides})
+        res = bt.run(cfg)
+        metrics = res.metrics
+        rows.append(
+            {
+                "scenario_name": name,
+                "fee_bps": cfg.fee_bps,
+                "slippage_bps": cfg.slippage_bps,
+                "score_threshold": cfg.min_score,
+                "risk_per_trade_pct": cfg.risk_per_trade_pct,
+                "total_return_pct": metrics.get("total_return_pct", 0.0),
+                "annual_return_pct": metrics.get("annual_return_pct", 0.0),
+                "sharpe": metrics.get("sharpe", 0.0),
+                "calmar": metrics.get("calmar", 0.0),
+                "max_drawdown_pct": metrics.get("max_drawdown_pct", 0.0),
+                "win_rate": metrics.get("win_rate", 0.0),
+                "profit_factor": metrics.get("profit_factor", 0.0),
+                "num_trades": len(res.trades),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def render_backtest_overview(result: BacktestResult) -> None:
+    metrics = result.metrics or {}
+    cards = [
+        ("Total Return", _format_pct(metrics.get("total_return_pct", 0.0))),
+        ("Annualized Return", _format_pct(metrics.get("annual_return_pct", 0.0))),
+        ("Max Drawdown", _format_pct(metrics.get("max_drawdown_pct", 0.0))),
+        ("Sharpe", _format_ratio(metrics.get("sharpe", 0.0))),
+        ("Sortino", _format_ratio(metrics.get("sortino", 0.0))),
+        ("Calmar", _format_ratio(metrics.get("calmar", 0.0))),
+        ("Win Rate", _format_pct(metrics.get("win_rate", 0.0))),
+        ("Profit Factor", _format_ratio(metrics.get("profit_factor", 0.0))),
+    ]
+    cols = st.columns(4)
+    for idx, (label, value) in enumerate(cards):
+        cols[idx % 4].metric(label, value)
+
+    st.markdown("### Equity Curve")
+    if alt is not None and not result.equity_curve.empty:
+        chart = (
+            alt.Chart(result.equity_curve)
+            .mark_line()
+            .encode(x="timestamp:T", y="equity:Q")
+            .properties(height=240)
+        )
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.line_chart(result.equity_curve.set_index("timestamp") if not result.equity_curve.empty else result.equity_curve)
+
+    if metrics:
+        metrics_table = pd.DataFrame({"metric": metrics.keys(), "value": metrics.values()})
+        st.markdown("### Aggregate Metrics")
+        st.dataframe(metrics_table, use_container_width=True, hide_index=True)
+
+
+def render_equity_drawdown(result: BacktestResult) -> None:
+    if result.equity_curve.empty:
+        st.info("Run a backtest to view equity and drawdown curves.")
+        return
+    start, end = st.slider(
+        "Zoom range",
+        min_value=result.equity_curve["timestamp"].min().to_pydatetime(),
+        max_value=result.equity_curve["timestamp"].max().to_pydatetime(),
+        value=(
+            result.equity_curve["timestamp"].min().to_pydatetime(),
+            result.equity_curve["timestamp"].max().to_pydatetime(),
+        ),
+    )
+    mask = result.equity_curve["timestamp"].between(pd.Timestamp(start), pd.Timestamp(end))
+    zoomed = result.equity_curve.loc[mask]
+    st.markdown("#### Equity")
+    st.line_chart(zoomed.set_index("timestamp")["equity"])
+    st.markdown("#### Drawdown")
+    st.area_chart(zoomed.set_index("timestamp")["drawdown_pct"])
+
+
+def render_symbol_breakdown(result: BacktestResult) -> None:
+    df = result.by_symbol
+    if df is None or df.empty:
+        st.info("No per-symbol statistics available yet.")
+        return
+    symbols = sorted(df["symbol"].unique()) if "symbol" in df.columns else []
+    selected = st.multiselect("Filter symbols", symbols, default=symbols)
+    if selected:
+        df = df[df["symbol"].isin(selected)]
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    if alt is not None and "total_pnl_quote" in df.columns:
+        pnl_chart = (
+            alt.Chart(df)
+            .mark_bar()
+            .encode(x="symbol:N", y="total_pnl_quote:Q")
+            .properties(title="Total PnL by Symbol")
+        )
+        st.altair_chart(pnl_chart, use_container_width=True)
+    if alt is not None and "sharpe" in df.columns:
+        sharpe_chart = alt.Chart(df).mark_bar().encode(x="symbol:N", y="sharpe:Q").properties(title="Sharpe by Symbol")
+        st.altair_chart(sharpe_chart, use_container_width=True)
+
+
+def render_trade_explorer(result: BacktestResult) -> None:
+    trades = result.trades
+    if trades is None or trades.empty:
+        st.info("No trades to explore yet. Run a backtest first.")
+        return
+    symbols = sorted(trades.get("symbol", pd.Series(dtype=str)).dropna().unique())
+    outcomes = sorted(trades.get("outcome_type", pd.Series(dtype=str)).dropna().unique())
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        sym_filter = st.multiselect("Symbols", symbols, default=symbols)
+    with col2:
+        outcome_filter = st.selectbox("Outcome type", ["All"] + outcomes)
+    with col3:
+        min_score = st.slider("Min score at entry", 0.0, 10.0, 0.0, 0.1)
+    with col4:
+        date_filter = st.date_input("Entry date", value=None)
+
+    filtered = trades.copy()
+    if sym_filter:
+        filtered = filtered[filtered["symbol"].isin(sym_filter)]
+    if outcome_filter != "All" and "outcome_type" in filtered:
+        filtered = filtered[filtered["outcome_type"] == outcome_filter]
+    if "score_at_entry" in filtered:
+        filtered = filtered[filtered["score_at_entry"].astype(float) >= min_score]
+    if date_filter:
+        start_dt = pd.Timestamp(date_filter)
+        filtered = filtered[pd.to_datetime(filtered["entry_time"]).dt.date >= start_dt.date()]
+
+    st.dataframe(arrow_safe_dataframe(filtered), use_container_width=True, hide_index=True)
+
+    trade_id_col = "trade_id" if "trade_id" in filtered.columns else None
+    selected_trade_id = None
+    if trade_id_col:
+        selected_trade_id = st.selectbox("Drilldown trade", filtered[trade_id_col].astype(str).tolist())
+    if selected_trade_id:
+        trade_row = filtered[filtered[trade_id_col].astype(str) == str(selected_trade_id)].iloc[0]
+        st.markdown("#### Trade Summary")
+        cols = st.columns(4)
+        cols[0].metric("R multiple", f"{trade_row.get('r_multiple', 0):.2f}")
+        cols[1].metric("PnL", f"{trade_row.get('net_pnl_quote', trade_row.get('pnl', 0)):.2f}")
+        cols[2].metric("Holding (m)", f"{trade_row.get('holding_time_minutes', 0):.1f}")
+        cols[3].metric("Outcome", str(trade_row.get("outcome_type", "?")))
+        if alt is not None:
+            ts = [trade_row.get("entry_time"), trade_row.get("exit_time")]
+            prices = [trade_row.get("entry_price"), trade_row.get("exit_price")]
+            chart_df = pd.DataFrame({"timestamp": pd.to_datetime(ts), "price": prices, "label": ["entry", "exit"]})
+            chart = alt.Chart(chart_df).mark_line(point=True).encode(x="timestamp:T", y="price:Q", color="label:N")
+            st.altair_chart(chart, use_container_width=True)
+
+
+def render_distributions(result: BacktestResult) -> None:
+    trades = result.trades
+    if trades is None or trades.empty:
+        st.info("No trade distribution available yet.")
+        return
+    st.markdown("#### R Multiple Distribution")
+    st.bar_chart(trades.get("r_multiple", pd.Series(dtype=float)))
+    st.markdown("#### PnL per Trade")
+    st.bar_chart(trades.get("net_pnl_quote", trades.get("pnl", pd.Series(dtype=float))))
+    st.markdown("#### Holding Time (minutes)")
+    st.bar_chart(trades.get("holding_time_minutes", pd.Series(dtype=float)))
+    st.markdown("#### Outcomes")
+    from backtest.analysis import outcome_summary
+
+    outcome_df = outcome_summary(trades)
+    if not outcome_df.empty:
+        st.dataframe(outcome_df, use_container_width=True, hide_index=True)
+
+
+def render_score_regime(result: BacktestResult) -> None:
+    trades = result.trades
+    if trades is None or trades.empty:
+        st.info("No score/regime data available.")
+        return
+    score_df = result.by_buckets.get("score_bucket") if result.by_buckets else pd.DataFrame()
+    if score_df is not None and not score_df.empty:
+        st.markdown("#### Score buckets")
+        st.dataframe(score_df, use_container_width=True, hide_index=True)
+        if alt is not None:
+            chart = alt.Chart(score_df).mark_bar().encode(x="score_bucket:N", y="avg_r:Q")
+            st.altair_chart(chart, use_container_width=True)
+    session_df = result.by_buckets.get("session") if result.by_buckets else pd.DataFrame()
+    if session_df is not None and not session_df.empty:
+        st.markdown("#### Session breakdown")
+        st.dataframe(session_df, use_container_width=True, hide_index=True)
+        if alt is not None:
+            chart = alt.Chart(session_df).mark_bar().encode(x="session:N", y="avg_r:Q")
+            st.altair_chart(chart, use_container_width=True)
+
+
+def render_scenario_lab(result: BacktestResult) -> None:
+    scenarios = result.scenarios
+    if scenarios is None or scenarios.empty:
+        st.info("Enable scenario toggle and run backtest to view scenario comparisons.")
+        return
+    st.dataframe(scenarios, use_container_width=True, hide_index=True)
+    names = scenarios["scenario_name"].unique().tolist()
+    selected = st.multiselect("Select scenarios", names, default=names)
+    plot_df = scenarios[scenarios["scenario_name"].isin(selected)] if selected else scenarios
+    if alt is not None:
+        sharpe_chart = alt.Chart(plot_df).mark_bar().encode(x="scenario_name:N", y="sharpe:Q")
+        st.altair_chart(sharpe_chart, use_container_width=True)
+        ret_chart = alt.Chart(plot_df).mark_bar().encode(x="scenario_name:N", y="total_return_pct:Q")
+        st.altair_chart(ret_chart, use_container_width=True)
+
+
+def render_backtest_lab() -> None:
+    st.subheader("Backtest / Research Lab")
 
     @st.cache_data(show_spinner=False)
     def _load_data(glob_pattern: str):
         return load_csv_folder(glob_pattern)
 
-    data_glob = st.text_input("OHLCV glob", value="data/*_1m.csv")
+    @st.cache_data(show_spinner=False)
+    def _run_backtest_cached(cfg_dict: dict, data_glob: str, symbols: tuple[str, ...], scenarios: bool):
+        cfg_payload = cfg_dict.copy()
+        if cfg_payload.get("start_ts"):
+            cfg_payload["start_ts"] = pd.to_datetime(cfg_payload["start_ts"])
+        if cfg_payload.get("end_ts"):
+            cfg_payload["end_ts"] = pd.to_datetime(cfg_payload["end_ts"])
+        cfg = BacktestConfig(**cfg_payload)
+        data = _load_data(data_glob) if data_glob else {}
+        data = {k: v for k, v in data.items() if k in symbols}
+        bt = ResearchBacktester(data)
+        res = bt.run(cfg)
+        if scenarios:
+            res.scenarios = _run_default_scenarios(bt, cfg)
+        return res
+
+    timeframe = st.selectbox("Timeframe", ["1m", "5m", "1h", "4h", "1d"], index=0)
+    data_glob = st.text_input("OHLCV glob", value=f"data/*_{timeframe}.csv")
     data = _load_data(data_glob) if data_glob else {}
     if not data:
-        st.warning("No historical data found for the provided glob.")
+        st.info("Provide a valid data glob to run backtests.")
         return
-
     symbols = sorted(data.keys())
-    selected = st.multiselect("Symbol universe", symbols, default=symbols[: min(5, len(symbols))])
-    start_date = st.date_input("Start date", value=None)
-    end_date = st.date_input("End date", value=None)
+    st.markdown("### Shared Controls")
+    col_top = st.columns(2)
+    start_date = col_top[0].date_input("Start date")
+    end_date = col_top[1].date_input("End date")
+    selected_universe = st.multiselect("Symbol universe", symbols, default=symbols[: min(5, len(symbols))])
 
-    col_params = st.columns(3)
-    with col_params[0]:
-        min_score = st.slider("Score threshold", 0.0, 1.5, 0.2, 0.05)
-        min_prob = st.slider("Min probability", 0.0, 1.0, 0.55, 0.01)
-    with col_params[1]:
+    risk_cols = st.columns(3)
+    with risk_cols[0]:
+        risk_per_trade = st.number_input("Risk per trade (% equity)", value=1.0, min_value=0.0, max_value=10.0, step=0.25)
+        score_threshold = st.number_input("Score threshold", value=0.2, step=0.05)
+    with risk_cols[1]:
+        take_profit_strategy = st.selectbox("Take profit strategy", ["atr_trailing", TP1_TRAILING_ONLY_STRATEGY, "default"])
         fee_bps = st.number_input("Fee (bps)", value=10.0)
+    with risk_cols[2]:
         slippage_bps = st.number_input("Slippage (bps)", value=2.0)
-    with col_params[2]:
+        scenario_toggle = st.checkbox("Enable scenario runs", value=False)
+
+    overrides_col = st.columns(2)
+    with overrides_col[0]:
+        min_prob = st.slider("Min probability", 0.0, 1.0, 0.55, 0.01)
         atr_mult = st.number_input("ATR stop multiplier", value=1.5)
+    with overrides_col[1]:
         latency = st.number_input("Latency bars", value=0, min_value=0, step=1)
-
-    risk_params = st.columns(3)
-    with risk_params[0]:
         capital = st.number_input("Initial capital", value=10_000.0, step=1_000.0)
-    with risk_params[1]:
-        skip_fraction = st.slider("Skip fraction", 0.0, 0.5, 0.0, 0.05)
-    with risk_params[2]:
-        entry_delay = st.number_input("Entry delay bars", value=0, min_value=0, step=1)
 
-    run_button = st.button("Run backtest", use_container_width=True)
+    run_button = st.button("Run Backtest", use_container_width=True)
 
-    if not run_button:
+    if run_button:
+        start_ts = pd.Timestamp(start_date, tz="UTC") if start_date else None
+        end_ts = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1) if end_date else None
+        cfg = BacktestConfig(
+            start_ts=start_ts,
+            end_ts=end_ts,
+            min_score=score_threshold,
+            min_prob=min_prob,
+            atr_mult_sl=atr_mult,
+            fee_bps=fee_bps,
+            slippage_bps=slippage_bps,
+            latency_bars=int(latency),
+            initial_capital=capital,
+            risk_per_trade_pct=risk_per_trade,
+            take_profit_strategy=take_profit_strategy,
+        )
+        cfg_dict = cfg.__dict__.copy()
+        if cfg_dict.get("start_ts"):
+            cfg_dict["start_ts"] = cfg.start_ts.isoformat()
+        if cfg_dict.get("end_ts"):
+            cfg_dict["end_ts"] = cfg.end_ts.isoformat()
+        with st.spinner("Running backtest..."):
+            res = _run_backtest_cached(cfg_dict, data_glob, tuple(selected_universe), scenario_toggle)
+        st.session_state["backtest_result"] = res
+
+    result: BacktestResult | None = st.session_state.get("backtest_result")
+    if result is None:
+        st.info("Configure parameters and run a backtest to see research outputs.")
         return
 
-    sliced_data = {sym: df for sym, df in data.items() if sym in selected}
-    if start_date:
-        start_ts = pd.Timestamp(start_date, tz="UTC")
-        sliced_data = {k: v.loc[v.index >= start_ts] for k, v in sliced_data.items()}
-    else:
-        start_ts = None
-    if end_date:
-        end_ts = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
-        sliced_data = {k: v.loc[v.index <= end_ts] for k, v in sliced_data.items()}
-    else:
-        end_ts = None
-
-    cfg = BacktestConfig(
-        start_ts=start_ts,
-        end_ts=end_ts,
-        min_score=min_score,
-        min_prob=min_prob,
-        atr_mult_sl=atr_mult,
-        fee_bps=fee_bps,
-        slippage_bps=slippage_bps,
-        latency_bars=int(latency),
-        initial_capital=capital,
-        skip_fraction=skip_fraction,
-        entry_delay_bars=int(entry_delay),
+    tabs = st.tabs(
+        [
+            "Overview",
+            "Equity & Drawdown",
+            "Per-Symbol Breakdown",
+            "Trade Explorer",
+            "Distributions & R-Profile",
+            "Score & Regime Analysis",
+            "Scenario Lab",
+        ]
     )
-
-    with st.spinner("Running backtest..."):
-        bt = ResearchBacktester(sliced_data)
-        result = bt.run(cfg)
-
-    metrics = result.metrics
-    metric_cols = st.columns(5)
-    metric_cols[0].metric("Sharpe", f"{metrics.sharpe:.2f}")
-    metric_cols[1].metric("Sortino", f"{metrics.sortino:.2f}")
-    metric_cols[2].metric("Calmar", f"{metrics.calmar:.2f}")
-    metric_cols[3].metric("Win rate", f"{metrics.win_rate*100:.1f}%")
-    metric_cols[4].metric("Max DD", f"{metrics.max_drawdown*100:.2f}%")
-
-    st.line_chart(result.equity_curve)
-
-    per_symbol = aggregate_symbol_metrics(result.trades)
-    st.subheader("Per-symbol performance")
-    st.dataframe(per_symbol, use_container_width=True)
-
-    st.subheader("Trades")
-    st.dataframe(arrow_safe_dataframe(result.trades), use_container_width=True, hide_index=True)
-
-    st.subheader("Scenarios")
-    scenario_cols = st.columns(2)
-    with scenario_cols[0]:
-        st.caption("Fee & slippage stress")
-        fee_values = [cfg.fee_bps, cfg.fee_bps * 1.5, cfg.fee_bps * 2]
-        slippage_values = [cfg.slippage_bps, cfg.slippage_bps * 2]
-        scenario_df = run_fee_slippage_scenarios(bt, cfg, fee_values, slippage_values)
-        st.dataframe(scenario_df, use_container_width=True)
-    with scenario_cols[1]:
-        st.caption("Score/ATR sweep")
-        grid = {
-            "min_score": [cfg.min_score, cfg.min_score + 0.1],
-            "atr_mult_sl": [cfg.atr_mult_sl, cfg.atr_mult_sl + 0.5],
-        }
-        param_df = run_parameter_scenarios(bt, cfg, grid)
-        st.dataframe(param_df, use_container_width=True)
+    with tabs[0]:
+        render_backtest_overview(result)
+    with tabs[1]:
+        render_equity_drawdown(result)
+    with tabs[2]:
+        render_symbol_breakdown(result)
+    with tabs[3]:
+        render_trade_explorer(result)
+    with tabs[4]:
+        render_distributions(result)
+    with tabs[5]:
+        render_score_regime(result)
+    with tabs[6]:
+        render_scenario_lab(result)
 
 
 # Create tabs and render contents only when executed as a script
 if __name__ == "__main__":
-    tab_live, tab_backtest = st.tabs(["Dashboard", "Backtest"])
-    with tab_live:
+    mode = st.sidebar.radio("Mode", ["Live Monitor", "Backtest / Research"], index=0)
+    if mode == "Live Monitor":
         render_live_tab()
-    with tab_backtest:
-        render_backtest_tab()
+    else:
+        render_backtest_lab()
