@@ -12,11 +12,12 @@ from log_utils import setup_logger
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 from trade_utils import evaluate_signal as live_evaluate_signal
 
-from .metrics import (
-    BacktestMetrics,
-    equity_curve_from_trades,
-    equity_statistics,
-    trade_distribution_metrics,
+from .analysis import (
+    build_equity_curve,
+    per_symbol_breakdown,
+    score_bucket_metrics,
+    session_metrics,
+    summarise_backtest_metrics,
 )
 
 logger = setup_logger(__name__)
@@ -35,6 +36,7 @@ class BacktestConfig:
     latency_bars: int = 0
     max_concurrent: int = 1
     initial_capital: float = float(os.getenv("BACKTEST_INITIAL_CAPITAL", 10_000))
+    risk_per_trade_pct: float = 1.0
     take_profit_strategy: str = os.getenv("TAKE_PROFIT_STRATEGY", "atr_trailing")
     skip_fraction: float = 0.0
     entry_delay_bars: int = 0
@@ -45,8 +47,11 @@ class BacktestResult:
     config: BacktestConfig
     trades: pd.DataFrame
     equity_curve: pd.DataFrame
-    metrics: BacktestMetrics
-    raw: Dict[str, Any]
+    metrics: Dict[str, float]
+    by_symbol: pd.DataFrame
+    by_buckets: Dict[str, pd.DataFrame]
+    scenarios: Optional[pd.DataFrame] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
 
 
 class ResearchBacktester:
@@ -99,6 +104,7 @@ class ResearchBacktester:
         df["exit_time"] = pd.to_datetime(df["exit_time"])
         df["side"] = df.get("direction", "long")
         df["take_profit_strategy"] = cfg.take_profit_strategy
+        df["score_at_entry"] = df.get("score", df.get("signal", np.nan))
 
         base_sizes: List[float] = []
         quote_sizes: List[float] = []
@@ -141,6 +147,13 @@ class ResearchBacktester:
         df["pnl"] = df["net_return"] * cfg.initial_capital
         df["r_multiple"] = df["net_return"] / (cfg.atr_mult_sl / max(cfg.tp_rungs)) if cfg.tp_rungs else np.nan
         df["outcome_type"] = df.get("reason", df.get("exit_reason", "unknown"))
+        df["net_pnl_quote"] = df.get("net_pnl_quote", df.get("pnl", df["pnl"]))
+        df["gross_pnl_quote"] = df.get("gross_pnl_quote", df.get("pnl", df["pnl"]))
+        df["fees_quote"] = df.get("fees_quote", df.get("fees", fees_paid))
+        df["risk_amount_quote"] = df.get("risk_amount_quote", np.nan)
+        df["holding_time_minutes"] = (
+            (df["exit_time"] - df["entry_time"]).dt.total_seconds() / 60.0
+        )
         return df
 
     def run(self, cfg: BacktestConfig) -> BacktestResult:
@@ -163,29 +176,19 @@ class ResearchBacktester:
         raw_result = legacy_bt.run(params)
         trades_df = raw_result.get("trades_df") or pd.DataFrame(raw_result.get("trades", []))
         if trades_df.empty:
-            empty_equity = pd.DataFrame(
-                {"equity": [cfg.initial_capital]}, index=[cfg.start_ts or pd.Timestamp.utcnow()]
-            )
-            metrics = BacktestMetrics.empty()
-            return BacktestResult(cfg, trades_df, empty_equity, metrics, raw_result)
+            empty_equity = build_equity_curve(trades_df, cfg.initial_capital)
+            metrics = summarise_backtest_metrics(empty_equity, trades_df, cfg.initial_capital)
+            return BacktestResult(cfg, trades_df, empty_equity, metrics, pd.DataFrame(), {}, None, raw_result)
 
         enriched = self._enrich_trades(trades_df, cfg)
-        equity_curve = equity_curve_from_trades(enriched, cfg.initial_capital)
-        stats = equity_statistics(equity_curve["equity"], risk_free_rate=0.0)
-        trade_stats = trade_distribution_metrics(enriched)
-        metrics = BacktestMetrics(
-            sharpe=stats["sharpe"],
-            sortino=stats["sortino"],
-            calmar=stats["calmar"],
-            max_drawdown=stats["max_drawdown"],
-            total_return=stats["total_return"],
-            win_rate=trade_stats["win_rate"],
-            profit_factor=trade_stats["profit_factor"],
-            expectancy=trade_stats["expectancy"],
-            avg_holding_time=trade_stats["avg_holding_time"],
-            num_trades=int(len(enriched)),
-        )
-        return BacktestResult(cfg, enriched, equity_curve, metrics, raw_result)
+        equity_curve = build_equity_curve(enriched, cfg.initial_capital)
+        metrics = summarise_backtest_metrics(equity_curve, enriched, cfg.initial_capital)
+        by_symbol = per_symbol_breakdown(enriched)
+        by_buckets = {
+            "score_bucket": score_bucket_metrics(enriched),
+            "session": session_metrics(enriched),
+        }
+        return BacktestResult(cfg, enriched, equity_curve, metrics, by_symbol, by_buckets, None, raw_result)
 
 
 def evaluate_and_score(df_slice: pd.DataFrame, symbol: str) -> Dict[str, Any]:
