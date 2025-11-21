@@ -143,7 +143,9 @@ class ResearchBacktester:
         df["mfe"] = mfe_list
 
         gross_returns = df["return"].astype(float)
-        df["net_return"] = gross_returns - (cfg.fee_bps / 10_000.0 * 2)
+        # The legacy backtester already deducts entry/exit fees from `return`, so
+        # treat it as net to avoid double-charging costs here.
+        df["net_return"] = gross_returns
         df["pnl"] = df["net_return"] * cfg.initial_capital
         df["r_multiple"] = df["net_return"] / (cfg.atr_mult_sl / max(cfg.tp_rungs)) if cfg.tp_rungs else np.nan
         df["outcome_type"] = df.get("reason", df.get("exit_reason", "unknown"))

@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from backtest.engine import BacktestConfig, ResearchBacktester
 from backtest.metrics import equity_statistics, trade_distribution_metrics
@@ -32,6 +33,24 @@ def test_research_backtester_generates_trades():
     result = bt.run(cfg)
     assert not result.trades.empty
     assert result.metrics.num_trades == len(result.trades)
+
+
+def test_research_backtester_preserves_legacy_net_returns():
+    bt = ResearchBacktester({}, evaluate_signal=_dummy_signal)
+    cfg = BacktestConfig(fee_bps=25, initial_capital=1_000.0)
+    trades = pd.DataFrame(
+        {
+            "entry_time": [pd.Timestamp("2024-01-01", tz="UTC")],
+            "exit_time": [pd.Timestamp("2024-01-02", tz="UTC")],
+            "return": [0.05],
+            "entry_price": [100.0],
+            "position_multiplier": [0.5],
+        }
+    )
+
+    enriched = bt._enrich_trades(trades, cfg)
+
+    assert enriched["net_return"].iat[0] == pytest.approx(trades["return"].iat[0])
 
 
 def test_metrics_helpers():
