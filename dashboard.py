@@ -31,7 +31,16 @@ from datetime import datetime, timezone
 from log_utils import setup_logger, LOG_FILE
 from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
-from backtest import compute_buy_and_hold_pnl, generate_trades_from_ohlcv
+from backtest import (
+    BacktestConfig,
+    ResearchBacktester,
+    aggregate_symbol_metrics,
+    compute_buy_and_hold_pnl,
+    generate_trades_from_ohlcv,
+    run_fee_slippage_scenarios,
+    run_parameter_scenarios,
+)
+from backtest.data import load_csv_folder
 from ml_model import train_model
 import requests
 from daily_summary import generate_daily_summary
@@ -2258,105 +2267,112 @@ def render_live_tab() -> None:
             "text/csv",
         )
 def render_backtest_tab() -> None:
-    """Upload a CSV and visualise backtest or price-based results."""
-    st.subheader("Backtest Trade Log")
-    uploaded = st.file_uploader("Upload trade log or price CSV", type="csv")
-    if uploaded:
-        df = pd.read_csv(uploaded, encoding="utf-8")
-        cols = {c.lower(): c for c in df.columns}
+    """Interactive research backtesting surface."""
 
-        # If neither 'pnl' nor 'close' columns are found, attempt to
-        # interpret the file as a headerless Binance OHLCV export.  Such
-        # files contain twelve columns in a fixed order but no header row.
-        if "pnl" not in cols and "close" not in cols:
-            uploaded.seek(0)
-            binance_cols = [
-                "open_time",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "close_time",
-                "quote_asset_volume",
-                "number_of_trades",
-                "taker_buy_base_asset_volume",
-                "taker_buy_quote_asset_volume",
-                "ignore",
-            ]
-            df = pd.read_csv(uploaded, names=binance_cols)
-            cols = {c.lower(): c for c in df.columns}
+    st.subheader("Research Backtester")
 
-        if "pnl" in cols:
-            pnl_col = cols["pnl"]
-            if "equity" not in cols:
-                df["equity"] = (1 + df[pnl_col].astype(float)).cumprod()
-            equity_col = "equity"
-        elif "close" in cols:
-            # Assume Binance OHLCV download; compute simple buy-and-hold PnL
-            df = df.rename(columns={cols["close"]: "close"})
-            df = compute_buy_and_hold_pnl(df)
-            pnl_col = "pnl"
-            equity_col = "equity"
-            st.info("PnL computed from close prices using buy-and-hold assumption")
-        else:
-            st.error("CSV must contain either a 'pnl' or 'close' column")
-            return
-        st.line_chart(df[equity_col], use_container_width=True)
-        st.bar_chart(df[pnl_col], use_container_width=True)
-        # Display distribution of returns as a histogram
-        hist, bins = np.histogram(df[pnl_col].astype(float), bins=20)
-        hist_df = pd.DataFrame({"Return": bins[:-1], "Count": hist})
-        st.bar_chart(hist_df.set_index("Return"), use_container_width=True)
-        st.dataframe(arrow_safe_dataframe(df), use_container_width=True)
+    @st.cache_data(show_spinner=False)
+    def _load_data(glob_pattern: str):
+        return load_csv_folder(glob_pattern)
 
-        # If OHLCV columns are present, generate synthetic trade labels and
-        # train the ML model automatically.
-        required_cols = {"open", "high", "low", "close"}
-        if required_cols.issubset(cols):
-            df_bt = df.rename(
-                columns={
-                    cols["open"]: "open",
-                    cols["high"]: "high",
-                    cols["low"]: "low",
-                    cols["close"]: "close",
-                }
-            )
-            if "open_time" in cols:
-                df_bt["open_time"] = pd.to_datetime(
-                    df[cols["open_time"]], unit="ms", errors="coerce"
-                )
-                df_bt = df_bt.set_index("open_time")
-            symbol = df_bt["symbol"].iloc[0] if "symbol" in df_bt.columns else "UNKNOWN"
-            trades = generate_trades_from_ohlcv(df_bt, symbol=str(symbol))
-            for t in trades:
-                trade_info = {
-                    "symbol": t["symbol"],
-                    "direction": "long",
-                    "entry": t["entry"],
-                    "entry_time": t["entry_time"].strftime("%Y-%m-%d %H:%M:%S"),
-                    "size": 1.0,
-                    "strategy": "upload_backtest",
-                    "session": "unknown",
-                    "log_destination": "backtest",
-                    "is_backtest": True,
-                }
-                log_trade_result(
-                    trade_info,
-                    t["outcome"],
-                    t["exit"],
-                    log_file=BACKTEST_TRADE_HISTORY_FILE,
-                    exit_time=t["exit_time"].strftime("%Y-%m-%d %H:%M:%S"),
-                )
-            st.success(
-                f"Backtest generated {len(trades)} trades; results saved to {BACKTEST_TRADE_HISTORY_FILE}"
-            )
-            train_model()
-            st.info("Model training complete. Check logs for details.")
-        else:
-            st.warning(
-                "CSV missing OHLCV columns; skipping trade generation and training."
-            )
+    data_glob = st.text_input("OHLCV glob", value="data/*_1m.csv")
+    data = _load_data(data_glob) if data_glob else {}
+    if not data:
+        st.warning("No historical data found for the provided glob.")
+        return
+
+    symbols = sorted(data.keys())
+    selected = st.multiselect("Symbol universe", symbols, default=symbols[: min(5, len(symbols))])
+    start_date = st.date_input("Start date", value=None)
+    end_date = st.date_input("End date", value=None)
+
+    col_params = st.columns(3)
+    with col_params[0]:
+        min_score = st.slider("Score threshold", 0.0, 1.5, 0.2, 0.05)
+        min_prob = st.slider("Min probability", 0.0, 1.0, 0.55, 0.01)
+    with col_params[1]:
+        fee_bps = st.number_input("Fee (bps)", value=10.0)
+        slippage_bps = st.number_input("Slippage (bps)", value=2.0)
+    with col_params[2]:
+        atr_mult = st.number_input("ATR stop multiplier", value=1.5)
+        latency = st.number_input("Latency bars", value=0, min_value=0, step=1)
+
+    risk_params = st.columns(3)
+    with risk_params[0]:
+        capital = st.number_input("Initial capital", value=10_000.0, step=1_000.0)
+    with risk_params[1]:
+        skip_fraction = st.slider("Skip fraction", 0.0, 0.5, 0.0, 0.05)
+    with risk_params[2]:
+        entry_delay = st.number_input("Entry delay bars", value=0, min_value=0, step=1)
+
+    run_button = st.button("Run backtest", use_container_width=True)
+
+    if not run_button:
+        return
+
+    sliced_data = {sym: df for sym, df in data.items() if sym in selected}
+    if start_date:
+        start_ts = pd.Timestamp(start_date, tz="UTC")
+        sliced_data = {k: v.loc[v.index >= start_ts] for k, v in sliced_data.items()}
+    else:
+        start_ts = None
+    if end_date:
+        end_ts = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
+        sliced_data = {k: v.loc[v.index <= end_ts] for k, v in sliced_data.items()}
+    else:
+        end_ts = None
+
+    cfg = BacktestConfig(
+        start_ts=start_ts,
+        end_ts=end_ts,
+        min_score=min_score,
+        min_prob=min_prob,
+        atr_mult_sl=atr_mult,
+        fee_bps=fee_bps,
+        slippage_bps=slippage_bps,
+        latency_bars=int(latency),
+        initial_capital=capital,
+        skip_fraction=skip_fraction,
+        entry_delay_bars=int(entry_delay),
+    )
+
+    with st.spinner("Running backtest..."):
+        bt = ResearchBacktester(sliced_data)
+        result = bt.run(cfg)
+
+    metrics = result.metrics
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Sharpe", f"{metrics.sharpe:.2f}")
+    metric_cols[1].metric("Sortino", f"{metrics.sortino:.2f}")
+    metric_cols[2].metric("Calmar", f"{metrics.calmar:.2f}")
+    metric_cols[3].metric("Win rate", f"{metrics.win_rate*100:.1f}%")
+    metric_cols[4].metric("Max DD", f"{metrics.max_drawdown*100:.2f}%")
+
+    st.line_chart(result.equity_curve)
+
+    per_symbol = aggregate_symbol_metrics(result.trades)
+    st.subheader("Per-symbol performance")
+    st.dataframe(per_symbol, use_container_width=True)
+
+    st.subheader("Trades")
+    st.dataframe(arrow_safe_dataframe(result.trades), use_container_width=True, hide_index=True)
+
+    st.subheader("Scenarios")
+    scenario_cols = st.columns(2)
+    with scenario_cols[0]:
+        st.caption("Fee & slippage stress")
+        fee_values = [cfg.fee_bps, cfg.fee_bps * 1.5, cfg.fee_bps * 2]
+        slippage_values = [cfg.slippage_bps, cfg.slippage_bps * 2]
+        scenario_df = run_fee_slippage_scenarios(bt, cfg, fee_values, slippage_values)
+        st.dataframe(scenario_df, use_container_width=True)
+    with scenario_cols[1]:
+        st.caption("Score/ATR sweep")
+        grid = {
+            "min_score": [cfg.min_score, cfg.min_score + 0.1],
+            "atr_mult_sl": [cfg.atr_mult_sl, cfg.atr_mult_sl + 0.5],
+        }
+        param_df = run_parameter_scenarios(bt, cfg, grid)
+        st.dataframe(param_df, use_container_width=True)
 
 
 # Create tabs and render contents only when executed as a script
