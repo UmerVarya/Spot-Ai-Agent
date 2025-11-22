@@ -61,6 +61,8 @@ SIGNAL_LOG_FILE = os.getenv(
 
 logger = setup_logger(__name__)
 
+_MISSING_TREND_WARNINGS: set[str] = set()
+
 STABLECOIN_BASES: set[str] = {
     "USDT",
     "USDC",
@@ -2443,12 +2445,60 @@ def evaluate_signal(
                 return "bullish"
             return "neutral"
 
+        def _coerce_trend_state(value: Any) -> Optional[str]:
+            if isinstance(value, str):
+                text = value.strip().lower()
+                if text:
+                    return text
+            return None
+
+        trend_state_cache: Dict[str, str] = {}
+        trend_state_attr_map: Dict[str, str] = {}
+        _trend_state_attrs = price_data.attrs.get("trend_states")
+        if isinstance(_trend_state_attrs, Mapping):
+            for key, value in _trend_state_attrs.items():
+                if isinstance(key, str):
+                    coerced = _coerce_trend_state(value)
+                    if coerced:
+                        trend_state_attr_map[key.lower()] = coerced
+
+        def _get_trend_state(timeframe: str, *, slope: Any = None, strong_threshold: float = 0.001) -> str:
+            key = timeframe.lower()
+            cached = trend_state_cache.get(key)
+            if cached:
+                return cached
+
+            state = trend_state_attr_map.get(key)
+            if state is None:
+                attr_key = f"trend_{key}_state"
+                state = _coerce_trend_state(price_data.attrs.get(attr_key))
+
+            if state is None and slope is not None:
+                state = _trend_state(slope, strong_threshold=strong_threshold)
+
+            if state is None:
+                warn_key = f"{symbol_upper}:{key}"
+                if warn_key not in _MISSING_TREND_WARNINGS:
+                    logger.warning(
+                        "Missing %s trend state for %s; defaulting to neutral",
+                        timeframe,
+                        symbol_upper,
+                    )
+                    _MISSING_TREND_WARNINGS.add(warn_key)
+                state = "neutral"
+
+            trend_state_cache[key] = state
+            return state
+
         profile_name: Optional[str] = None
         profile_min_score_required: Optional[float] = None
         profile_session_multiplier: Optional[float] = None
         atr_profile_min: Optional[float] = None
         atr_profile_penalty = 0.0
         score_after_profile = normalized_score
+
+        trend_1h_state = _get_trend_state("1h", slope=ema_trend_1h)
+        trend_4h_state = _get_trend_state("4h", slope=ema_trend_4h, strong_threshold=0.0007)
         atr_ratio_attr = price_data.attrs.get("atr_15m_ratio")
         try:
             atr_ratio_15m_value = float(atr_ratio_attr)
@@ -2471,7 +2521,7 @@ def evaluate_signal(
                 final_score -= 0.5
                 atr_profile_penalty = 0.5
 
-            trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
+            trend_4h_state = _get_trend_state("4h", slope=ema_trend_4h, strong_threshold=0.0007)
             if trend_1h_state not in ("bullish", "neutral"):
                 return 0, None, 0, None
             if trend_4h_state == "strong_bearish":
@@ -2526,7 +2576,7 @@ def evaluate_signal(
                 final_score -= 0.3
                 atr_profile_penalty = 0.3
 
-            trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
+            trend_4h_state = _get_trend_state("4h", slope=ema_trend_4h, strong_threshold=0.0007)
 
             if trend_4h_state == "strong_bearish":
                 return 0, None, 0, None
@@ -2600,7 +2650,7 @@ def evaluate_signal(
                 final_score -= 0.3
                 atr_profile_penalty = 0.3
 
-            trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
+            trend_4h_state = _get_trend_state("4h", slope=ema_trend_4h, strong_threshold=0.0007)
 
             news_raw = price_data.attrs.get("news_severity", 0)
             try:
@@ -2645,7 +2695,7 @@ def evaluate_signal(
                 final_score -= 0.2
                 atr_profile_penalty = 0.2
 
-            trend_4h_state = _trend_state(ema_trend_4h, strong_threshold=0.0007)
+            trend_4h_state = _get_trend_state("4h", slope=ema_trend_4h, strong_threshold=0.0007)
 
             news_raw = price_data.attrs.get("news_severity", 0)
             try:

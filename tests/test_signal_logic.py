@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 from brain import should_trade
@@ -16,6 +17,27 @@ def test_evaluate_signal_missing_columns():
     assert direction is None
     assert size == 0
     assert pattern is None
+
+
+def test_evaluate_signal_handles_missing_trend_state():
+    index = pd.date_range(end=pd.Timestamp.utcnow(), periods=120, freq="T")
+    prices = pd.Series(np.linspace(100, 110, 120), index=index)
+    df = pd.DataFrame(
+        {
+            "open": prices * 0.999,
+            "high": prices * 1.001,
+            "low": prices * 0.999,
+            "close": prices,
+            "volume": np.linspace(10, 20, 120),
+        },
+        index=index,
+    )
+
+    score, direction, size, pattern = evaluate_signal(df, symbol="BTCUSDT")
+
+    assert isinstance(score, (int, float))
+    assert size is not None
+    assert pattern is None or isinstance(pattern, str)
 
 
 def test_should_trade_reject_non_long():
