@@ -59,3 +59,39 @@ def test_ensure_ohlcv_creates_and_appends(monkeypatch, tmp_path: Path) -> None:
     assert len(df_updated) == 5  # two additional rows appended
     assert df_updated["timestamp"].is_unique
     assert client.calls[-1][2] > client.calls[0][2]  # tail fetch should start after initial window
+
+
+def test_fetches_missing_leading_candle(monkeypatch, tmp_path: Path) -> None:
+    client = DummyBinanceClient()
+    monkeypatch.setattr("backtest.data_manager._get_binance_client", lambda: client)
+
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    interval = "1m"
+
+    existing_start = start + timedelta(minutes=1)
+    existing_df = pd.DataFrame(
+        {
+            "timestamp": [existing_start, existing_start + timedelta(minutes=1)],
+            "open": [1.0, 1.0],
+            "high": [2.0, 2.0],
+            "low": [0.5, 0.5],
+            "close": [1.5, 1.5],
+            "volume": [100, 100],
+            "quote_volume": [200, 200],
+        }
+    )
+    csv_path = tmp_path / "BTCUSDT_1m.csv"
+    existing_df.to_csv(csv_path, index=False)
+
+    end = existing_start + timedelta(minutes=1)
+    csv_paths = ensure_ohlcv_csvs(["BTCUSDT"], interval, start, end, data_dir=tmp_path)
+
+    assert csv_paths and csv_paths[0].exists()
+    df = pd.read_csv(csv_paths[0])
+    timestamps = pd.to_datetime(df["timestamp"], utc=True)
+    assert len(df) == 3
+    assert timestamps.min() == start
+    assert timestamps.max() == end
+    assert len(client.calls) == 1
+    assert client.calls[0][2] == int(start.timestamp() * 1000)
+    assert client.calls[0][3] == int(start.timestamp() * 1000)
