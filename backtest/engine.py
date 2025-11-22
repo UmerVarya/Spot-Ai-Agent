@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -8,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from backtest.legacy import Backtester
+from backtest.data import load_csv_paths
 from log_utils import setup_logger
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 from trade_utils import evaluate_signal as live_evaluate_signal
@@ -205,3 +207,23 @@ def evaluate_and_score(df_slice: pd.DataFrame, symbol: str) -> Dict[str, Any]:
         "confidence": float(confidence or 0.0),
         "metadata": metadata,
     }
+
+
+def run_backtest_from_csv_paths(
+    csv_paths: list[Path],
+    cfg: BacktestConfig,
+    symbols: Optional[Iterable[str]] = None,
+    scenario_runner: Optional[Callable[[ResearchBacktester, BacktestConfig], pd.DataFrame]] = None,
+) -> BacktestResult:
+    """Run a backtest using explicitly provided CSV files."""
+
+    data = load_csv_paths(csv_paths)
+    if symbols:
+        symbols_upper = {sym.upper() for sym in symbols}
+        data = {k: v for k, v in data.items() if k.upper() in symbols_upper}
+
+    bt = ResearchBacktester(data)
+    result = bt.run(cfg)
+    if scenario_runner:
+        result.scenarios = scenario_runner(bt, cfg)
+    return result
