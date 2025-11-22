@@ -137,7 +137,7 @@ def ensure_ohlcv_csvs(
         else:
             if existing_start > start and interval_delta is not None:
                 head_end = existing_start - interval_delta
-                if head_end > start:
+                if head_end >= start:
                     downloads.append(_fetch_klines(symbol, interval, start, head_end))
             if existing_end < end:
                 tail_start = existing_end + (interval_delta or pd.Timedelta(seconds=1))
