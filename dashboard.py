@@ -27,12 +27,24 @@ import csv
 import os
 import re
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from log_utils import setup_logger, LOG_FILE
 from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
-from backtest import BacktestConfig, BacktestResult, ResearchBacktester, compute_buy_and_hold_pnl, generate_trades_from_ohlcv
-from backtest.data import load_csv_folder
+from backtest import (
+    BacktestConfig,
+    BacktestResult,
+    ResearchBacktester,
+    compute_buy_and_hold_pnl,
+    generate_trades_from_ohlcv,
+    run_backtest_from_csv_paths,
+)
+from backtest.data_manager import ensure_ohlcv_csvs
+from ml_model import train_model
+import requests
+from daily_summary import generate_daily_summary
+from news_risk import load_news_status, format_news_status_line
+from trade_utils import get_top_symbols
 from ml_model import train_model
 import requests
 from daily_summary import generate_daily_summary
@@ -2489,37 +2501,40 @@ def render_backtest_lab() -> None:
     st.subheader("Backtest / Research Lab")
 
     @st.cache_data(show_spinner=False)
-    def _load_data(glob_pattern: str):
-        return load_csv_folder(glob_pattern)
-
-    @st.cache_data(show_spinner=False)
-    def _run_backtest_cached(cfg_dict: dict, data_glob: str, symbols: tuple[str, ...], scenarios: bool):
+    def _run_backtest_cached(cfg_dict: dict, csv_paths: tuple[str, ...], symbols: tuple[str, ...], scenarios: bool):
         cfg_payload = cfg_dict.copy()
         if cfg_payload.get("start_ts"):
             cfg_payload["start_ts"] = pd.to_datetime(cfg_payload["start_ts"])
         if cfg_payload.get("end_ts"):
             cfg_payload["end_ts"] = pd.to_datetime(cfg_payload["end_ts"])
         cfg = BacktestConfig(**cfg_payload)
-        data = _load_data(data_glob) if data_glob else {}
-        data = {k: v for k, v in data.items() if k in symbols}
-        bt = ResearchBacktester(data)
-        res = bt.run(cfg)
-        if scenarios:
-            res.scenarios = _run_default_scenarios(bt, cfg)
-        return res
+        filtered_paths = [Path(p) for p in csv_paths]
+        scenario_runner = _run_default_scenarios if scenarios else None
+        return run_backtest_from_csv_paths(
+            filtered_paths,
+            cfg,
+            symbols=symbols,
+            scenario_runner=scenario_runner,
+        )
 
     timeframe = st.selectbox("Timeframe", ["1m", "5m", "1h", "4h", "1d"], index=0)
-    data_glob = st.text_input("OHLCV glob", value=f"data/*_{timeframe}.csv")
-    data = _load_data(data_glob) if data_glob else {}
-    if not data:
-        st.info("Provide a valid data glob to run backtests.")
-        return
-    symbols = sorted(data.keys())
+
+    today = datetime.now(timezone.utc).date()
+    default_start = today - timedelta(days=30)
     st.markdown("### Shared Controls")
     col_top = st.columns(2)
-    start_date = col_top[0].date_input("Start date")
-    end_date = col_top[1].date_input("End date")
-    selected_universe = st.multiselect("Symbol universe", symbols, default=symbols[: min(5, len(symbols))])
+    start_date = col_top[0].date_input("Start date", value=default_start)
+    end_date = col_top[1].date_input("End date", value=today)
+
+    default_universe = get_top_symbols(limit=10) or ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
+    selected_universe = st.multiselect(
+        "Symbol universe",
+        default_universe,
+        default=default_universe[: min(5, len(default_universe))],
+    )
+
+    st.caption("Historical data will be downloaded automatically for the selected symbols and timeframe.")
+    st.text_input("OHLCV glob (auto)", value=f"data/*_{timeframe}.csv", disabled=True)
 
     risk_cols = st.columns(3)
     with risk_cols[0]:
@@ -2543,8 +2558,15 @@ def render_backtest_lab() -> None:
     run_button = st.button("Run Backtest", use_container_width=True)
 
     if run_button:
-        start_ts = pd.Timestamp(start_date, tz="UTC") if start_date else None
-        end_ts = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1) if end_date else None
+        if not selected_universe:
+            st.warning("Select at least one symbol to run a backtest.")
+            return
+        if not start_date or not end_date or start_date > end_date:
+            st.error("Please provide a valid start and end date.")
+            return
+
+        start_ts = pd.Timestamp(datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc))
+        end_ts = pd.Timestamp(datetime.combine(end_date, datetime.min.time(), tzinfo=timezone.utc)) + pd.Timedelta(days=1)
         cfg = BacktestConfig(
             start_ts=start_ts,
             end_ts=end_ts,
@@ -2563,8 +2585,17 @@ def render_backtest_lab() -> None:
             cfg_dict["start_ts"] = cfg.start_ts.isoformat()
         if cfg_dict.get("end_ts"):
             cfg_dict["end_ts"] = cfg.end_ts.isoformat()
+
+        try:
+            csv_paths = ensure_ohlcv_csvs(selected_universe, timeframe, start_ts.to_pydatetime(), end_ts.to_pydatetime())
+        except Exception as exc:  # pragma: no cover - network dependent
+            logger.exception("Failed to prepare OHLCV data for backtest", exc_info=exc)
+            st.error(f"Failed to prepare OHLCV data: {exc}")
+            return
+
+        csv_paths = tuple(str(p) for p in sorted(csv_paths))
         with st.spinner("Running backtest..."):
-            res = _run_backtest_cached(cfg_dict, data_glob, tuple(selected_universe), scenario_toggle)
+            res = _run_backtest_cached(cfg_dict, csv_paths, tuple(selected_universe), scenario_toggle)
         st.session_state["backtest_result"] = res
 
     result: BacktestResult | None = st.session_state.get("backtest_result")

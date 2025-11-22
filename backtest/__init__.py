@@ -12,7 +12,7 @@ from .legacy import (
     compute_buy_and_hold_pnl,
     generate_trades_from_ohlcv,
 )
-from .engine import ResearchBacktester, BacktestConfig, BacktestResult
+from .engine import ResearchBacktester, BacktestConfig, BacktestResult, run_backtest_from_csv_paths
 from .metrics import (
     BacktestMetrics,
     aggregate_symbol_metrics,
@@ -30,6 +30,7 @@ __all__ = [
     "ResearchBacktester",
     "BacktestConfig",
     "BacktestResult",
+    "run_backtest_from_csv_paths",
     "BacktestMetrics",
     "aggregate_symbol_metrics",
     "equity_curve_from_trades",
