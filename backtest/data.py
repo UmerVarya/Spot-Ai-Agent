@@ -16,8 +16,9 @@ def _cache_key(
     symbol_col_from_name: bool,
 ) -> Tuple:
     normalized_paths = tuple(
-        (str(Path(p).resolve()), Path(p).stat().st_mtime_ns)
-        for p in paths
+        (str(path.resolve()), path.stat().st_mtime_ns)
+        for path in (Path(p) for p in paths)
+        if path.is_file()
     )
     start_key = pd.to_datetime(start, utc=True).isoformat() if start is not None else None
     end_key = pd.to_datetime(end, utc=True).isoformat() if end is not None else None
