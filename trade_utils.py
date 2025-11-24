@@ -2053,14 +2053,14 @@ def evaluate_signal(
             except Exception:
                 hourly_bar_age_min = None
             if now - last_hour > max_age:
-            if not is_backtest:
-                logger.warning(
-                    "Skipping %s: latest 1H bar (%s) is stale (age=%s).",
-                    symbol,
-                    last_hour,
-                    now - last_hour,
-                )
-            return 0, None, 0, None
+                if not is_backtest:
+                    logger.warning(
+                        "Skipping %s: latest 1H bar (%s) is stale (age=%s).",
+                        symbol,
+                        last_hour,
+                        now - last_hour,
+                    )
+                return 0, None, 0, None
 
         close = price_data['close']
         high = price_data['high']
