@@ -161,3 +161,11 @@ def test_load_csv_paths_reuses_cache(monkeypatch, tmp_path: Path) -> None:
     data_loader.invalidate_cache_for_paths([csv_path])
     data_loader.load_csv_paths([csv_path], start=start, end=end)
     assert read_count["count"] == 2
+
+
+def test_load_csv_paths_skips_missing_files(tmp_path: Path) -> None:
+    missing_path = tmp_path / "DOES_NOT_EXIST.csv"
+
+    result = data_loader.load_csv_paths([missing_path], use_cache=True)
+
+    assert result == {}
