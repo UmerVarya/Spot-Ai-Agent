@@ -388,7 +388,7 @@ def is_stable_symbol(symbol: str) -> bool:
     return False
 
 
-def filter_stable_symbols(symbols: Iterable[str]) -> list[str]:
+def filter_stable_symbols(symbols: Iterable[str], *, is_backtest: bool = False) -> list[str]:
     """Return a list of symbols excluding those identified as stablecoin pairs."""
 
     filtered: list[str] = []
@@ -405,7 +405,7 @@ def filter_stable_symbols(symbols: Iterable[str]) -> list[str]:
             continue
         filtered.append(token)
 
-    if removed:
+    if removed and not is_backtest:
         removed_count = len(removed)
         logger.info(
             "Filtered out %d stablecoin symbols: %s",
@@ -421,6 +421,8 @@ def passes_volume_gate(
     avg20_quote_vol: float,
     session_weight: float,
     context: Optional[Dict[str, Any]] = None,
+    *,
+    is_backtest: bool = False,
 ) -> bool:
     """Return True if the symbol satisfies dynamic + profile-specific volume guards."""
 
@@ -482,7 +484,8 @@ def passes_volume_gate(
             or vol_expansion < profile.vol_expansion_min
         ):
             tag = symbol_token.replace("USDT", "")
-            logger.info(
+            log_fn = logger.debug if is_backtest else logger.info
+            log_fn(
                 f"[{tag} VOL GATE] Skipping {symbol_token}: "
                 f"last={last_volume:.0f}, avg20={avg_volume:.0f}, "
                 f"expansion={vol_expansion:.2f}, floor={profile.min_quote_volume_1m:.0f}"
@@ -497,7 +500,8 @@ def passes_volume_gate(
         effective_floor = dynamic_threshold
 
     if last_volume < effective_floor:
-        logger.info(
+        log_fn = logger.debug if is_backtest else logger.info
+        log_fn(
             f"[VOL GATE] Skipping {symbol_token}: "
             f"last={last_volume:.0f} < floor={effective_floor:.0f}"
         )
@@ -1788,57 +1792,64 @@ def estimate_commission(symbol: str, quantity: float = 1.0, maker: bool = False)
     """Estimate the commission fee rate for a given trade."""
     return 0.0004 if maker else 0.001
 
+_BASE_INDICATOR_PARAMS: dict[str, int | float] = {
+    "ema_short": 20,
+    "ema_long": 50,
+    "dema_short": 20,
+    "dema_long": 50,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "stoch_window": 14,
+    "stoch_smooth": 3,
+    "cci_window": 20,
+    "bb_window": 20,
+    "bb_dev": 2,
+    "vwma_window": 20,
+}
+
+_LOW_INDICATOR_PARAMS: dict[str, int | float] = {
+    "ema_short": 26,
+    "ema_long": 65,
+    "dema_short": 26,
+    "dema_long": 65,
+    "macd_fast": 10,
+    "macd_slow": 30,
+    "macd_signal": 9,
+    "stoch_window": 21,
+    "stoch_smooth": 3,
+    "cci_window": 30,
+    "bb_window": 24,
+    "vwma_window": 30,
+}
+
+_HIGH_INDICATOR_PARAMS: dict[str, int | float] = {
+    "ema_short": 8,
+    "ema_long": 21,
+    "dema_short": 8,
+    "dema_long": 21,
+    "macd_fast": 5,
+    "macd_slow": 13,
+    "macd_signal": 8,
+    "stoch_window": 5,
+    "stoch_smooth": 3,
+    "cci_window": 14,
+    "bb_window": 14,
+    "vwma_window": 14,
+}
+
+
 def _select_indicator_params(vol_percentile: float | None) -> tuple[str, dict[str, int | float]]:
     """Return tuned indicator parameters for the current volatility regime."""
 
-    base_params: dict[str, int | float] = {
-        "ema_short": 20,
-        "ema_long": 50,
-        "dema_short": 20,
-        "dema_long": 50,
-        "macd_fast": 12,
-        "macd_slow": 26,
-        "macd_signal": 9,
-        "stoch_window": 14,
-        "stoch_smooth": 3,
-        "cci_window": 20,
-        "bb_window": 20,
-        "bb_dev": 2,
-        "vwma_window": 20,
-    }
+    base_params: dict[str, int | float] = dict(_BASE_INDICATOR_PARAMS)
 
     if vol_percentile is None or np.isnan(vol_percentile):
         return "mid", base_params
 
-    low_params = {
-        "ema_short": 26,
-        "ema_long": 65,
-        "dema_short": 26,
-        "dema_long": 65,
-        "macd_fast": 10,
-        "macd_slow": 30,
-        "macd_signal": 9,
-        "stoch_window": 21,
-        "stoch_smooth": 3,
-        "cci_window": 30,
-        "bb_window": 24,
-        "vwma_window": 30,
-    }
+    low_params = dict(_LOW_INDICATOR_PARAMS)
 
-    high_params = {
-        "ema_short": 8,
-        "ema_long": 21,
-        "dema_short": 8,
-        "dema_long": 21,
-        "macd_fast": 5,
-        "macd_slow": 13,
-        "macd_signal": 8,
-        "stoch_window": 5,
-        "stoch_smooth": 3,
-        "cci_window": 14,
-        "bb_window": 14,
-        "vwma_window": 14,
-    }
+    high_params = dict(_HIGH_INDICATOR_PARAMS)
 
     if vol_percentile > 0.75:
         params = base_params.copy()
@@ -1852,6 +1863,85 @@ def _select_indicator_params(vol_percentile: float | None) -> tuple[str, dict[st
     return "mid", base_params
 
 
+def precompute_backtest_indicators(df: pd.DataFrame) -> None:
+    """Compute common indicators once for reuse during backtests."""
+
+    required = {"open", "high", "low", "close", "volume"}
+    if df is None or df.empty or not required.issubset(df.columns):
+        return
+
+    regimes = {
+        "low": _LOW_INDICATOR_PARAMS,
+        "mid": _BASE_INDICATOR_PARAMS,
+        "high": _HIGH_INDICATOR_PARAMS,
+    }
+
+    for regime, params in regimes.items():
+        prefix = f"{regime}_"
+        if f"{prefix}ema_short" in df.columns:
+            continue
+        close = df["close"]
+        high = df["high"]
+        low = df["low"]
+        volume = df["volume"]
+        ema_short = EMAIndicator(close, window=int(params["ema_short"])).ema_indicator()
+        ema_long = EMAIndicator(close, window=int(params["ema_long"])).ema_indicator()
+        macd_line = MACD(
+            close,
+            window_slow=int(params["macd_slow"]),
+            window_fast=int(params["macd_fast"]),
+            window_sign=int(params["macd_signal"]),
+        ).macd_diff()
+        rsi_series = RSIIndicator(close, window=14).rsi()
+        with np.errstate(invalid="ignore", divide="ignore"):
+            adx_indicator = ADXIndicator(high=high, low=low, close=close, window=14)
+            adx_series = adx_indicator.adx()
+            try:
+                di_plus = adx_indicator.adx_pos()
+                di_minus = adx_indicator.adx_neg()
+            except AttributeError:
+                di_plus = pd.Series(0.0, index=adx_series.index)
+                di_minus = pd.Series(0.0, index=adx_series.index)
+        bb = BollingerBands(
+            close,
+            window=int(params["bb_window"]),
+            window_dev=float(params.get("bb_dev", 2.0)),
+        )
+        vwma_calc = VolumeWeightedAveragePrice(
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+            window=int(params["vwma_window"]),
+        )
+        dema_short = DEMAIndicator(close, window=int(params["dema_short"])).dema_indicator()
+        dema_long = DEMAIndicator(close, window=int(params["dema_long"])).dema_indicator()
+        stoch_obj = StochasticOscillator(
+            high,
+            low,
+            close,
+            window=int(params["stoch_window"]),
+            smooth_window=int(params["stoch_smooth"]),
+        )
+        cci_series = CCIIndicator(high, low, close, window=int(params["cci_window"])).cci()
+
+        df[f"{prefix}ema_short"] = ema_short
+        df[f"{prefix}ema_long"] = ema_long
+        df[f"{prefix}macd_diff"] = macd_line
+        df[f"{prefix}rsi"] = rsi_series
+        df[f"{prefix}adx"] = adx_series
+        df[f"{prefix}di_plus"] = di_plus
+        df[f"{prefix}di_minus"] = di_minus
+        df[f"{prefix}bb_upper"] = bb.bollinger_hband()
+        df[f"{prefix}bb_lower"] = bb.bollinger_lband()
+        df[f"{prefix}vwma"] = vwma_calc.volume_weighted_average_price()
+        df[f"{prefix}dema_short"] = dema_short
+        df[f"{prefix}dema_long"] = dema_long
+        df[f"{prefix}stoch_k"] = stoch_obj.stoch()
+        df[f"{prefix}stoch_d"] = stoch_obj.stoch_signal()
+        df[f"{prefix}cci"] = cci_series
+
+
 def evaluate_signal(
     price_data: pd.DataFrame,
     symbol: str = "",
@@ -1861,6 +1951,8 @@ def evaluate_signal(
     lvn_entry_level: Optional[float] = None,
     poc_target: Optional[float] = None,
     macro_context: Optional[Mapping[str, Any]] = None,
+    *,
+    is_backtest: bool = False,
 ):
     """Evaluate a trading signal given a price DataFrame."""
     try:
@@ -1961,13 +2053,14 @@ def evaluate_signal(
             except Exception:
                 hourly_bar_age_min = None
             if now - last_hour > max_age:
+            if not is_backtest:
                 logger.warning(
                     "Skipping %s: latest 1H bar (%s) is stale (age=%s).",
                     symbol,
                     last_hour,
                     now - last_hour,
                 )
-                return 0, None, 0, None
+            return 0, None, 0, None
 
         close = price_data['close']
         high = price_data['high']
@@ -1977,21 +2070,36 @@ def evaluate_signal(
         high_vol_countertrend = bool(np.isfinite(atr_p) and atr_p >= 0.9)
         volatility_regime, indicator_params = _select_indicator_params(atr_p)
 
-        ema_short = EMAIndicator(close, window=indicator_params["ema_short"]).ema_indicator()
-        ema_long = EMAIndicator(close, window=indicator_params["ema_long"]).ema_indicator()
-        macd_line = MACD(
-            close,
-            window_slow=indicator_params["macd_slow"],
-            window_fast=indicator_params["macd_fast"],
-            window_sign=indicator_params["macd_signal"],
-        ).macd_diff()
-        rsi = RSIIndicator(close, window=14).rsi()
+        prefix = f"{volatility_regime}_"
+
+        def _get_indicator(name: str, compute: Callable[[], pd.Series]) -> pd.Series:
+            col_name = f"{prefix}{name}"
+            if col_name in price_data.columns:
+                return price_data[col_name]
+            return compute()
+
+        ema_short = _get_indicator(
+            "ema_short", lambda: EMAIndicator(close, window=indicator_params["ema_short"]).ema_indicator()
+        )
+        ema_long = _get_indicator(
+            "ema_long", lambda: EMAIndicator(close, window=indicator_params["ema_long"]).ema_indicator()
+        )
+        macd_line = _get_indicator(
+            "macd_diff",
+            lambda: MACD(
+                close,
+                window_slow=indicator_params["macd_slow"],
+                window_fast=indicator_params["macd_fast"],
+                window_sign=indicator_params["macd_signal"],
+            ).macd_diff(),
+        )
+        rsi = _get_indicator("rsi", lambda: RSIIndicator(close, window=14).rsi())
         with np.errstate(invalid='ignore', divide='ignore'):
             adx_indicator = ADXIndicator(high=high, low=low, close=close, window=14)
-            adx_series = adx_indicator.adx()
+            adx_series = _get_indicator("adx", adx_indicator.adx)
             try:
-                di_plus = adx_indicator.adx_pos()
-                di_minus = adx_indicator.adx_neg()
+                di_plus = _get_indicator("di_plus", adx_indicator.adx_pos)
+                di_minus = _get_indicator("di_minus", adx_indicator.adx_neg)
             except AttributeError:
                 di_plus = pd.Series(0.0, index=adx_series.index)
                 di_minus = pd.Series(0.0, index=adx_series.index)
@@ -2003,18 +2111,26 @@ def evaluate_signal(
             window=int(indicator_params["bb_window"]),
             window_dev=float(indicator_params["bb_dev"]),
         )
-        vwma_calc = VolumeWeightedAveragePrice(
-            high=high,
-            low=low,
-            close=close,
-            volume=volume,
-            window=int(indicator_params["vwma_window"]),
+        vwma = _get_indicator(
+            "vwma",
+            lambda: VolumeWeightedAveragePrice(
+                high=high,
+                low=low,
+                close=close,
+                volume=volume,
+                window=int(indicator_params["vwma_window"]),
+            ).volume_weighted_average_price(),
         )
-        vwma = vwma_calc.volume_weighted_average_price()
-        bb_upper = bb.bollinger_hband()
-        bb_lower = bb.bollinger_lband()
-        dema_short = DEMAIndicator(close, window=indicator_params["dema_short"]).dema_indicator()
-        dema_long = DEMAIndicator(close, window=indicator_params["dema_long"]).dema_indicator()
+        bb_upper = _get_indicator("bb_upper", bb.bollinger_hband)
+        bb_lower = _get_indicator("bb_lower", bb.bollinger_lband)
+        dema_short = _get_indicator(
+            "dema_short",
+            lambda: DEMAIndicator(close, window=indicator_params["dema_short"]).dema_indicator(),
+        )
+        dema_long = _get_indicator(
+            "dema_long",
+            lambda: DEMAIndicator(close, window=indicator_params["dema_long"]).dema_indicator(),
+        )
         stoch_obj = StochasticOscillator(
             high,
             low,
@@ -2022,9 +2138,11 @@ def evaluate_signal(
             window=int(indicator_params["stoch_window"]),
             smooth_window=int(indicator_params["stoch_smooth"]),
         )
-        stoch_k = stoch_obj.stoch()
-        stoch_d = stoch_obj.stoch_signal()
-        cci = CCIIndicator(high, low, close, window=int(indicator_params["cci_window"])).cci()
+        stoch_k = _get_indicator("stoch_k", stoch_obj.stoch)
+        stoch_d = _get_indicator("stoch_d", stoch_obj.stoch_signal)
+        cci = _get_indicator(
+            "cci", lambda: CCIIndicator(high, low, close, window=int(indicator_params["cci_window"])).cci()
+        )
         hurst = hurst_exponent(close)
         def _slope(series: pd.Series) -> float:
             x = np.arange(len(series))
@@ -2106,6 +2224,7 @@ def evaluate_signal(
                 avg_quote_vol_20,
                 vol_factor,
                 volume_context,
+                is_backtest=is_backtest,
             ):
                 breakdown["volume_gate_pass"] = False
                 breakdown["volume_ok_for_size"] = False
@@ -2305,7 +2424,8 @@ def evaluate_signal(
         if confluence_flag:
             trend_score += w["confluence"]
         if spread == spread and price_now > 0 and spread / price_now > 0.001:
-            logger.warning("Skipping %s: spread %.6f is >0.1%% of price.", symbol, spread)
+            if not is_backtest:
+                logger.warning("Skipping %s: spread %.6f is >0.1%% of price.", symbol, spread)
             breakdown["spread_gate_pass"] = False
             _set_primary_reason("spread_gate_fail", "spread gate failed")
             return 0, None, 0, None
@@ -2321,11 +2441,12 @@ def evaluate_signal(
         if feature_imbalance == feature_imbalance:
             imbalance_to_check = feature_imbalance
         if imbalance_to_check == imbalance_to_check and abs(imbalance_to_check) > 0.7:
-            logger.warning(
-                "Skipping %s: order book imbalance %.2f exceeds threshold.",
-                symbol,
-                imbalance_to_check,
-            )
+            if not is_backtest:
+                logger.warning(
+                    "Skipping %s: order book imbalance %.2f exceeds threshold.",
+                    symbol,
+                    imbalance_to_check,
+                )
             breakdown["obi_gate_pass"] = False
             _set_primary_reason("obi_gate_fail", "order book imbalance gate")
             return 0, None, 0, None

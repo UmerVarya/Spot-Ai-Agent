@@ -71,13 +71,13 @@ def _build_macro_context(snapshot: Mapping[str, object]) -> Dict[str, object | N
     }
 
 
-def evaluate_signal(df_slice: pd.DataFrame, symbol: str):
+def evaluate_signal(df_slice: pd.DataFrame, symbol: str, is_backtest: bool = True):
     """Wrapper around the live signal stack with no look-ahead."""
 
     macro_snapshot = get_macro_context() or {}
     macro_context = _build_macro_context(macro_snapshot)
     score, direction, confidence, meta = evaluate_signal_live(
-        df_slice.copy(), symbol=symbol, macro_context=macro_context
+        df_slice.copy(), symbol=symbol, macro_context=macro_context, is_backtest=is_backtest
     )
     metadata = meta if isinstance(meta, dict) else {"detail": meta}
     metadata.setdefault("macro_context", macro_context)
@@ -188,6 +188,7 @@ def run_single_backtest(
         "slippage_bps": slippage_bps,
         "latency_bars": latency_bars,
         "max_concurrent": max_concurrent,
+        "is_backtest": True,
     }
     if start:
         params["start_ts"] = pd.to_datetime(start, utc=True)

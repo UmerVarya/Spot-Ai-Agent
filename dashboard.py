@@ -2520,17 +2520,44 @@ def render_backtest_lab() -> None:
     timeframe = st.selectbox("Timeframe", ["1m", "5m", "1h", "4h", "1d"], index=0)
 
     today = datetime.now(timezone.utc).date()
-    default_start = today - timedelta(days=30)
+    presets = {
+        "Quick smoke test": {"days": 14, "symbols": 1},
+        "Standard research": {"days": 120, "symbols": 3},
+        "Full audit": {"days": 365, "symbols": 10},
+    }
+    preset = st.selectbox("Preset", list(presets.keys()), index=1)
+
     st.markdown("### Shared Controls")
     col_top = st.columns(2)
-    start_date = col_top[0].date_input("Start date", value=default_start)
-    end_date = col_top[1].date_input("End date", value=today)
+
+    default_start = today - timedelta(days=presets[preset]["days"])
+    if st.session_state.get("backtest_last_preset") != preset:
+        st.session_state["backtest_start_date"] = default_start
+        st.session_state["backtest_end_date"] = today
+        st.session_state["backtest_last_preset"] = preset
+
+    start_date = col_top[0].date_input(
+        "Start date",
+        value=st.session_state.get("backtest_start_date", default_start),
+        key="backtest_start_date",
+    )
+    end_date = col_top[1].date_input(
+        "End date",
+        value=st.session_state.get("backtest_end_date", today),
+        key="backtest_end_date",
+    )
 
     default_universe = get_top_symbols(limit=10) or ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
+    default_symbol_count = presets[preset]["symbols"]
+    default_selection = default_universe[: min(default_symbol_count, len(default_universe))]
+    if st.session_state.get("backtest_last_preset") != preset:
+        st.session_state["backtest_symbols_selection"] = default_selection
+
     selected_universe = st.multiselect(
         "Symbol universe",
         default_universe,
-        default=default_universe[: min(5, len(default_universe))],
+        default=st.session_state.get("backtest_symbols_selection", default_selection),
+        key="backtest_symbols_selection",
     )
 
     st.caption("Historical data will be downloaded automatically for the selected symbols and timeframe.")
@@ -2570,6 +2597,7 @@ def render_backtest_lab() -> None:
         cfg = BacktestConfig(
             start_ts=start_ts,
             end_ts=end_ts,
+            is_backtest=True,
             min_score=score_threshold,
             min_prob=min_prob,
             atr_mult_sl=atr_mult,

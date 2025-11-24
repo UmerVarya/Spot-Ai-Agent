@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from backtest import data as data_loader
 from backtest.data_manager import ensure_ohlcv_csvs
 
 
@@ -95,3 +96,68 @@ def test_fetches_missing_leading_candle(monkeypatch, tmp_path: Path) -> None:
     assert len(client.calls) == 1
     assert client.calls[0][2] == int(start.timestamp() * 1000)
     assert client.calls[0][3] == int(start.timestamp() * 1000)
+
+
+def test_uses_cached_range_without_download(monkeypatch, tmp_path: Path) -> None:
+    client = DummyBinanceClient()
+    monkeypatch.setattr("backtest.data_manager._get_binance_client", lambda: client)
+
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    end = start + timedelta(minutes=4)
+    index = pd.date_range(start=start, periods=5, freq="T", tz=timezone.utc)
+    existing_df = pd.DataFrame(
+        {
+            "timestamp": index,
+            "open": 1.0,
+            "high": 2.0,
+            "low": 0.5,
+            "close": 1.5,
+            "volume": 100.0,
+            "quote_volume": 200.0,
+        }
+    )
+    csv_path = tmp_path / "BTCUSDT_1m.csv"
+    existing_df.to_csv(csv_path, index=False)
+
+    csv_paths = ensure_ohlcv_csvs(["BTCUSDT"], "1m", start, end, data_dir=tmp_path)
+
+    assert csv_paths and csv_paths[0].exists()
+    assert client.calls == []
+
+
+def test_load_csv_paths_reuses_cache(monkeypatch, tmp_path: Path) -> None:
+    csv_path = tmp_path / "BTCUSDT_1m.csv"
+    index = pd.date_range(start=datetime(2024, 1, 1, tzinfo=timezone.utc), periods=3, freq="T")
+    df = pd.DataFrame(
+        {
+            "timestamp": index,
+            "open": [1, 2, 3],
+            "high": [1, 2, 3],
+            "low": [1, 2, 3],
+            "close": [1, 2, 3],
+            "volume": [10, 20, 30],
+            "quote_volume": [20, 40, 60],
+        }
+    )
+    df.to_csv(csv_path, index=False)
+
+    real_read_csv = data_loader.pd.read_csv
+    read_count = {"count": 0}
+
+    def _counting_read_csv(*args, **kwargs):
+        read_count["count"] += 1
+        return real_read_csv(*args, **kwargs)
+
+    monkeypatch.setattr(data_loader.pd, "read_csv", _counting_read_csv)
+
+    start = index.min()
+    end = index.max()
+    first_load = data_loader.load_csv_paths([csv_path], start=start, end=end)
+    second_load = data_loader.load_csv_paths([csv_path], start=start, end=end)
+
+    assert read_count["count"] == 1
+    assert first_load.keys() == second_load.keys()
+
+    data_loader.invalidate_cache_for_paths([csv_path])
+    data_loader.load_csv_paths([csv_path], start=start, end=end)
+    assert read_count["count"] == 2

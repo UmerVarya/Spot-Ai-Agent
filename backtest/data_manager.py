@@ -9,6 +9,7 @@ import pandas as pd
 from log_utils import setup_logger
 from symbol_mapper import map_symbol_for_binance
 from trade_utils import _get_binance_client
+from backtest.data import invalidate_cache_for_paths
 
 logger = setup_logger(__name__)
 
@@ -134,14 +135,36 @@ def ensure_ohlcv_csvs(
 
         if existing_start is None or existing_end is None:
             downloads.append(_fetch_klines(symbol, interval, start, end))
+        elif start >= existing_start and end <= existing_end:
+            logger.info(
+                "Using cached OHLCV for %s %s; covers [%s, %s]",
+                symbol.upper(),
+                interval,
+                existing_start,
+                existing_end,
+            )
         else:
             if existing_start > start and interval_delta is not None:
                 head_end = existing_start - interval_delta
                 if head_end >= start:
+                    logger.info(
+                        "Extending cached OHLCV for %s %s from %s back to %s",
+                        symbol.upper(),
+                        interval,
+                        existing_start,
+                        start,
+                    )
                     downloads.append(_fetch_klines(symbol, interval, start, head_end))
             if existing_end < end:
                 tail_start = existing_end + (interval_delta or pd.Timedelta(seconds=1))
                 if tail_start < end:
+                    logger.info(
+                        "Extending cached OHLCV for %s %s from %s to %s",
+                        symbol.upper(),
+                        interval,
+                        existing_end,
+                        end,
+                    )
                     downloads.append(_fetch_klines(symbol, interval, tail_start, end))
 
         if downloads:
@@ -152,7 +175,10 @@ def ensure_ohlcv_csvs(
                 csv_path,
             )
             existing = pd.concat([existing] + downloads, ignore_index=True)
-        _merge_and_save(csv_path, existing)
+            _merge_and_save(csv_path, existing)
+            invalidate_cache_for_paths([csv_path])
+        else:
+            _merge_and_save(csv_path, existing)
         csv_paths.append(csv_path)
 
     return csv_paths
