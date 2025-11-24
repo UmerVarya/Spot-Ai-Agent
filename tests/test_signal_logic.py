@@ -121,3 +121,26 @@ def test_should_trade_skips_breakout_in_balanced_regime():
     )
     assert result["decision"] is False
     assert "balanced" in result["reason"].lower()
+
+
+def test_evaluate_signal_quiet_in_backtest(caplog):
+    index = pd.date_range(end=pd.Timestamp.utcnow(), periods=80, freq="T")
+    base_prices = pd.Series(np.linspace(100, 101, len(index)), index=index)
+    df = pd.DataFrame(
+        {
+            "open": base_prices * 0.999,
+            "high": base_prices * 1.001,
+            "low": base_prices * 0.999,
+            "close": base_prices,
+            "volume": np.ones(len(index)),
+            "quote_volume": np.ones(len(index)) * 10,
+        },
+        index=index,
+    )
+
+    with caplog.at_level("INFO"):
+        score, direction, _, _ = evaluate_signal(df, symbol="BTCUSDT", is_backtest=True)
+
+    assert score == 0
+    assert direction is None
+    assert not any("VOL GATE" in message for message in caplog.messages)

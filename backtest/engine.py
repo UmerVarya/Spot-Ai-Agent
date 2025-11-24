@@ -13,6 +13,7 @@ from backtest.data import load_csv_paths
 from log_utils import setup_logger
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 from trade_utils import evaluate_signal as live_evaluate_signal
+from trade_utils import precompute_backtest_indicators
 
 from .analysis import (
     build_equity_curve,
@@ -29,6 +30,7 @@ logger = setup_logger(__name__)
 class BacktestConfig:
     start_ts: Optional[pd.Timestamp] = None
     end_ts: Optional[pd.Timestamp] = None
+    is_backtest: bool = True
     min_score: float = float(os.getenv("BACKTEST_DEFAULT_SCORE_THRESHOLD", 0.2))
     min_prob: float = 0.55
     atr_mult_sl: float = 1.5
@@ -67,7 +69,7 @@ class ResearchBacktester:
     def __init__(
         self,
         historical_data: Dict[str, pd.DataFrame],
-        evaluate_signal: Callable[[pd.DataFrame, str], Any] = live_evaluate_signal,
+        evaluate_signal: Callable[[pd.DataFrame, str, bool], Any] = live_evaluate_signal,
         predict_prob: Optional[Callable[..., float]] = None,
         macro_filter: Optional[Callable[[], bool]] = None,
         position_size_func: Optional[Callable[[float], float]] = None,
@@ -79,6 +81,8 @@ class ResearchBacktester:
         self.macro_filter = macro_filter or (lambda: True)
         self.position_size_func = position_size_func or (lambda confidence: 0.01)
         self.name = name
+        for df in self.historical_data.values():
+            precompute_backtest_indicators(df)
 
     def _build_params(self, cfg: BacktestConfig) -> Dict[str, Any]:
         return {
@@ -92,6 +96,7 @@ class ResearchBacktester:
             "max_concurrent": cfg.max_concurrent,
             "start_ts": cfg.start_ts,
             "end_ts": cfg.end_ts,
+            "is_backtest": cfg.is_backtest,
         }
 
     @staticmethod
@@ -217,7 +222,11 @@ def run_backtest_from_csv_paths(
 ) -> BacktestResult:
     """Run a backtest using explicitly provided CSV files."""
 
-    data = load_csv_paths(csv_paths)
+    data = load_csv_paths(
+        csv_paths,
+        start=cfg.start_ts,
+        end=cfg.end_ts,
+    )
     if symbols:
         symbols_upper = {sym.upper() for sym in symbols}
         data = {k: v for k, v in data.items() if k.upper() in symbols_upper}

@@ -86,7 +86,7 @@ class Backtester:
     def __init__(
         self,
         historical_data: Dict[str, pd.DataFrame],
-        evaluate_signal: Callable[[pd.DataFrame, str], Any],
+        evaluate_signal: Callable[[pd.DataFrame, str, bool], Any],
         predict_prob: Callable[..., float],
         macro_filter: Callable[[], bool],
         position_size_func: Callable[[float], float],
@@ -458,7 +458,9 @@ class Backtester:
 
         last_in_range_time: Optional[pd.Timestamp] = None
 
-        for current_time in timestamps:
+        is_backtest = bool(params.get("is_backtest", False))
+
+        for idx, current_time in enumerate(timestamps):
             if not isinstance(current_time, pd.Timestamp):
                 current_time = pd.Timestamp(current_time)
 
@@ -606,7 +608,7 @@ class Backtester:
                         if not math.isfinite(atr_value) or atr_value <= 0:
                             continue
                         try:
-                            evaluation = self.evaluate_signal(window, symbol)
+                            evaluation = self.evaluate_signal(window, symbol, is_backtest=is_backtest)
                         except Exception as exc:
                             logger.debug("Signal evaluation failed for %s: %s", symbol, exc, exc_info=True)
                             continue
@@ -649,6 +651,9 @@ class Backtester:
                         available_slots -= 1
                         if available_slots <= 0:
                             break
+
+            if is_backtest and (idx + 1) % 10000 == 0:
+                logger.info("Backtest progress: processed %d/%d bars", idx + 1, len(timestamps))
 
             equity_curve.append((current_time, equity))
 
