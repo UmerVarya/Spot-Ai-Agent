@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from backtest.engine import BacktestConfig, ResearchBacktester
+from backtest.engine import BacktestConfig, ResearchBacktester, run_backtest_from_csv_paths
 from backtest.metrics import equity_statistics, trade_distribution_metrics
 from backtest.scenario import run_fee_slippage_scenarios
 
@@ -77,3 +77,21 @@ def test_scenario_runner_changes_params():
     scenarios = run_fee_slippage_scenarios(bt, base_cfg, [5, 10], [1, 2])
     assert set(scenarios.columns).issuperset({"fee_bps", "slippage_bps", "sharpe"})
     assert len(scenarios) == 4
+
+
+def test_progress_callback_reports_phases(tmp_path):
+    data = _build_trending_data()["TEST"]
+    df_with_ts = data.reset_index().rename(columns={"index": "timestamp"})
+    csv_path = tmp_path / "TEST_1m.csv"
+    df_with_ts.to_csv(csv_path, index=False)
+
+    phases: list[str] = []
+
+    def _progress_cb(progress):
+        phases.append(progress.phase)
+
+    cfg = BacktestConfig(min_score=0.0, min_prob=0.0, is_backtest=True)
+    run_backtest_from_csv_paths([csv_path], cfg, progress_callback=_progress_cb)
+
+    for phase in ["loading", "simulating", "finalizing", "done"]:
+        assert phase in phases

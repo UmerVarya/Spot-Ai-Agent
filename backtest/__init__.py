@@ -13,6 +13,7 @@ from .legacy import (
     generate_trades_from_ohlcv,
 )
 from .engine import ResearchBacktester, BacktestConfig, BacktestResult, run_backtest_from_csv_paths
+from .types import BacktestProgress, ProgressCallback
 from .metrics import (
     BacktestMetrics,
     aggregate_symbol_metrics,
@@ -30,6 +31,8 @@ __all__ = [
     "ResearchBacktester",
     "BacktestConfig",
     "BacktestResult",
+    "BacktestProgress",
+    "ProgressCallback",
     "run_backtest_from_csv_paths",
     "BacktestMetrics",
     "aggregate_symbol_metrics",

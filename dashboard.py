@@ -28,12 +28,14 @@ import os
 import re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from typing import Callable, Optional
 from log_utils import setup_logger, LOG_FILE
 from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 from backtest import (
     BacktestConfig,
     BacktestResult,
+    BacktestProgress,
     ResearchBacktester,
     compute_buy_and_hold_pnl,
     generate_trades_from_ohlcv,
@@ -2500,8 +2502,27 @@ def render_scenario_lab(result: BacktestResult) -> None:
 def render_backtest_lab() -> None:
     st.subheader("Backtest / Research Lab")
 
-    @st.cache_data(show_spinner=False)
-    def _run_backtest_cached(cfg_dict: dict, csv_paths: tuple[str, ...], symbols: tuple[str, ...], scenarios: bool):
+    progress_bar = st.progress(0)
+    progress_text = st.empty()
+
+    def _update_progress(p: BacktestProgress) -> None:
+        percent = int(p.percent * 100) if p.total > 0 else 0
+        percent = min(max(percent, 0), 100)
+        phase_label = p.phase.capitalize()
+        label = phase_label
+        if p.message:
+            label = f"{phase_label}: {p.message}"
+        progress_bar.progress(percent)
+        progress_text.write(f"{label} — {percent}%")
+
+    @st.cache_data(show_spinner=False, hash_funcs={type(lambda: None): lambda _: None})
+    def _run_backtest_cached(
+        cfg_dict: dict,
+        csv_paths: tuple[str, ...],
+        symbols: tuple[str, ...],
+        scenarios: bool,
+        progress_callback: Optional[Callable[[BacktestProgress], None]] = None,
+    ):
         cfg_payload = cfg_dict.copy()
         if cfg_payload.get("start_ts"):
             cfg_payload["start_ts"] = pd.to_datetime(cfg_payload["start_ts"])
@@ -2515,6 +2536,7 @@ def render_backtest_lab() -> None:
             cfg,
             symbols=symbols,
             scenario_runner=scenario_runner,
+            progress_callback=progress_callback,
         )
 
     timeframe = st.selectbox("Timeframe", ["1m", "5m", "1h", "4h", "1d"], index=0)
@@ -2615,6 +2637,8 @@ def render_backtest_lab() -> None:
             cfg_dict["end_ts"] = cfg.end_ts.isoformat()
 
         try:
+            progress_bar.progress(0)
+            progress_text.write("Preparing data...")
             csv_paths = ensure_ohlcv_csvs(selected_universe, timeframe, start_ts.to_pydatetime(), end_ts.to_pydatetime())
         except Exception as exc:  # pragma: no cover - network dependent
             logger.exception("Failed to prepare OHLCV data for backtest", exc_info=exc)
@@ -2622,8 +2646,16 @@ def render_backtest_lab() -> None:
             return
 
         csv_paths = tuple(str(p) for p in sorted(csv_paths))
-        with st.spinner("Running backtest..."):
-            res = _run_backtest_cached(cfg_dict, csv_paths, tuple(selected_universe), scenario_toggle)
+        progress_text.write("Starting backtest...")
+        res = _run_backtest_cached(
+            cfg_dict,
+            csv_paths,
+            tuple(selected_universe),
+            scenario_toggle,
+            progress_callback=_update_progress,
+        )
+        progress_bar.progress(100)
+        progress_text.success("Backtest complete.")
         st.session_state["backtest_result"] = res
 
     result: BacktestResult | None = st.session_state.get("backtest_result")
