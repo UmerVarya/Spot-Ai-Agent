@@ -44,6 +44,7 @@ from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
 from multi_timeframe import (
     multi_timeframe_confluence,
     multi_timeframe_indicator_alignment,
+    resample_ohlcv,
 )  # type: ignore
 from risk_metrics import (
     sharpe_ratio,
@@ -1941,6 +1942,45 @@ def precompute_backtest_indicators(df: pd.DataFrame) -> None:
         df[f"{prefix}stoch_d"] = stoch_obj.stoch_signal()
         df[f"{prefix}cci"] = cci_series
 
+    def _compute_trend_states(resampled: pd.DataFrame, *, strong_threshold: float) -> pd.Series:
+        if resampled is None or resampled.empty:
+            return pd.Series(dtype=object)
+
+        close_prices = resampled["close"]
+        ema_fast = EMAIndicator(close_prices, window=50).ema_indicator()
+        ema_slow = EMAIndicator(close_prices, window=200).ema_indicator()
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            slope = ema_fast - ema_slow
+            reference = close_prices.replace(0, np.nan)
+            relative = slope / reference
+
+        states = pd.Series("neutral", index=resampled.index, dtype=object)
+        states.loc[relative <= -strong_threshold] = "strong_bearish"
+        states.loc[(relative < 0) & (relative > -strong_threshold)] = "bearish"
+        states.loc[relative >= strong_threshold] = "bullish"
+        return states.fillna("neutral")
+
+    if "trend_1h_state" not in df.columns:
+        resampled_1h = resample_ohlcv(df.copy(), "1H")
+        trend_1h = _compute_trend_states(resampled_1h, strong_threshold=0.001)
+        if not trend_1h.empty:
+            df["trend_1h_state"] = (
+                trend_1h.reindex(df.index, method="ffill").reindex(df.index).fillna("neutral")
+            )
+        else:
+            df["trend_1h_state"] = "neutral"
+
+    if "trend_4h_state" not in df.columns:
+        resampled_4h = resample_ohlcv(df.copy(), "4H")
+        trend_4h = _compute_trend_states(resampled_4h, strong_threshold=0.0007)
+        if not trend_4h.empty:
+            df["trend_4h_state"] = (
+                trend_4h.reindex(df.index, method="ffill").reindex(df.index).fillna("neutral")
+            )
+        else:
+            df["trend_4h_state"] = "neutral"
+
 
 def evaluate_signal(
     price_data: pd.DataFrame,
@@ -2583,6 +2623,17 @@ def evaluate_signal(
                     if coerced:
                         trend_state_attr_map[key.lower()] = coerced
 
+        def _get_column_trend_state(timeframe: str) -> Optional[str]:
+            column = f"trend_{timeframe.lower()}_state"
+            if column in price_data.columns and len(price_data[column]):
+                return _coerce_trend_state(price_data[column].iloc[-1])
+            return None
+
+        for _tf in ("1h", "4h"):
+            column_state = _get_column_trend_state(_tf)
+            if column_state:
+                trend_state_attr_map.setdefault(_tf, column_state)
+
         def _get_trend_state(timeframe: str, *, slope: Any = None, strong_threshold: float = 0.001) -> str:
             key = timeframe.lower()
             cached = trend_state_cache.get(key)
@@ -2598,14 +2649,18 @@ def evaluate_signal(
                 state = _trend_state(slope, strong_threshold=strong_threshold)
 
             if state is None:
-                warn_key = f"{symbol_upper}:{key}"
-                if warn_key not in _MISSING_TREND_WARNINGS:
-                    logger.warning(
-                        "Missing %s trend state for %s; defaulting to neutral",
-                        timeframe,
-                        symbol_upper,
-                    )
-                    _MISSING_TREND_WARNINGS.add(warn_key)
+                if is_backtest:
+                    state = "neutral"
+                else:
+                    warn_key = f"{symbol_upper}:{key}"
+                    if warn_key not in _MISSING_TREND_WARNINGS:
+                        logger.warning(
+                            "Missing %s trend state for %s; defaulting to neutral",
+                            timeframe,
+                            symbol_upper,
+                        )
+                        _MISSING_TREND_WARNINGS.add(warn_key)
+                    state = "neutral"
                 state = "neutral"
 
             trend_state_cache[key] = state

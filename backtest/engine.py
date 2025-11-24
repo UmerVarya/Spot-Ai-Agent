@@ -28,10 +28,10 @@ from .analysis import (
 logger = setup_logger(__name__)
 
 
-def _count_unique_bars(historical_data: Dict[str, pd.DataFrame]) -> int:
+def _count_total_bars(historical_data: Dict[str, pd.DataFrame]) -> int:
     if not historical_data:
         return 0
-    return len(set().union(*(df.index for df in historical_data.values())))
+    return int(sum(len(df) for df in historical_data.values()))
 
 
 @dataclass
@@ -186,7 +186,7 @@ class ResearchBacktester:
             macro_filter=self.macro_filter,
             position_size_func=self.position_size_func,
         )
-        total_bars = _count_unique_bars(self.historical_data)
+        total_bars = _count_total_bars(self.historical_data)
         emit_progress(
             progress_callback,
             BacktestProgress(
@@ -281,7 +281,7 @@ def run_backtest_from_csv_paths(
         symbols_upper = {sym.upper() for sym in symbols}
         data = {k: v for k, v in data.items() if k.upper() in symbols_upper}
 
-    total_bars = _count_unique_bars(data)
+    total_bars = _count_total_bars(data)
     emit_progress(
         progress_callback,
         BacktestProgress(
