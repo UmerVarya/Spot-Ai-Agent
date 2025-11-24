@@ -15,6 +15,8 @@ from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 from trade_utils import evaluate_signal as live_evaluate_signal
 from trade_utils import precompute_backtest_indicators
 
+from .types import BacktestProgress, ProgressCallback, emit_progress
+
 from .analysis import (
     build_equity_curve,
     per_symbol_breakdown,
@@ -24,6 +26,12 @@ from .analysis import (
 )
 
 logger = setup_logger(__name__)
+
+
+def _count_unique_bars(historical_data: Dict[str, pd.DataFrame]) -> int:
+    if not historical_data:
+        return 0
+    return len(set().union(*(df.index for df in historical_data.values())))
 
 
 @dataclass
@@ -165,7 +173,11 @@ class ResearchBacktester:
         )
         return df
 
-    def run(self, cfg: BacktestConfig) -> BacktestResult:
+    def run(
+        self,
+        cfg: BacktestConfig,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> BacktestResult:
         params = self._build_params(cfg)
         legacy_bt = Backtester(
             historical_data=self.historical_data,
@@ -173,6 +185,16 @@ class ResearchBacktester:
             predict_prob=self.predict_prob,
             macro_filter=self.macro_filter,
             position_size_func=self.position_size_func,
+        )
+        total_bars = _count_unique_bars(self.historical_data)
+        emit_progress(
+            progress_callback,
+            BacktestProgress(
+                phase="simulating",
+                current=0,
+                total=total_bars,
+                message=f"Running simulation for {len(self.historical_data)} symbols",
+            ),
         )
         if cfg.skip_fraction > 0:
             import random
@@ -182,11 +204,29 @@ class ResearchBacktester:
 
             legacy_bt.macro_filter = gated_macro
 
-        raw_result = legacy_bt.run(params)
+        raw_result = legacy_bt.run(params, progress_callback=progress_callback)
         trades_df = raw_result.get("trades_df") or pd.DataFrame(raw_result.get("trades", []))
+        emit_progress(
+            progress_callback,
+            BacktestProgress(
+                phase="finalizing",
+                current=0,
+                total=1,
+                message="Computing equity curve and metrics",
+            ),
+        )
         if trades_df.empty:
             empty_equity = build_equity_curve(trades_df, cfg.initial_capital)
             metrics = summarise_backtest_metrics(empty_equity, trades_df, cfg.initial_capital)
+            emit_progress(
+                progress_callback,
+                BacktestProgress(
+                    phase="done",
+                    current=total_bars,
+                    total=total_bars,
+                    message="Backtest complete.",
+                ),
+            )
             return BacktestResult(cfg, trades_df, empty_equity, metrics, pd.DataFrame(), {}, None, raw_result)
 
         enriched = self._enrich_trades(trades_df, cfg)
@@ -197,6 +237,15 @@ class ResearchBacktester:
             "score_bucket": score_bucket_metrics(enriched),
             "session": session_metrics(enriched),
         }
+        emit_progress(
+            progress_callback,
+            BacktestProgress(
+                phase="done",
+                current=total_bars,
+                total=total_bars,
+                message="Backtest complete.",
+            ),
+        )
         return BacktestResult(cfg, enriched, equity_curve, metrics, by_symbol, by_buckets, None, raw_result)
 
 
@@ -219,6 +268,7 @@ def run_backtest_from_csv_paths(
     cfg: BacktestConfig,
     symbols: Optional[Iterable[str]] = None,
     scenario_runner: Optional[Callable[[ResearchBacktester, BacktestConfig], pd.DataFrame]] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> BacktestResult:
     """Run a backtest using explicitly provided CSV files."""
 
@@ -231,8 +281,19 @@ def run_backtest_from_csv_paths(
         symbols_upper = {sym.upper() for sym in symbols}
         data = {k: v for k, v in data.items() if k.upper() in symbols_upper}
 
+    total_bars = _count_unique_bars(data)
+    emit_progress(
+        progress_callback,
+        BacktestProgress(
+            phase="loading",
+            current=0,
+            total=total_bars,
+            message=f"Loading OHLCV for {', '.join(sorted(data.keys())) if data else 'no symbols'}",
+        ),
+    )
+
     bt = ResearchBacktester(data)
-    result = bt.run(cfg)
+    result = bt.run(cfg, progress_callback=progress_callback)
     if scenario_runner:
         result.scenarios = scenario_runner(bt, cfg)
     return result

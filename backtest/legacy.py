@@ -32,6 +32,7 @@ import pandas as pd
 
 from risk_metrics import max_drawdown, sharpe_ratio
 from log_utils import setup_logger
+from .types import BacktestProgress, ProgressCallback, emit_progress
 
 logger = setup_logger(__name__)
 
@@ -413,7 +414,9 @@ class Backtester:
         net_return = raw_return - fee_penalty
         return trade.position_multiplier * net_return
 
-    def run(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    def run(
+        self, params: Dict[str, Any], progress_callback: Optional[ProgressCallback] = None
+    ) -> Dict[str, Any]:
         conf_thresh = params.get("min_score")
         if conf_thresh is None:
             conf_thresh = params.get("confidence_threshold", 0.0)
@@ -439,6 +442,7 @@ class Backtester:
         timestamps = sorted(
             set().union(*(df.index for df in self.historical_data.values()))
         )
+        total_bars = len(timestamps)
 
         equity = 1.0
         equity_curve: List[Tuple[pd.Timestamp, float]] = []
@@ -652,10 +656,30 @@ class Backtester:
                         if available_slots <= 0:
                             break
 
-            if is_backtest and (idx + 1) % 10000 == 0:
-                logger.info("Backtest progress: processed %d/%d bars", idx + 1, len(timestamps))
+            processed = idx + 1
+            progress_stride = 1000
+            if progress_stride and total_bars and processed % progress_stride == 0:
+                emit_progress(
+                    progress_callback,
+                    BacktestProgress(
+                        phase="simulating",
+                        current=processed,
+                        total=total_bars,
+                        message=f"Processed {processed}/{total_bars} bars",
+                    ),
+                )
 
             equity_curve.append((current_time, equity))
+
+        emit_progress(
+            progress_callback,
+            BacktestProgress(
+                phase="simulating",
+                current=total_bars,
+                total=total_bars,
+                message="Simulation loop complete",
+            ),
+        )
 
         # Liquidate any residual positions at the final available close
         for trade in list(open_trades):
