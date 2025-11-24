@@ -442,7 +442,8 @@ class Backtester:
         timestamps = sorted(
             set().union(*(df.index for df in self.historical_data.values()))
         )
-        total_bars = len(timestamps)
+        total_bars = int(sum(len(df) for df in self.historical_data.values()))
+        processed_bars = 0
 
         equity = 1.0
         equity_curve: List[Tuple[pd.Timestamp, float]] = []
@@ -463,6 +464,8 @@ class Backtester:
         last_in_range_time: Optional[pd.Timestamp] = None
 
         is_backtest = bool(params.get("is_backtest", False))
+
+        progress_stride = max(1, total_bars // 200) if total_bars else 0
 
         for idx, current_time in enumerate(timestamps):
             if not isinstance(current_time, pd.Timestamp):
@@ -588,6 +591,14 @@ class Backtester:
                 equity_curve.append((current_time, equity))
                 continue
 
+            symbols_with_bar = [
+                (symbol, df)
+                for symbol, df in self.historical_data.items()
+                if current_time in df.index
+            ]
+
+            processed_bars += len(symbols_with_bar)
+
             macro_ok = True
             try:
                 macro_ok = bool(self.macro_filter())
@@ -597,9 +608,7 @@ class Backtester:
             if macro_ok:
                 available_slots = max_concurrent - len(open_trades) - len(pending_entries)
                 if available_slots > 0:
-                    for symbol, df in self.historical_data.items():
-                        if current_time not in df.index:
-                            continue
+                    for symbol, df in symbols_with_bar:
                         if active_symbols.get(symbol, 0) > 0:
                             continue
                         if any(pe.symbol == symbol for pe in pending_entries):
@@ -656,16 +665,14 @@ class Backtester:
                         if available_slots <= 0:
                             break
 
-            processed = idx + 1
-            progress_stride = 1000
-            if progress_stride and total_bars and processed % progress_stride == 0:
+            if progress_stride and total_bars and processed_bars % progress_stride == 0:
                 emit_progress(
                     progress_callback,
                     BacktestProgress(
                         phase="simulating",
-                        current=processed,
+                        current=processed_bars,
                         total=total_bars,
-                        message=f"Processed {processed}/{total_bars} bars",
+                        message=f"Processed {processed_bars}/{total_bars} bars",
                     ),
                 )
 
@@ -675,7 +682,7 @@ class Backtester:
             progress_callback,
             BacktestProgress(
                 phase="simulating",
-                current=total_bars,
+                current=max(processed_bars, total_bars),
                 total=total_bars,
                 message="Simulation loop complete",
             ),
