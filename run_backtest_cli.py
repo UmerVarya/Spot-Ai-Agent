@@ -21,8 +21,7 @@ from backtest.engine import BacktestConfig, run_backtest_from_csv_paths
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 
 
-BACKTEST_DIR = Path("/home/ubuntu/spot_data/backtests")
-BACKTEST_DIR.mkdir(parents=True, exist_ok=True)
+BACKTEST_DIR = Path.home() / "spot_data" / "backtests"
 
 
 def _parse_date(value: str) -> pd.Timestamp:
@@ -152,7 +151,15 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         return 0
 
     out_dir: Path = parsed.out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        print(
+            f"Cannot create output directory {out_dir!s}: {exc}. "
+            "Use --out-dir to specify a writable location.",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         if parsed.csv_paths:
