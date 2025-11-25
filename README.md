@@ -107,6 +107,31 @@ python backtest.py
 
 Upload a CSV of trade logs on the dashboard's *Backtest* tab to visualise equity curves and return distributions.
 
+**Headless backtests (CLI)**
+
+Run the same research backtester used by the Streamlit dashboard directly from the terminal. Results are written to CSV/JSON for each symbol.
+
+```bash
+# Single symbol, one month
+python run_backtest_cli.py \
+  --symbols BTCUSDT \
+  --timeframe 1m \
+  --start 2024-07-01 \
+  --end 2024-08-01 \
+  --out-dir /home/ubuntu/spot_data/backtests
+
+# Multiple symbols, custom risk/fees and existing CSVs
+python run_backtest_cli.py \
+  --symbols BTCUSDT ETHUSDT SOLUSDT \
+  --timeframe 1m \
+  --start 2024-07-01 \
+  --end 2024-08-01 \
+  --risk 2.0 \
+  --fee-bps 8 \
+  --csv-paths data/BTCUSDT_1m.csv data/ETHUSDT_1m.csv data/SOLUSDT_1m.csv \
+  --out-dir /home/ubuntu/spot_data/backtests
+```
+
 ## Architecture
 
 ```
