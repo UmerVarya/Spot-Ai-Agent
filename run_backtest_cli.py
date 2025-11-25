@@ -21,6 +21,10 @@ from backtest.engine import BacktestConfig, run_backtest_from_csv_paths
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 
 
+BACKTEST_DIR = Path("/home/ubuntu/spot_data/backtests")
+BACKTEST_DIR.mkdir(parents=True, exist_ok=True)
+
+
 def _parse_date(value: str) -> pd.Timestamp:
     ts = pd.to_datetime(value)
     if ts.tzinfo is None:
@@ -44,7 +48,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def _format_date_for_path(ts: pd.Timestamp) -> str:
-    return ts.strftime("%Y%m%d")
+    return ts.strftime("%Y-%m-%d")
 
 
 def _write_symbol_outputs(
@@ -108,7 +112,12 @@ def run_cli(args: Sequence[str] | None = None) -> int:
     parser.add_argument("--skip-fraction", type=float, default=0.0, help="Randomly skip this fraction of signals")
     parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Directory containing OHLCV CSVs")
     parser.add_argument("--csv-paths", nargs="*", default=None, help="Optional explicit CSV paths (skip download)")
-    parser.add_argument("--out-dir", type=Path, default=Path("backtests"), help="Output directory for CSV/JSON results")
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=BACKTEST_DIR,
+        help="Output directory for CSV/JSON results",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print configuration and exit without running")
 
     parsed = parser.parse_args(args=args)
