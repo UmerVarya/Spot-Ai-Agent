@@ -163,6 +163,31 @@ def test_load_csv_paths_reuses_cache(monkeypatch, tmp_path: Path) -> None:
     assert read_count["count"] == 2
 
 
+def test_load_csv_paths_end_is_exclusive(tmp_path: Path) -> None:
+    csv_path = tmp_path / "BTCUSDT_1h.csv"
+    index = pd.date_range(start=datetime(2024, 8, 1, tzinfo=timezone.utc), periods=26, freq="H")
+    df = pd.DataFrame(
+        {
+            "timestamp": index,
+            "open": range(len(index)),
+            "high": range(len(index)),
+            "low": range(len(index)),
+            "close": range(len(index)),
+            "volume": [100] * len(index),
+            "quote_volume": [200] * len(index),
+        }
+    )
+    df.to_csv(csv_path, index=False)
+
+    end = datetime(2024, 8, 2, tzinfo=timezone.utc)
+    windowed = data_loader.load_csv_paths([csv_path], start=index.min(), end=end)
+
+    assert list(windowed.keys()) == ["BTCUSDT"]
+    df_windowed = windowed["BTCUSDT"]
+    assert df_windowed.index.max() == pd.Timestamp("2024-08-01 23:00", tz="UTC")
+    assert pd.Timestamp("2024-08-02", tz="UTC") not in df_windowed.index
+
+
 def test_load_csv_paths_skips_missing_files(tmp_path: Path) -> None:
     missing_path = tmp_path / "DOES_NOT_EXIST.csv"
 
