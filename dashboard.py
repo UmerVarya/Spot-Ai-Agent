@@ -53,6 +53,7 @@ from daily_summary import generate_daily_summary
 from news_risk import load_news_status, format_news_status_line
 
 BINANCE_FEE_RATE = 0.00075
+BACKTEST_DIR = Path("/home/ubuntu/spot_data/backtests")
 
 try:
     import altair as alt  # type: ignore
@@ -118,6 +119,59 @@ except Exception:
             )
 
 from streamlit_autorefresh import st_autorefresh
+
+
+def list_saved_backtest_files():
+    if not BACKTEST_DIR.exists():
+        return []
+
+    runs: list[tuple[Path, dict[str, str]]] = []
+    pattern = re.compile(
+        r"(?P<symbol>[^_]+)_(?P<tf>[^_]+)_(?P<start>\d{4}-\d{2}-\d{2})_(?P<end>\d{4}-\d{2}-\d{2})_(?P<kind>[^.]+)\.csv"
+    )
+
+    for path in sorted(BACKTEST_DIR.glob("*.csv")):
+        m = pattern.match(path.name)
+        if not m:
+            continue
+        runs.append((path, m.groupdict()))
+
+    return runs
+
+
+def render_saved_backtests_section() -> None:
+    st.subheader("Saved Backtests (CLI & UI)")
+
+    saved_runs = list_saved_backtest_files()
+    if not saved_runs:
+        st.info("No saved backtest CSVs found in the backtests directory.")
+        return
+
+    options = {
+        f"{meta['symbol']} {meta['tf']} {meta['start']} → {meta['end']} [{meta['kind']}]": path
+        for path, meta in saved_runs
+    }
+
+    selected_label = st.selectbox("Select a saved backtest file:", list(options.keys()))
+    selected_path = options[selected_label]
+
+    st.write(f"Selected file: `{selected_path.name}`")
+
+    with open(selected_path, "rb") as f:
+        st.download_button(
+            label="Download selected CSV",
+            data=f.read(),
+            file_name=selected_path.name,
+            mime="text/csv",
+        )
+
+    if st.checkbox("Preview first 10 rows"):
+        try:
+            df_preview = pd.read_csv(selected_path, nrows=10)
+        except Exception as exc:  # pragma: no cover - user supplied file
+            st.error(f"Failed to load preview: {exc}")
+            return
+        st.dataframe(df_preview, use_container_width=True)
 
 
 def _arrow_safe_scalar(value):
@@ -2657,6 +2711,8 @@ def render_backtest_lab() -> None:
         progress_bar.progress(100)
         progress_text.success("Backtest complete.")
         st.session_state["backtest_result"] = res
+
+    render_saved_backtests_section()
 
     result: BacktestResult | None = st.session_state.get("backtest_result")
     if result is None:
