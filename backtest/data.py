@@ -62,7 +62,12 @@ def _maybe_slice(data: Dict[str, pd.DataFrame], start: Optional[pd.Timestamp], e
     for symbol, df in data.items():
         windowed = df
         if start_ts is not None or end_ts is not None:
-            windowed = df.loc[start_ts:end_ts]
+            mask = pd.Series(True, index=df.index)
+            if start_ts is not None:
+                mask &= df.index >= start_ts
+            if end_ts is not None:
+                mask &= df.index < end_ts
+            windowed = df.loc[mask]
         sliced[symbol] = windowed
     return sliced
 
