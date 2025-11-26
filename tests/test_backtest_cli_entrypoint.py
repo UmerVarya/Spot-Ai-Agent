@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import backtest_cli
+from backtest.filesystem import discover_backtest_files
 from backtest.engine import BacktestConfig, BacktestResult
 
 
@@ -66,6 +67,10 @@ def test_cli_writes_expected_outputs(tmp_path: Path, sample_result, monkeypatch)
 
     metrics_df = pd.read_csv(metrics_path)
     assert metrics_df.loc[0, "win_rate"] == 0.5
+
+    discovered = discover_backtest_files(tmp_path)
+    kinds = {f.kind for f in discovered}
+    assert kinds == {"trades", "equity", "metrics"}
 
 
 def test_month_resolution_requires_range(monkeypatch):
