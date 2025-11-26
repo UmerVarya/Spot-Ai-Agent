@@ -77,13 +77,31 @@ def _write_outputs(
     metrics_path = output_dir / f"{symbol_upper}_{timeframe}_{start_str}_{end_str}_metrics.csv"
 
     trades_df = result.trades if hasattr(result, "trades") else result.trades_df  # type: ignore[attr-defined]
-    trades_df.to_csv(trades_path, index=False)
-
     equity_df = result.equity_curve if hasattr(result, "equity_curve") else result.equity_df  # type: ignore[attr-defined]
-    equity_df.to_csv(equity_path, index=False)
-
     metrics_df = pd.DataFrame([getattr(result, "metrics", {}) or {}])
-    metrics_df.to_csv(metrics_path, index=False)
+
+    outputs = [
+        (trades_path, trades_df),
+        (equity_path, equity_df),
+        (metrics_path, metrics_df),
+    ]
+
+    tmp_paths = []
+    try:
+        for path, df in outputs:
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
+            df.to_csv(tmp_path, index=False)
+            tmp_paths.append((tmp_path, path))
+
+        for tmp_path, final_path in tmp_paths:
+            tmp_path.replace(final_path)
+    except Exception:
+        for tmp_path, _ in tmp_paths:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
 
     print("[BACKTEST] Done.")
     print(f"[BACKTEST] Trades:  {trades_path}")
@@ -129,7 +147,11 @@ def main(cli_args: list[str] | None = None) -> int:
         print(f"[BACKTEST] Failed: {exc}")
         return 1
 
-    _write_outputs(result, symbol, timeframe, start, end_inclusive, output_dir)
+    try:
+        _write_outputs(result, symbol, timeframe, start, end_inclusive, output_dir)
+    except Exception as exc:  # pragma: no cover - surface to user
+        print(f"[BACKTEST] Failed to write outputs: {exc}")
+        return 1
     return 0
 
 
