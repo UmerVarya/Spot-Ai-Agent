@@ -26,10 +26,10 @@ def _resolve_date_range(args: argparse.Namespace) -> tuple[datetime, datetime]:
     now = datetime.now(timezone.utc)
     if args.start and args.end:
         start = _parse_datetime(args.start)
-        end = _parse_datetime(args.end)
+        end = (_parse_datetime(args.end) + pd.Timedelta(days=1)).to_pydatetime()
     elif args.months:
         end_dt = _parse_datetime(args.end) if args.end else now
-        end = pd.Timestamp(end_dt).to_pydatetime()
+        end = (pd.Timestamp(end_dt) + pd.Timedelta(days=1)).to_pydatetime()
         start = (pd.Timestamp(end_dt) - pd.DateOffset(months=args.months)).to_pydatetime()
     else:
         raise ValueError("Provide either --start/--end or --months to define the date range.")
@@ -60,9 +60,16 @@ def _make_progress_printer() -> ProgressCallback:
     return _printer
 
 
-def _write_outputs(result: BacktestResult, symbol: str, timeframe: str, start: datetime, end: datetime, output_dir: Path) -> None:
+def _write_outputs(
+    result: BacktestResult,
+    symbol: str,
+    timeframe: str,
+    start: datetime,
+    end_inclusive: datetime,
+    output_dir: Path,
+) -> None:
     start_str = start.date().isoformat()
-    end_str = end.date().isoformat()
+    end_str = end_inclusive.date().isoformat()
     symbol_upper = symbol.upper()
 
     trades_path = output_dir / f"{symbol_upper}_{timeframe}_{start_str}_{end_str}_trades.csv"
@@ -99,11 +106,12 @@ def main(cli_args: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     start, end = _resolve_date_range(args)
+    end_inclusive = (pd.Timestamp(end) - pd.Timedelta(days=1)).to_pydatetime()
 
     symbol = args.symbol.upper()
     timeframe = args.timeframe
 
-    print(f"[BACKTEST] Starting backtest for {symbol} {timeframe} from {start} to {end}")
+    print(f"[BACKTEST] Starting backtest for {symbol} {timeframe} from {start} to {end_inclusive}")
     print(f"[BACKTEST] Results will be saved under: {output_dir}")
 
     progress_printer = _make_progress_printer()
@@ -121,7 +129,7 @@ def main(cli_args: list[str] | None = None) -> int:
         print(f"[BACKTEST] Failed: {exc}")
         return 1
 
-    _write_outputs(result, symbol, timeframe, start, end, output_dir)
+    _write_outputs(result, symbol, timeframe, start, end_inclusive, output_dir)
     return 0
 
 
