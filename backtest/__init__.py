@@ -22,6 +22,8 @@ from .metrics import (
     trade_distribution_metrics,
 )
 from .scenario import run_fee_slippage_scenarios, run_parameter_scenarios
+from .run import run_backtest
+from .filesystem import BacktestFile, get_backtest_dir, discover_backtest_files
 
 __all__ = [
     "Backtester",
@@ -34,6 +36,7 @@ __all__ = [
     "BacktestProgress",
     "ProgressCallback",
     "run_backtest_from_csv_paths",
+    "run_backtest",
     "BacktestMetrics",
     "aggregate_symbol_metrics",
     "equity_curve_from_trades",
@@ -41,4 +44,7 @@ __all__ = [
     "trade_distribution_metrics",
     "run_fee_slippage_scenarios",
     "run_parameter_scenarios",
+    "BacktestFile",
+    "get_backtest_dir",
+    "discover_backtest_files",
 ]
