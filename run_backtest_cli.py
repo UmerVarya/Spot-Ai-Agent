@@ -122,8 +122,16 @@ def run_cli(args: Sequence[str] | None = None) -> int:
     parsed = parser.parse_args(args=args)
 
     start_ts = _parse_date(parsed.start)
+    end_input = _parse_date(parsed.end)
+    if end_input <= start_ts:
+        print(
+            f"End date must be after start date (start: {start_ts}, end: {end_input})",
+            file=sys.stderr,
+        )
+        return 1
+
     # Include the full end date by adding one day similar to the dashboard behaviour
-    end_ts = _parse_date(parsed.end) + pd.Timedelta(days=1)
+    end_ts = end_input + pd.Timedelta(days=1)
 
     cfg = BacktestConfig(
         start_ts=start_ts,

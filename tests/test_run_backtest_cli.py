@@ -65,3 +65,34 @@ def test_cli_writes_outputs(tmp_path: Path, sample_csv: Path, monkeypatch):
     equity_files = list(out_dir.glob("*_equity.csv"))
     assert trades_files, "Trades CSV not written"
     assert equity_files, "Equity CSV not written"
+
+
+def test_cli_rejects_inverted_dates(tmp_path: Path, sample_csv: Path, monkeypatch):
+    out_dir = tmp_path / "out"
+
+    # Ensure tests do not call external data sources
+    monkeypatch.chdir(Path.cwd())
+
+    args = [
+        "--symbols",
+        "TEST",
+        "--timeframe",
+        "1m",
+        "--start",
+        "2024-01-02",
+        "--end",
+        "2024-01-01T12:00Z",
+        "--csv-paths",
+        str(sample_csv),
+        "--out-dir",
+        str(out_dir),
+        "--score-threshold",
+        "0.0",
+        "--min-prob",
+        "0.0",
+    ]
+
+    exit_code = run_cli(args)
+    assert exit_code == 1
+    assert not list(out_dir.glob("*.csv"))
+    assert not list(out_dir.glob("*.json"))
