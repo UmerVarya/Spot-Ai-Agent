@@ -50,6 +50,7 @@ TRADE_HISTORY_COLUMNS = [
     "take_profit_strategy",
     "strategy",
     "session",
+    "vol_regime",
     "confidence",
     "btc_dominance",
     "fear_greed",

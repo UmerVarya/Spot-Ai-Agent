@@ -59,6 +59,7 @@ BINANCE_FEE_RATE = 0.00075
 
 
 BACKTEST_DIR = get_backtest_dir()
+MAX_RUNNING_BACKTESTS = 5
 
 try:
     import altair as alt  # type: ignore
@@ -139,10 +140,12 @@ def render_saved_backtests_section() -> None:
     table_rows: list[dict[str, object]] = []
     for run in runs:
         metrics = run.get("metrics") or run.get("metrics_summary") or {}
+        display_metrics = {k: v for k, v in metrics.items() if not isinstance(v, dict)}
         params = run.get("params", {}) or {}
         table_rows.append(
             {
                 "backtest_id": run["backtest_id"],
+                "label": run.get("label") or run.get("note"),
                 "status": run.get("status", "unknown"),
                 "progress": run.get("progress", 0.0),
                 "symbols": ", ".join(run.get("symbols", [])),
@@ -153,10 +156,10 @@ def render_saved_backtests_section() -> None:
                 "trade_size_usd": params.get("trade_size_usd"),
                 "score_threshold": params.get("score_threshold", params.get("min_score")),
                 "min_prob": params.get("min_prob"),
-                "total_trades": metrics.get("total_trades", 0.0),
-                "winrate": metrics.get("winrate", 0.0) * 100 if metrics.get("winrate", 0) <= 1 else metrics.get("winrate", 0.0),
-                "net_pnl": metrics.get("net_pnl", 0.0),
-                "max_drawdown": metrics.get("max_drawdown", 0.0),
+                "total_trades": display_metrics.get("total_trades", 0.0),
+                "winrate": display_metrics.get("winrate", 0.0) * 100 if display_metrics.get("winrate", 0) <= 1 else display_metrics.get("winrate", 0.0),
+                "net_pnl": display_metrics.get("net_pnl", 0.0),
+                "max_drawdown": display_metrics.get("max_drawdown", 0.0),
                 "started_at": run.get("started_at"),
                 "finished_at": run.get("finished_at"),
             }
@@ -173,11 +176,15 @@ def render_saved_backtests_section() -> None:
     st.markdown("#### Run details")
     for run in runs:
         metrics = run.get("metrics") or run.get("metrics_summary") or {}
+        display_metrics = {k: v for k, v in metrics.items() if not isinstance(v, dict)}
         params = run.get("params", {}) or {}
         total_trades = metrics.get("total_trades", 0.0)
         with st.expander(f"{run['backtest_id']} — {', '.join(run.get('symbols', []))}", expanded=run.get("status") == "running"):
             st.write(f"Timeframe: {run.get('timeframe')} | Range: {run.get('start_date')} → {run.get('end_date')}")
             st.write(f"Status: {run.get('status', 'unknown').title()}")
+            label = run.get("label") or run.get("note")
+            if label:
+                st.write(f"Label: {label}")
             if run.get("status") == "running":
                 progress = run.get("progress", 0.0)
                 current = int(run.get("current_bar") or 0)
@@ -186,8 +193,15 @@ def render_saved_backtests_section() -> None:
             elif total_trades == 0:
                 st.info("0 trades taken for this configuration. Filters likely excluded all signals.")
             if metrics:
-                metrics_df = pd.DataFrame({"metric": metrics.keys(), "value": metrics.values()})
+                metrics_df = pd.DataFrame({"metric": display_metrics.keys(), "value": display_metrics.values()})
                 st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+            per_symbol = metrics.get("per_symbol") if isinstance(metrics, dict) else None
+            if isinstance(per_symbol, dict) and per_symbol:
+                per_symbol_df = pd.DataFrame([
+                    {"symbol": sym, **vals} for sym, vals in per_symbol.items()
+                ])
+                st.markdown("**Per-symbol metrics**")
+                st.dataframe(per_symbol_df, use_container_width=True, hide_index=True)
             if params:
                 st.markdown("**Parameters**")
                 st.json(params)
@@ -2597,6 +2611,9 @@ def render_backtest_lab() -> None:
     st.subheader("Backtest / Research Lab")
     launch_message = st.empty()
 
+    runs_for_guard = discover_backtest_runs(BACKTEST_DIR)
+    running_count = sum(1 for run in runs_for_guard if str(run.get("status", "")).lower() == "running")
+
     timeframe = st.selectbox("Timeframe", ["1m", "5m", "1h", "4h", "1d"], index=0)
 
     today = datetime.now(timezone.utc).date()
@@ -2644,6 +2661,7 @@ def render_backtest_lab() -> None:
 
     st.caption("Historical data will be downloaded automatically for the selected symbols and timeframe.")
     st.text_input("OHLCV glob (auto)", value=f"data/*_{timeframe}.csv", disabled=True)
+    run_label = st.text_input("Run label / note (optional)")
 
     sizing_cols = st.columns(3)
     with sizing_cols[0]:
@@ -2665,10 +2683,24 @@ def render_backtest_lab() -> None:
         latency = st.number_input("Latency bars", value=0, min_value=0, step=1)
     with overrides_col[2]:
         capital = st.number_input("Initial capital", value=10_000.0, step=1_000.0)
+        random_seed = st.number_input("Random seed", value=1337, step=1, help="Seed for deterministic components")
 
-    run_button = st.button("Run Backtest", use_container_width=True)
+    run_disabled = running_count >= MAX_RUNNING_BACKTESTS
+    if run_disabled:
+        st.warning(
+            f"You already have {running_count} running backtests; wait for some to complete before launching more."
+        )
+    else:
+        st.caption(f"Running backtests: {running_count}/{MAX_RUNNING_BACKTESTS}")
+
+    run_button = st.button("Run Backtest", use_container_width=True, disabled=run_disabled)
 
     if run_button:
+        if run_disabled:
+            st.warning(
+                f"You already have {running_count} running backtests; wait for some to complete before launching more."
+            )
+            return
         if not selected_universe:
             st.warning("Select at least one symbol to run a backtest.")
             return
@@ -2717,12 +2749,16 @@ def render_backtest_lab() -> None:
                 str(trade_size_usd),
                 "--exit-mode",
                 mode,
+                "--random-seed",
+                str(int(random_seed)),
                 "--out-dir",
                 str(BACKTEST_DIR),
             ]
 
         def _launch(bt_id: str, score: float, prob: float, mode: str) -> str | None:
             cli_args = _build_cli_args(bt_id, score, prob, mode)
+            if run_label:
+                cli_args.extend(["--run-label", run_label])
             log_path = BACKTEST_DIR / f"{bt_id}.log"
             try:
                 with open(log_path, "ab") as log_file:
