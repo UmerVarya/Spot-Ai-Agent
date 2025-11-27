@@ -207,42 +207,43 @@ def render_saved_backtests_section() -> None:
             current = int(run.get("current_bar") or 0)
             total = int(run.get("total_bars") or 0)
             st.progress(progress, text=f"{current:,} / {total:,} bars")
-            elif total_trades == 0:
-                st.info("0 trades taken for this configuration. Filters likely excluded all signals.")
-            if metrics:
-                metrics_df = pd.DataFrame({"metric": display_metrics.keys(), "value": display_metrics.values()})
-                st.dataframe(metrics_df, use_container_width=True, hide_index=True)
-            per_symbol = metrics.get("per_symbol") if isinstance(metrics, dict) else None
-            if isinstance(per_symbol, dict) and per_symbol:
-                per_symbol_df = pd.DataFrame([
-                    {"symbol": sym, **vals} for sym, vals in per_symbol.items()
-                ])
-                st.markdown("**Per-symbol metrics**")
-                st.dataframe(per_symbol_df, use_container_width=True, hide_index=True)
-            if params:
-                st.markdown("**Parameters**")
-                st.json(params)
-            files_cols = st.columns(2)
-            trades_path = run.get("trades_path")
-            equity_path = run.get("equity_path")
-            if trades_path and Path(trades_path).exists():
-                with open(trades_path, "rb") as fh:
-                    files_cols[0].download_button(
-                        "Download trades CSV",
-                        data=fh.read(),
-                        file_name=Path(trades_path).name,
-                        mime="text/csv",
-                        key=f"dl_trades_{run['backtest_id']}",
-                    )
-            if equity_path and Path(equity_path).exists():
-                with open(equity_path, "rb") as fh:
-                    files_cols[1].download_button(
-                        "Download equity CSV",
-                        data=fh.read(),
-                        file_name=Path(equity_path).name,
-                        mime="text/csv",
-                        key=f"dl_equity_{run['backtest_id']}",
-                    )
+        elif total_trades == 0:
+            st.info("0 trades taken for this configuration. Filters likely excluded all signals.")
+            continue
+        if metrics:
+            metrics_df = pd.DataFrame({"metric": display_metrics.keys(), "value": display_metrics.values()})
+            st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+        per_symbol = metrics.get("per_symbol") if isinstance(metrics, dict) else None
+        if isinstance(per_symbol, dict) and per_symbol:
+            per_symbol_df = pd.DataFrame([
+                {"symbol": sym, **vals} for sym, vals in per_symbol.items()
+            ])
+            st.markdown("**Per-symbol metrics**")
+            st.dataframe(per_symbol_df, use_container_width=True, hide_index=True)
+        if params:
+            st.markdown("**Parameters**")
+            st.json(params)
+        files_cols = st.columns(2)
+        trades_path = run.get("trades_path")
+        equity_path = run.get("equity_path")
+        if trades_path and Path(trades_path).exists():
+            with open(trades_path, "rb") as fh:
+                files_cols[0].download_button(
+                    "Download trades CSV",
+                    data=fh.read(),
+                    file_name=Path(trades_path).name,
+                    mime="text/csv",
+                    key=f"dl_trades_{run['backtest_id']}",
+                )
+        if equity_path and Path(equity_path).exists():
+            with open(equity_path, "rb") as fh:
+                files_cols[1].download_button(
+                    "Download equity CSV",
+                    data=fh.read(),
+                    file_name=Path(equity_path).name,
+                    mime="text/csv",
+                    key=f"dl_equity_{run['backtest_id']}",
+                )
 
 
 def _arrow_safe_scalar(value):
