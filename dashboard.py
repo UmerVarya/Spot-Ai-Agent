@@ -2666,11 +2666,9 @@ def render_backtest_lab() -> None:
     with overrides_col[2]:
         capital = st.number_input("Initial capital", value=10_000.0, step=1_000.0)
 
-    run_col, grid_col = st.columns(2)
-    run_button = run_col.button("Run Backtest", use_container_width=True)
-    grid_button = grid_col.button("Launch 5-run research grid", use_container_width=True)
+    run_button = st.button("Run Backtest", use_container_width=True)
 
-    if run_button or grid_button:
+    if run_button:
         if not selected_universe:
             st.warning("Select at least one symbol to run a backtest.")
             return
@@ -2740,35 +2738,12 @@ def render_backtest_lab() -> None:
                 launch_message.error(f"Failed to launch backtest: {exc}")
                 return None
 
-        if run_button:
-            log_path = _launch(base_backtest_id, score_threshold, min_prob, exit_mode)
-            if log_path:
-                launch_message.success(
-                    f"Backtest launched as {base_backtest_id}. Track progress below. Logs: {Path(log_path).name}"
-                )
-                st.session_state["backtest_result"] = None
-
-        if grid_button:
-            base_score = float(score_threshold)
-            base_prob = float(min_prob)
-            variants: list[tuple[str, float, float, str]] = [
-                ("baseline", base_score, base_prob, exit_mode),
-                ("hi_prob", base_score, min(base_prob + 0.05, 0.9), exit_mode),
-                ("lo_prob", base_score, max(base_prob - 0.05, 0.5), exit_mode),
-                ("tp", base_score, base_prob, "tp_trailing"),
-                ("atr", base_score, base_prob, "atr_trailing"),
-            ]
-            launched_ids: list[str] = []
-            for suffix, sc, prob, mode in variants:
-                bt_id = f"{base_backtest_id}_{suffix}"
-                log_path = _launch(bt_id, sc, prob, mode)
-                if log_path:
-                    launched_ids.append(bt_id)
-            if launched_ids:
-                launch_message.success(
-                    "Launched research grid: " + ", ".join(launched_ids)
-                )
-                st.session_state["backtest_result"] = None
+        log_path = _launch(base_backtest_id, score_threshold, min_prob, exit_mode)
+        if log_path:
+            launch_message.success(
+                f"Backtest launched as {base_backtest_id}. Track progress below. Logs: {Path(log_path).name}"
+            )
+            st.session_state["backtest_result"] = None
 
     render_saved_backtests_section()
 
