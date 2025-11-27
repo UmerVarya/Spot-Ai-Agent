@@ -1,16 +1,34 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Iterable, Sequence
 
 import pandas as pd
 
-from backtest import BacktestResult, BacktestProgress, run_backtest
-from backtest.types import ProgressCallback
+from backtest.engine import BacktestConfig, BacktestResult, run_backtest_from_csv_paths
+from backtest.data_manager import ensure_ohlcv_csvs
+from backtest.filesystem import (
+    BacktestRunMetadata,
+    build_backtest_id,
+    build_backtest_output_paths,
+    get_backtest_dir,
+    write_csv_atomic,
+    write_json_atomic,
+)
+from backtest.types import BacktestProgress
+from run_backtest_cli import (
+    _compute_metrics,
+    _ensure_equity_curve,
+    _ensure_trades_with_header,
+    _format_date_for_path,
+    _MetaTracker,
+    _print_progress,
+)
 
-DEFAULT_OUTPUT_DIR = Path("/home/ubuntu/spot_data/backtests")
+
+DEFAULT_OUTPUT_DIR = get_backtest_dir()
 
 
 def _parse_datetime(value: str) -> datetime:
@@ -22,138 +40,218 @@ def _parse_datetime(value: str) -> datetime:
     return ts.to_pydatetime()
 
 
+def _parse_symbols(raw_symbols: str | None, legacy_symbol: str | None) -> list[str]:
+    symbols: list[str] = []
+    if raw_symbols:
+        symbols.extend([s.strip().upper() for s in raw_symbols.split(",") if s.strip()])
+    if not symbols and legacy_symbol:
+        symbols.append(legacy_symbol.strip().upper())
+    if not symbols:
+        raise argparse.ArgumentTypeError("Provide --symbols (comma-separated) or --symbol.")
+    return symbols
+
+
 def _resolve_date_range(args: argparse.Namespace) -> tuple[datetime, datetime]:
     now = datetime.now(timezone.utc)
     if args.start and args.end:
         start = _parse_datetime(args.start)
-        end = (_parse_datetime(args.end) + pd.Timedelta(days=1)).to_pydatetime()
+        end_inclusive = _parse_datetime(args.end)
     elif args.months:
-        end_dt = _parse_datetime(args.end) if args.end else now
-        end = (pd.Timestamp(end_dt) + pd.Timedelta(days=1)).to_pydatetime()
-        start = (pd.Timestamp(end_dt) - pd.DateOffset(months=args.months)).to_pydatetime()
+        end_inclusive = _parse_datetime(args.end) if args.end else now
+        start_ts = pd.Timestamp(end_inclusive) - pd.DateOffset(months=args.months)
+        start = start_ts.to_pydatetime()
     else:
         raise ValueError("Provide either --start/--end or --months to define the date range.")
 
-    if start > end:
+    if start > end_inclusive:
         raise ValueError("Start date must be before end date.")
 
-    return start, end
+    end_exclusive = end_inclusive + timedelta(days=1)
+    return start, end_exclusive
 
 
-def _make_progress_printer() -> ProgressCallback:
-    last_percent = -5
-    last_phase: Optional[str] = None
-
-    def _printer(progress: BacktestProgress) -> None:
-        nonlocal last_percent, last_phase
-        percent = int(progress.percent * 100) if progress.total > 0 else 0
-        should_print = progress.phase != last_phase or percent - last_percent >= 5 or progress.current >= progress.total
-        if should_print:
-            last_percent = percent
-            last_phase = progress.phase
-            print(
-                f"[BACKTEST] Progress: {progress.phase} "
-                f"{progress.current}/{progress.total} ({percent:.0f}%)",
-                flush=True,
-            )
-
-    return _printer
-
-
-def _write_outputs(
-    result: BacktestResult,
-    symbol: str,
+def _print_summary(
+    *,
+    backtest_id: str,
+    symbols: Iterable[str],
     timeframe: str,
     start: datetime,
-    end_inclusive: datetime,
-    output_dir: Path,
+    end_exclusive: datetime,
+    score_threshold: float,
+    min_prob: float,
+    exit_mode: str,
+    trade_size_usd: float,
+    fee_bps: float,
+    slippage_bps: float,
 ) -> None:
-    start_str = start.date().isoformat()
-    end_str = end_inclusive.date().isoformat()
-    symbol_upper = symbol.upper()
+    end_inclusive = end_exclusive - timedelta(days=1)
+    print("Starting backtest:")
+    print(f"  symbols: {','.join(symbols)}")
+    print(f"  timeframe: {timeframe}")
+    print(f"  start: {start.date()}")
+    print(f"  end: {end_inclusive.date()}")
+    print(f"  score_threshold: {score_threshold}")
+    print(f"  min_prob: {min_prob}")
+    print(f"  exit_mode: {exit_mode}")
+    print(f"  trade_size_usd: {trade_size_usd}")
+    print(f"  fee_bps: {fee_bps}")
+    print(f"  slippage_bps: {slippage_bps}")
+    print(f"  backtest_id: {backtest_id}")
 
-    trades_path = output_dir / f"{symbol_upper}_{timeframe}_{start_str}_{end_str}_trades.csv"
-    equity_path = output_dir / f"{symbol_upper}_{timeframe}_{start_str}_{end_str}_equity.csv"
-    metrics_path = output_dir / f"{symbol_upper}_{timeframe}_{start_str}_{end_str}_metrics.csv"
 
-    trades_df = result.trades if hasattr(result, "trades") else result.trades_df  # type: ignore[attr-defined]
-    equity_df = result.equity_curve if hasattr(result, "equity_curve") else result.equity_df  # type: ignore[attr-defined]
-    metrics_df = pd.DataFrame([getattr(result, "metrics", {}) or {}])
+def _run_backtest(
+    *,
+    symbols: list[str],
+    timeframe: str,
+    start: datetime,
+    end: datetime,
+    cfg: BacktestConfig,
+    backtest_id: str,
+    output_dir: Path,
+    data_dir: Path,
+) -> BacktestRunMetadata:
+    paths = build_backtest_output_paths(backtest_id, output_dir)
+    params_dict: dict[str, Any] = {
+        "score_threshold": cfg.min_score,
+        "min_prob": cfg.min_prob,
+        "exit_mode": cfg.exit_mode,
+        "trade_size_usd": cfg.trade_size_usd,
+        "fee_bps": cfg.fee_bps,
+        "slippage_bps": cfg.slippage_bps,
+        "random_seed": cfg.random_seed,
+    }
 
-    outputs = [
-        (trades_path, trades_df),
-        (equity_path, equity_df),
-        (metrics_path, metrics_df),
-    ]
+    metadata = BacktestRunMetadata(
+        backtest_id=backtest_id,
+        symbols=[sym.upper() for sym in symbols],
+        timeframe=timeframe,
+        start_date=_format_date_for_path(pd.Timestamp(start)),
+        end_date=_format_date_for_path(pd.Timestamp(end) - pd.Timedelta(days=1)),
+        params=params_dict,
+        random_seed=cfg.random_seed,
+    )
+    tracker = _MetaTracker(metadata, paths["meta"])
+    tracker.start(0)
 
-    tmp_paths = []
     try:
-        for path, df in outputs:
-            tmp_path = path.with_suffix(path.suffix + ".tmp")
-            df.to_csv(tmp_path, index=False)
-            tmp_paths.append((tmp_path, path))
-
-        for tmp_path, final_path in tmp_paths:
-            tmp_path.replace(final_path)
-    except Exception:
-        for tmp_path, _ in tmp_paths:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+        csv_paths = ensure_ohlcv_csvs(symbols, timeframe, start, end, data_dir=data_dir)
+    except Exception as exc:  # pragma: no cover - surfaced to user
+        tracker.fail(str(exc))
         raise
 
-    print("[BACKTEST] Done.")
-    print(f"[BACKTEST] Trades:  {trades_path}")
-    print(f"[BACKTEST] Equity:  {equity_path}")
-    print(f"[BACKTEST] Metrics: {metrics_path}")
+    try:
+        total_bars = 0
+        try:
+            from backtest.data import load_csv_paths
+
+            data_frames = load_csv_paths(csv_paths, start=pd.Timestamp(start), end=pd.Timestamp(end))
+            total_bars = int(sum(len(df) for df in data_frames.values()))
+        except Exception:
+            data_frames = None
+        tracker.start(total_bars)
+
+        def _progress(progress: BacktestProgress) -> None:
+            tracker.update_progress(progress)
+            _print_progress(progress)
+
+        result: BacktestResult = run_backtest_from_csv_paths(
+            csv_paths, cfg, symbols=symbols, progress_callback=_progress
+        )
+    except Exception as exc:  # pragma: no cover - surfaced to user
+        tracker.fail(str(exc))
+        raise
+
+    trades = _ensure_trades_with_header(result.trades if hasattr(result, "trades") else pd.DataFrame())
+    equity = _ensure_equity_curve(result.equity_curve if hasattr(result, "equity_curve") else pd.DataFrame(), cfg)
+    metrics = _compute_metrics(trades, equity, cfg.initial_capital)
+
+    write_csv_atomic(paths["trades"], trades)
+    write_csv_atomic(paths["equity"], equity)
+    write_json_atomic(paths["metrics"], metrics)
+    tracker.complete(metrics)
+
+    return metadata
 
 
-def main(cli_args: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run a Spot-AI backtest from the CLI.")
-    parser.add_argument("--symbol", required=True, help="Trading pair symbol, e.g. BTCUSDT")
-    parser.add_argument("--timeframe", default="1m", help="Timeframe (default: 1m)")
-    parser.add_argument("--months", type=int, default=None, help="Number of months to backtest ending at --end or now")
-    parser.add_argument("--start", help="Start date (ISO format)")
-    parser.add_argument("--end", help="End date (ISO format, default: now)")
-    parser.add_argument("--output-dir", help="Output directory for CSV results", default=str(DEFAULT_OUTPUT_DIR))
+def main(cli_args: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run Spot-AI research backtests from the CLI.")
+    parser.add_argument("--symbols", help="Comma-separated Binance symbols, e.g. BTCUSDT,ETHUSDT")
+    parser.add_argument("--symbol", help="Legacy single symbol flag")
+    parser.add_argument("--timeframe", required=True, help="Timeframe (e.g. 1m)")
+    parser.add_argument("--months", type=int, help="Months back from now")
+    parser.add_argument("--start", help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--end", help="End date (YYYY-MM-DD)")
+    parser.add_argument("--output-dir", help="Output directory for artifacts")
+    parser.add_argument("--score-threshold", type=float, default=0.20)
+    parser.add_argument("--min-prob", type=float, default=0.55)
+    parser.add_argument("--exit-mode", choices=["tp_trailing", "atr_trailing"], default="tp_trailing")
+    parser.add_argument("--trade-size-usd", type=float, default=500.0)
+    parser.add_argument("--fee-bps", type=float, default=10.0)
+    parser.add_argument("--slippage-bps", type=float, default=0.0)
+    parser.add_argument("--random-seed", type=int)
 
     args = parser.parse_args(cli_args)
 
-    output_dir = Path(args.output_dir or DEFAULT_OUTPUT_DIR)
+    try:
+        symbols = _parse_symbols(args.symbols, args.symbol)
+        start, end = _resolve_date_range(args)
+    except (argparse.ArgumentTypeError, ValueError) as exc:
+        parser.error(str(exc))
+    output_dir = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    start, end = _resolve_date_range(args)
-    end_inclusive = (pd.Timestamp(end) - pd.Timedelta(days=1)).to_pydatetime()
+    backtest_id = build_backtest_id(
+        symbols,
+        args.timeframe,
+        _format_date_for_path(pd.Timestamp(start)),
+        _format_date_for_path(pd.Timestamp(end) - pd.Timedelta(days=1)),
+    )
 
-    symbol = args.symbol.upper()
-    timeframe = args.timeframe
+    cfg = BacktestConfig(
+        start_ts=pd.Timestamp(start),
+        end_ts=pd.Timestamp(end),
+        is_backtest=True,
+        min_score=args.score_threshold,
+        min_prob=args.min_prob,
+        fee_bps=args.fee_bps,
+        slippage_bps=args.slippage_bps,
+        sizing_mode="fixed_notional",
+        trade_size_usd=args.trade_size_usd,
+        exit_mode=args.exit_mode,
+        random_seed=args.random_seed,
+    )
 
-    print(f"[BACKTEST] Starting backtest for {symbol} {timeframe} from {start} to {end_inclusive}")
-    print(f"[BACKTEST] Results will be saved under: {output_dir}")
-
-    progress_printer = _make_progress_printer()
+    _print_summary(
+        backtest_id=backtest_id,
+        symbols=symbols,
+        timeframe=args.timeframe,
+        start=start,
+        end_exclusive=end,
+        score_threshold=args.score_threshold,
+        min_prob=args.min_prob,
+        exit_mode=args.exit_mode,
+        trade_size_usd=args.trade_size_usd,
+        fee_bps=args.fee_bps,
+        slippage_bps=args.slippage_bps,
+    )
 
     try:
-        result = run_backtest(
-            symbol=symbol,
-            timeframe=timeframe,
+        _run_backtest(
+            symbols=symbols,
+            timeframe=args.timeframe,
             start=start,
             end=end,
+            cfg=cfg,
+            backtest_id=backtest_id,
             output_dir=output_dir,
-            progress_callback=progress_printer,
+            data_dir=Path("data"),
         )
-    except Exception as exc:  # pragma: no cover - surface to user
-        print(f"[BACKTEST] Failed: {exc}")
+    except Exception as exc:  # pragma: no cover - surface error to user
+        print(f"Backtest failed: {exc}")
         return 1
 
-    try:
-        _write_outputs(result, symbol, timeframe, start, end_inclusive, output_dir)
-    except Exception as exc:  # pragma: no cover - surface to user
-        print(f"[BACKTEST] Failed to write outputs: {exc}")
-        return 1
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
+if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
