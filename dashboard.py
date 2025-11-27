@@ -2702,13 +2702,23 @@ def render_backtest_lab() -> None:
             str(BACKTEST_DIR),
         ]
 
+        log_path = BACKTEST_DIR / f"{backtest_id}.log"
+
         try:
-            subprocess.Popen(
-                cli_args,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            with open(log_path, "ab") as log_file:
+                # Streamlit is run under systemd on the server, so both the Streamlit server
+                # process and this detached child backtest process will survive the user
+                # closing the dashboard page or their SSH session. ``start_new_session`` keeps
+                # the subprocess fully detached from the launching request lifecycle.
+                subprocess.Popen(
+                    cli_args,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            launch_message.success(
+                f"Backtest launched as {backtest_id}. Track progress below. Logs: {log_path.name}"
             )
-            launch_message.success(f"Backtest launched as {backtest_id}. Track progress below.")
             st.session_state["backtest_result"] = None
         except Exception as exc:  # pragma: no cover - subprocess failures
             logger.exception("Failed to launch CLI backtest", exc_info=exc)
