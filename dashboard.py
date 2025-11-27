@@ -24,8 +24,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import csv
+import json
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Callable, Optional
@@ -35,15 +38,13 @@ from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 from backtest import (
     BacktestConfig,
     BacktestResult,
-    BacktestProgress,
     ResearchBacktester,
     compute_buy_and_hold_pnl,
-    discover_backtest_files,
+    discover_backtest_runs,
     generate_trades_from_ohlcv,
     get_backtest_dir,
-    run_backtest_from_csv_paths,
+    build_backtest_id,
 )
-from backtest.data_manager import ensure_ohlcv_csvs
 from ml_model import train_model
 import requests
 from daily_summary import generate_daily_summary
@@ -127,36 +128,81 @@ from streamlit_autorefresh import st_autorefresh
 
 def render_saved_backtests_section() -> None:
     st.subheader("Saved Backtests (CLI & UI)")
+    st.caption("Launched backtests update automatically. Use refresh if you have just kicked one off.")
+    st_autorefresh(interval=5_000, key="backtest_refresh_counter")
 
-    saved_runs = discover_backtest_files(BACKTEST_DIR)
-    if not saved_runs:
-        st.info("No saved backtest CSVs found in the backtests directory.")
+    runs = discover_backtest_runs(BACKTEST_DIR)
+    if not runs:
+        st.info("No saved backtests found yet. Launch one to populate this table.")
         return
 
-    for f in saved_runs:
-        label = f"{f.symbol} {f.timeframe} | {f.start} → {f.end} | {f.kind}"
-        with st.container():
-            st.write(label)
-            if f.kind == "metrics":
-                try:
-                    metrics_df = pd.read_csv(f.path)
-                    summary_cols = [
-                        c
-                        for c in metrics_df.columns
-                        if c.lower() in ("win_rate", "profit_factor", "total_trades", "max_drawdown")
-                    ]
-                    if summary_cols:
-                        st.dataframe(metrics_df[summary_cols])
-                except Exception as exc:  # pragma: no cover - user supplied file
-                    st.warning(f"Could not load metrics preview: {exc}")
-            with open(f.path, "rb") as fh:
-                st.download_button(
-                    label="Download CSV",
-                    data=fh.read(),
-                    file_name=f.path.name,
-                    mime="text/csv",
-                    key=f"dl_{f.path.name}",
-                )
+    table_rows: list[dict[str, object]] = []
+    for run in runs:
+        metrics = run.get("metrics") or run.get("metrics_summary") or {}
+        table_rows.append(
+            {
+                "backtest_id": run["backtest_id"],
+                "status": run.get("status", "unknown"),
+                "progress": run.get("progress", 0.0),
+                "symbols": ", ".join(run.get("symbols", [])),
+                "timeframe": run.get("timeframe"),
+                "start_date": run.get("start_date"),
+                "end_date": run.get("end_date"),
+                "total_trades": metrics.get("total_trades", 0.0),
+                "winrate": metrics.get("winrate", 0.0) * 100 if metrics.get("winrate", 0) <= 1 else metrics.get("winrate", 0.0),
+                "net_pnl": metrics.get("net_pnl", 0.0),
+                "max_drawdown": metrics.get("max_drawdown", 0.0),
+                "started_at": run.get("started_at"),
+                "finished_at": run.get("finished_at"),
+            }
+        )
+
+    df = pd.DataFrame(table_rows)
+    df.sort_values("started_at", ascending=False, inplace=True)
+    st.dataframe(
+        arrow_safe_dataframe(df),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("#### Run details")
+    for run in runs:
+        metrics = run.get("metrics") or run.get("metrics_summary") or {}
+        total_trades = metrics.get("total_trades", 0.0)
+        with st.expander(f"{run['backtest_id']} — {', '.join(run.get('symbols', []))}", expanded=run.get("status") == "running"):
+            st.write(f"Timeframe: {run.get('timeframe')} | Range: {run.get('start_date')} → {run.get('end_date')}")
+            st.write(f"Status: {run.get('status', 'unknown').title()}")
+            if run.get("status") == "running":
+                progress = run.get("progress", 0.0)
+                current = int(run.get("current_bar") or 0)
+                total = int(run.get("total_bars") or 0)
+                st.progress(progress, text=f"{current:,} / {total:,} bars")
+            elif total_trades == 0:
+                st.info("0 trades taken for this configuration. Filters likely excluded all signals.")
+            if metrics:
+                metrics_df = pd.DataFrame({"metric": metrics.keys(), "value": metrics.values()})
+                st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+            files_cols = st.columns(2)
+            trades_path = run.get("trades_path")
+            equity_path = run.get("equity_path")
+            if trades_path and Path(trades_path).exists():
+                with open(trades_path, "rb") as fh:
+                    files_cols[0].download_button(
+                        "Download trades CSV",
+                        data=fh.read(),
+                        file_name=Path(trades_path).name,
+                        mime="text/csv",
+                        key=f"dl_trades_{run['backtest_id']}",
+                    )
+            if equity_path and Path(equity_path).exists():
+                with open(equity_path, "rb") as fh:
+                    files_cols[1].download_button(
+                        "Download equity CSV",
+                        data=fh.read(),
+                        file_name=Path(equity_path).name,
+                        mime="text/csv",
+                        key=f"dl_equity_{run['backtest_id']}",
+                    )
 
 
 def _arrow_safe_scalar(value):
@@ -2540,43 +2586,7 @@ def render_scenario_lab(result: BacktestResult) -> None:
 
 def render_backtest_lab() -> None:
     st.subheader("Backtest / Research Lab")
-
-    progress_bar = st.progress(0)
-    progress_text = st.empty()
-
-    def _update_progress(p: BacktestProgress) -> None:
-        percent = int(p.percent * 100) if p.total > 0 else 0
-        percent = min(max(percent, 0), 100)
-        phase_label = p.phase.capitalize()
-        label = phase_label
-        if p.message:
-            label = f"{phase_label}: {p.message}"
-        progress_bar.progress(percent)
-        progress_text.write(f"{label} — {percent}%")
-
-    @st.cache_data(show_spinner=False, hash_funcs={type(lambda: None): lambda _: None})
-    def _run_backtest_cached(
-        cfg_dict: dict,
-        csv_paths: tuple[str, ...],
-        symbols: tuple[str, ...],
-        scenarios: bool,
-        progress_callback: Optional[Callable[[BacktestProgress], None]] = None,
-    ):
-        cfg_payload = cfg_dict.copy()
-        if cfg_payload.get("start_ts"):
-            cfg_payload["start_ts"] = pd.to_datetime(cfg_payload["start_ts"])
-        if cfg_payload.get("end_ts"):
-            cfg_payload["end_ts"] = pd.to_datetime(cfg_payload["end_ts"])
-        cfg = BacktestConfig(**cfg_payload)
-        filtered_paths = [Path(p) for p in csv_paths]
-        scenario_runner = _run_default_scenarios if scenarios else None
-        return run_backtest_from_csv_paths(
-            filtered_paths,
-            cfg,
-            symbols=symbols,
-            scenario_runner=scenario_runner,
-            progress_callback=progress_callback,
-        )
+    launch_message = st.empty()
 
     timeframe = st.selectbox("Timeframe", ["1m", "5m", "1h", "4h", "1d"], index=0)
 
@@ -2633,7 +2643,6 @@ def render_backtest_lab() -> None:
         fee_bps = st.number_input("Fee (bps)", value=10.0)
     with risk_cols[2]:
         slippage_bps = st.number_input("Slippage (bps)", value=2.0)
-        scenario_toggle = st.checkbox("Enable scenario runs", value=False)
 
     overrides_col = st.columns(2)
     with overrides_col[0]:
@@ -2653,55 +2662,63 @@ def render_backtest_lab() -> None:
             st.error("Please provide a valid start and end date.")
             return
 
-        start_ts = pd.Timestamp(datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc))
-        end_ts = pd.Timestamp(datetime.combine(end_date, datetime.min.time(), tzinfo=timezone.utc)) + pd.Timedelta(days=1)
-        cfg = BacktestConfig(
-            start_ts=start_ts,
-            end_ts=end_ts,
-            is_backtest=True,
-            min_score=score_threshold,
-            min_prob=min_prob,
-            atr_mult_sl=atr_mult,
-            fee_bps=fee_bps,
-            slippage_bps=slippage_bps,
-            latency_bars=int(latency),
-            initial_capital=capital,
-            risk_per_trade_pct=risk_per_trade,
-            take_profit_strategy=take_profit_strategy,
-        )
-        cfg_dict = cfg.__dict__.copy()
-        if cfg_dict.get("start_ts"):
-            cfg_dict["start_ts"] = cfg.start_ts.isoformat()
-        if cfg_dict.get("end_ts"):
-            cfg_dict["end_ts"] = cfg.end_ts.isoformat()
+        start_label = start_date.isoformat()
+        end_label = end_date.isoformat()
+        backtest_id = build_backtest_id(selected_universe, timeframe, start_label, end_label)
+
+        cli_script = Path(__file__).resolve().parent / "run_backtest_cli.py"
+        cli_args = [
+            sys.executable,
+            str(cli_script),
+            "--backtest-id",
+            backtest_id,
+            "--symbols",
+            *selected_universe,
+            "--timeframe",
+            timeframe,
+            "--start",
+            start_label,
+            "--end",
+            end_label,
+            "--risk",
+            str(risk_per_trade),
+            "--score-threshold",
+            str(score_threshold),
+            "--min-prob",
+            str(min_prob),
+            "--fee-bps",
+            str(fee_bps),
+            "--slippage-bps",
+            str(slippage_bps),
+            "--atr-stop-multiplier",
+            str(atr_mult),
+            "--latency-bars",
+            str(int(latency)),
+            "--initial-capital",
+            str(capital),
+            "--take-profit-strategy",
+            str(take_profit_strategy),
+            "--out-dir",
+            str(BACKTEST_DIR),
+        ]
 
         try:
-            progress_bar.progress(0)
-            progress_text.write("Preparing data...")
-            csv_paths = ensure_ohlcv_csvs(selected_universe, timeframe, start_ts.to_pydatetime(), end_ts.to_pydatetime())
-        except Exception as exc:  # pragma: no cover - network dependent
-            logger.exception("Failed to prepare OHLCV data for backtest", exc_info=exc)
-            st.error(f"Failed to prepare OHLCV data: {exc}")
-            return
-
-        csv_paths = tuple(str(p) for p in sorted(csv_paths))
-        progress_text.write("Starting backtest...")
-        res = _run_backtest_cached(
-            cfg_dict,
-            csv_paths,
-            tuple(selected_universe),
-            scenario_toggle,
-            progress_callback=_update_progress,
-        )
-        progress_bar.progress(100)
-        progress_text.success("Backtest complete.")
-        st.session_state["backtest_result"] = res
+            subprocess.Popen(
+                cli_args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            launch_message.success(f"Backtest launched as {backtest_id}. Track progress below.")
+            st.session_state["backtest_result"] = None
+        except Exception as exc:  # pragma: no cover - subprocess failures
+            logger.exception("Failed to launch CLI backtest", exc_info=exc)
+            launch_message.error(f"Failed to launch backtest: {exc}")
 
     render_saved_backtests_section()
 
     result: BacktestResult | None = st.session_state.get("backtest_result")
     if result is None:
-        st.info("Configure parameters and run a backtest to see research outputs.")
+        st.info("Launch a backtest to populate results. Saved runs above include download links and live progress.")
         return
 
     tabs = st.tabs(
