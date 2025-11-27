@@ -33,6 +33,8 @@ class BacktestRunMetadata:
     start_date: str
     end_date: str
     params: Dict[str, object]
+    label: str | None = None
+    random_seed: int | None = None
     status: str = "queued"
     progress: float = 0.0
     current_bar: int = 0
@@ -125,9 +127,15 @@ def load_run_metadata(path: Path) -> BacktestRunMetadata | None:
         return None
 
 
-def _safe_get_metrics(path: Path) -> Dict[str, float]:
+def _safe_get_metrics(path: Path) -> Dict[str, object]:
     payload = _load_json(path)
-    return {k: float(v) for k, v in payload.items() if isinstance(v, (int, float))}
+    metrics: Dict[str, object] = {}
+    for key, value in payload.items():
+        if isinstance(value, (int, float)):
+            metrics[key] = float(value)
+        else:
+            metrics[key] = value
+    return metrics
 
 
 def discover_backtest_runs(backtest_dir: Path) -> List[Dict[str, object]]:

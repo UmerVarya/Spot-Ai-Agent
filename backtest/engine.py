@@ -56,6 +56,7 @@ class BacktestConfig:
     sizing_mode: str = "risk_pct"
     trade_size_usd: float = 500.0
     exit_mode: str = "tp_trailing"
+    random_seed: int | None = None
 
 
 @dataclass
@@ -121,6 +122,45 @@ class ResearchBacktester:
         base = quote / entry_price if entry_price else 0.0
         return base, quote
 
+    @staticmethod
+    def _session_from_timestamp(ts: pd.Timestamp) -> str:
+        hour = ts.tz_convert("UTC").hour if ts.tzinfo else ts.hour
+        if 0 <= hour < 7 or hour >= 20:
+            return "Asia"
+        if 7 <= hour < 13:
+            return "Europe"
+        return "US"
+
+    @staticmethod
+    def _volatility_percentiles(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        required = {"high", "low", "close"}
+        if df.empty or not required.issubset(df.columns):
+            return pd.Series(dtype=float)
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
+        close = df["close"].astype(float)
+        prev_close = close.shift(1)
+        true_range = pd.concat(
+            [
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        atr = true_range.rolling(period).mean()
+        return atr.rank(pct=True, method="average")
+
+    @staticmethod
+    def _label_vol_regime(percentile: float | None) -> str:
+        if percentile is None or not np.isfinite(percentile):
+            return "unknown"
+        if percentile >= 0.66:
+            return "high"
+        if percentile <= 0.33:
+            return "low"
+        return "medium"
+
     def _enrich_trades(self, trades_df: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
         df = trades_df.copy()
         df["entry_time"] = pd.to_datetime(df["entry_time"])
@@ -129,11 +169,17 @@ class ResearchBacktester:
         df["take_profit_strategy"] = cfg.take_profit_strategy
         df["score_at_entry"] = df.get("score", df.get("signal", np.nan))
 
+        vol_percentiles: dict[str, pd.Series] = {}
+        for symbol, history in self.historical_data.items():
+            vol_percentiles[symbol] = self._volatility_percentiles(history)
+
         base_sizes: List[float] = []
         quote_sizes: List[float] = []
         fees_paid: List[float] = []
         mae_list: List[float] = []
         mfe_list: List[float] = []
+        sessions: List[str] = []
+        vol_regimes: List[str] = []
 
         for _, row in df.iterrows():
             entry_price = float(row.get("entry_price", 0.0))
@@ -163,11 +209,22 @@ class ResearchBacktester:
                 mae_list.append(np.nan)
                 mfe_list.append(np.nan)
 
+            entry_ts = pd.to_datetime(row.get("entry_time"))
+            sessions.append(self._session_from_timestamp(entry_ts))
+            symbol = row.get("symbol")
+            vol_pct = None
+            if isinstance(symbol, str) and symbol in vol_percentiles:
+                vol_series = vol_percentiles[symbol]
+                vol_pct = float(vol_series.get(entry_ts, np.nan)) if not vol_series.empty else np.nan
+            vol_regimes.append(self._label_vol_regime(vol_pct))
+
         df["position_size_base"] = base_sizes
         df["position_size_quote"] = quote_sizes
         df["fees_paid"] = fees_paid
         df["mae"] = mae_list
         df["mfe"] = mfe_list
+        df["session"] = sessions
+        df["vol_regime"] = vol_regimes
 
         gross_returns = df["return"].astype(float)
         # The legacy backtester already deducts entry/exit fees from `return`, so
@@ -193,6 +250,17 @@ class ResearchBacktester:
         cfg: BacktestConfig,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> BacktestResult:
+        if cfg.random_seed is not None:
+            try:
+                import random
+
+                random.seed(cfg.random_seed)
+            except Exception:
+                pass
+            try:
+                np.random.seed(cfg.random_seed)
+            except Exception:
+                pass
         params = self._build_params(cfg)
         position_size_func = self.position_size_func
         if cfg.sizing_mode == "fixed_notional":

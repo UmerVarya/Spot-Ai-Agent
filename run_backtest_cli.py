@@ -93,7 +93,7 @@ def _ensure_equity_curve(equity: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFr
     return base
 
 
-def _compute_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capital: float) -> Dict[str, float]:
+def _compute_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capital: float) -> Dict[str, Any]:
     pnl_col = "net_pnl_quote" if "net_pnl_quote" in trades.columns else "pnl"
     pnl_series = trades.get(pnl_col, pd.Series(dtype=float)).astype(float) if not trades.empty else pd.Series(dtype=float)
     total_trades = int(len(trades))
@@ -137,7 +137,7 @@ def _compute_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capital
 
     winrate = float(winning / total_trades) if total_trades else 0.0
 
-    return {
+    metrics: Dict[str, Any] = {
         "total_trades": float(total_trades),
         "winning_trades": float(winning),
         "losing_trades": float(losing),
@@ -151,6 +151,43 @@ def _compute_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capital
         "sharpe_ratio": sharpe_ratio,
         "calmar_ratio": float(calmar_ratio),
     }
+
+    if not trades.empty:
+        pnl_col = "net_pnl_quote" if "net_pnl_quote" in trades.columns else "pnl"
+        per_symbol: Dict[str, Dict[str, float]] = {}
+
+        def _symbol_drawdown(pnl: pd.Series) -> float:
+            equity_track = initial_capital + pnl.cumsum()
+            if equity_track.empty:
+                return 0.0
+            peak = equity_track.cummax()
+            dd = (equity_track - peak) / peak
+            worst = float(dd.min()) if not dd.empty else 0.0
+            if not np.isfinite(worst):
+                return 0.0
+            return abs(worst)
+
+        for symbol, group in trades.groupby("symbol"):
+            pnl_series = group[pnl_col].astype(float)
+            total = int(len(group))
+            wins = int((pnl_series > 0).sum()) if total else 0
+            losses = int((pnl_series < 0).sum()) if total else 0
+            r_mult = group.get("r_multiple", pd.Series(dtype=float)).astype(float)
+            avg_r_sym = float(np.nanmean(r_mult)) if len(r_mult) else 0.0
+            if not np.isfinite(avg_r_sym):
+                avg_r_sym = 0.0
+            per_symbol[symbol] = {
+                "total_trades": float(total),
+                "winning_trades": float(wins),
+                "losing_trades": float(losses),
+                "winrate": float(wins / total) if total else 0.0,
+                "net_pnl": float(pnl_series.sum()) if total else 0.0,
+                "avg_r_multiple": avg_r_sym,
+                "max_drawdown": _symbol_drawdown(pnl_series),
+            }
+        metrics["per_symbol"] = per_symbol
+
+    return metrics
 
 
 class _MetaTracker:
@@ -239,6 +276,7 @@ def run_cli(args: Sequence[str] | None = None) -> int:
     parser.add_argument("--initial-capital", type=float, default=10_000.0, help="Initial capital for backtest")
     parser.add_argument("--take-profit-strategy", default=TP1_TRAILING_ONLY_STRATEGY, help="Take profit strategy identifier")
     parser.add_argument("--skip-fraction", type=float, default=0.0, help="Randomly skip this fraction of signals")
+    parser.add_argument("--random-seed", type=int, default=1337, help="Seed for any stochastic components")
     parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Directory containing OHLCV CSVs")
     parser.add_argument("--csv-paths", nargs="*", default=None, help="Optional explicit CSV paths (skip download)")
     parser.add_argument(
@@ -248,6 +286,7 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         help="Output directory for CSV/JSON results",
     )
     parser.add_argument("--backtest-id", help="Optional explicit backtest identifier for file naming")
+    parser.add_argument("--run-label", default=None, help="Optional label or note for this run")
     parser.add_argument("--dry-run", action="store_true", help="Print configuration and exit without running")
 
     parsed = parser.parse_args(args=args)
@@ -282,6 +321,7 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         sizing_mode=parsed.sizing_mode,
         trade_size_usd=parsed.trade_size_usd,
         exit_mode=parsed.exit_mode,
+        random_seed=parsed.random_seed,
     )
 
     print("Configured backtest:")
@@ -318,6 +358,7 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         "sizing_mode": parsed.sizing_mode,
         "trade_size_usd": parsed.trade_size_usd,
         "exit_mode": parsed.exit_mode,
+        "random_seed": parsed.random_seed,
     }
 
     backtest_id = parsed.backtest_id or build_backtest_id(
@@ -334,6 +375,8 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         start_date=_format_date_for_path(start_ts),
         end_date=_format_date_for_path(end_ts - pd.Timedelta(days=1)),
         params=params_dict,
+        label=parsed.run_label,
+        random_seed=parsed.random_seed,
     )
     tracker = _MetaTracker(metadata, paths["meta"])
     tracker.start(0)
