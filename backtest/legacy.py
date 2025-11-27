@@ -53,6 +53,7 @@ class PendingEntry:
     tp_rungs: Tuple[float, ...]
     fee_bps: float
     slippage_bps: float
+    exit_mode: str
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -76,6 +77,7 @@ class TradePosition:
     signal_time: pd.Timestamp
     fee_bps: float
     slippage_bps: float
+    exit_mode: str
 
     def direction_label(self) -> str:
         return "long" if self.direction >= 0 else "short"
@@ -299,6 +301,7 @@ class Backtester:
         fee_bps: float,
         slippage_bps: float,
         latency_bars: int,
+        exit_mode: str,
         metadata: Dict[str, Any],
     ) -> None:
         if latency_bars < 0:
@@ -323,6 +326,7 @@ class Backtester:
                 tp_rungs=tuple(float(r) for r in tp_rungs),
                 fee_bps=fee_bps,
                 slippage_bps=slippage_bps,
+                exit_mode=exit_mode,
                 metadata=metadata,
             )
         )
@@ -433,11 +437,15 @@ class Backtester:
         max_concurrent = int(params.get("max_concurrent", params.get("max_positions", 1)))
         start_ts: Optional[pd.Timestamp] = params.get("start_ts")
         end_ts: Optional[pd.Timestamp] = params.get("end_ts")
+        exit_mode = str(params.get("exit_mode", "tp_trailing")).lower()
 
         if isinstance(tp_rungs, (list, tuple)):
             tp_rungs_tuple = tuple(float(x) for x in tp_rungs)
         else:
             tp_rungs_tuple = (float(tp_rungs),)
+
+        if exit_mode == "atr_trailing":
+            tp_rungs_tuple = tuple()
 
         timestamps = sorted(
             set().union(*(df.index for df in self.historical_data.values()))
@@ -526,6 +534,7 @@ class Backtester:
                     "exit_reason": exit_reason,
                     "holding_bars": holding_bars,
                     "metadata": trade.metadata,
+                    "exit_mode": trade.exit_mode,
                     "microstructure": microstructure,
                 }
                 metadata = trade.metadata
@@ -582,6 +591,7 @@ class Backtester:
                     signal_time=entry.signal_time,
                     fee_bps=entry.fee_bps,
                     slippage_bps=entry.slippage_bps,
+                    exit_mode=entry.exit_mode,
                 )
                 open_trades.append(trade)
                 active_symbols[trade.symbol] = active_symbols.get(trade.symbol, 0) + 1
@@ -659,6 +669,7 @@ class Backtester:
                             fee_bps,
                             slippage_bps,
                             latency_bars,
+                            exit_mode,
                             metadata,
                         )
                         available_slots -= 1

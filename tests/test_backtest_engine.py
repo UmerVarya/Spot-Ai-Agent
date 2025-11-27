@@ -1,9 +1,20 @@
+import dataclasses
+import json
+
 import pandas as pd
 import pytest
 
 from backtest.engine import BacktestConfig, ResearchBacktester, run_backtest_from_csv_paths
 from backtest.metrics import equity_statistics, trade_distribution_metrics
 from backtest.scenario import run_fee_slippage_scenarios
+from backtest.filesystem import (
+    BacktestRunMetadata,
+    build_backtest_id,
+    build_backtest_output_paths,
+    write_csv_atomic,
+    write_json_atomic,
+)
+from trade_schema import TRADE_HISTORY_COLUMNS
 
 
 def _dummy_signal(df_slice: pd.DataFrame, symbol: str):
@@ -95,3 +106,85 @@ def test_progress_callback_reports_phases(tmp_path):
 
     for phase in ["loading", "simulating", "finalizing", "done"]:
         assert phase in phases
+
+
+def test_fixed_notional_backtest_outputs(tmp_path):
+    data = _build_trending_data()
+    df_with_ts = data["TEST"].reset_index().rename(columns={"index": "timestamp"})
+    csv_path = tmp_path / "TEST_1m.csv"
+    df_with_ts.to_csv(csv_path, index=False)
+
+    start_ts = data["TEST"].index.min()
+    end_ts = data["TEST"].index.max()
+    base_cfg = BacktestConfig(
+        start_ts=start_ts,
+        end_ts=end_ts,
+        min_score=0.0,
+        min_prob=0.0,
+        is_backtest=True,
+        sizing_mode="fixed_notional",
+        trade_size_usd=500.0,
+        fee_bps=10.0,
+        slippage_bps=0.0,
+        initial_capital=10_000.0,
+    )
+
+    timeframe = "1m"
+    for exit_mode in ["tp_trailing", "atr_trailing"]:
+        cfg = dataclasses.replace(base_cfg, exit_mode=exit_mode)
+        result = run_backtest_from_csv_paths([csv_path], cfg, symbols=["TEST"])
+        backtest_id = (
+            build_backtest_id(
+                ["TEST"],
+                timeframe,
+                start_ts.strftime("%Y-%m-%d"),
+                end_ts.strftime("%Y-%m-%d"),
+            )
+            + f"_{exit_mode}"
+        )
+        paths = build_backtest_output_paths(backtest_id, tmp_path)
+
+        trades = result.trades if not result.trades.empty else pd.DataFrame(columns=list(TRADE_HISTORY_COLUMNS))
+        equity_curve = result.equity_curve
+        if equity_curve.empty:
+            equity_curve = pd.DataFrame(
+                {
+                    "timestamp": [cfg.start_ts],
+                    "equity": [cfg.initial_capital],
+                    "peak_equity": [cfg.initial_capital],
+                    "drawdown_pct": [0.0],
+                    "drawdown": [0.0],
+                }
+            )
+
+        write_csv_atomic(paths["trades"], trades)
+        write_csv_atomic(paths["equity"], equity_curve)
+        write_json_atomic(paths["metrics"], result.metrics or {})
+
+        params = {
+            "score_threshold": cfg.min_score,
+            "min_prob": cfg.min_prob,
+            "trade_size_usd": cfg.trade_size_usd,
+            "exit_mode": cfg.exit_mode,
+            "symbols": ["TEST"],
+        }
+        meta = BacktestRunMetadata(
+            backtest_id=backtest_id,
+            symbols=["TEST"],
+            timeframe=timeframe,
+            start_date=start_ts.strftime("%Y-%m-%d"),
+            end_date=end_ts.strftime("%Y-%m-%d"),
+            params=params,
+            status="completed",
+            progress=1.0,
+        )
+        write_json_atomic(paths["meta"], meta.to_dict())
+
+        assert paths["trades"].exists()
+        assert paths["equity"].exists()
+        meta_payload = json.loads(paths["meta"].read_text())
+        assert meta_payload.get("status") == "completed"
+        assert meta_payload["params"].get("trade_size_usd") == cfg.trade_size_usd
+        assert meta_payload["params"].get("exit_mode") == exit_mode
+        assert meta_payload["params"].get("score_threshold") == cfg.min_score
+        assert meta_payload["params"].get("min_prob") == cfg.min_prob
