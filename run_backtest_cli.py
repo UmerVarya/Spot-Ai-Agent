@@ -136,6 +136,36 @@ def _compute_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capital
         calmar_ratio = float(total_return / denom)
 
     winrate = float(winning / total_trades) if total_trades else 0.0
+    per_symbol_metrics: Dict[str, Dict[str, float]] = {}
+    if "symbol" in trades.columns and not trades.empty:
+        returns_col = "net_return" if "net_return" in trades.columns else None
+        for symbol, group in trades.groupby("symbol"):
+            symbol_pnl = group.get(pnl_col, pd.Series(dtype=float)).astype(float)
+            sym_total = int(len(group))
+            sym_wins = int((symbol_pnl > 0).sum()) if sym_total else 0
+            sym_losses = int((symbol_pnl < 0).sum()) if sym_total else 0
+            sym_winrate = float(sym_wins / sym_total) if sym_total else 0.0
+            sym_returns = group.get(returns_col, pd.Series(dtype=float)) if returns_col else pd.Series(dtype=float)
+            if sym_returns is not None and not sym_returns.empty:
+                equity_path = (1 + sym_returns.astype(float)).cumprod()
+                dd = (equity_path - equity_path.cummax()) / equity_path.cummax()
+                sym_max_dd = float(abs(dd.min())) if not dd.empty else 0.0
+            else:
+                scaled_returns = symbol_pnl / float(initial_capital or 1.0)
+                equity_path = (1 + scaled_returns).cumprod()
+                dd = (equity_path - equity_path.cummax()) / equity_path.cummax()
+                sym_max_dd = float(abs(dd.min())) if not dd.empty else 0.0
+            r_multiple = group.get("r_multiple", pd.Series(dtype=float)).astype(float)
+            sym_avg_r = float(np.nanmean(r_multiple)) if len(r_multiple) else 0.0
+            per_symbol_metrics[str(symbol)] = {
+                "total_trades": float(sym_total),
+                "winning_trades": float(sym_wins),
+                "losing_trades": float(sym_losses),
+                "winrate": sym_winrate,
+                "net_pnl": float(symbol_pnl.sum()) if sym_total else 0.0,
+                "avg_r_multiple": sym_avg_r if np.isfinite(sym_avg_r) else 0.0,
+                "max_drawdown": sym_max_dd if np.isfinite(sym_max_dd) else 0.0,
+            }
 
     return {
         "total_trades": float(total_trades),
@@ -150,6 +180,7 @@ def _compute_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capital
         "expectancy_r": expectancy_r,
         "sharpe_ratio": sharpe_ratio,
         "calmar_ratio": float(calmar_ratio),
+        "per_symbol": per_symbol_metrics,
     }
 
 
@@ -221,6 +252,8 @@ def run_cli(args: Sequence[str] | None = None) -> int:
     parser.add_argument("--initial-capital", type=float, default=10_000.0, help="Initial capital for backtest")
     parser.add_argument("--take-profit-strategy", default=TP1_TRAILING_ONLY_STRATEGY, help="Take profit strategy identifier")
     parser.add_argument("--skip-fraction", type=float, default=0.0, help="Randomly skip this fraction of signals")
+    parser.add_argument("--random-seed", type=int, default=42, help="Random seed for deterministic behaviour")
+    parser.add_argument("--label", help="Optional run label / note")
     parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Directory containing OHLCV CSVs")
     parser.add_argument("--csv-paths", nargs="*", default=None, help="Optional explicit CSV paths (skip download)")
     parser.add_argument(
@@ -261,6 +294,7 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         risk_per_trade_pct=parsed.risk,
         take_profit_strategy=parsed.take_profit_strategy,
         skip_fraction=parsed.skip_fraction,
+        random_seed=parsed.random_seed,
     )
 
     print("Configured backtest:")
@@ -294,6 +328,7 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         "initial_capital": parsed.initial_capital,
         "take_profit_strategy": parsed.take_profit_strategy,
         "skip_fraction": parsed.skip_fraction,
+        "random_seed": parsed.random_seed,
     }
 
     backtest_id = parsed.backtest_id or build_backtest_id(
@@ -310,6 +345,8 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         start_date=_format_date_for_path(start_ts),
         end_date=_format_date_for_path(end_ts - pd.Timedelta(days=1)),
         params=params_dict,
+        label=parsed.label,
+        random_seed=parsed.random_seed,
     )
     tracker = _MetaTracker(metadata, paths["meta"])
     tracker.start(0)

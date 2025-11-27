@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
+import random
 
 from backtest.legacy import Backtester
 from backtest.data import load_csv_paths
@@ -15,6 +16,7 @@ from log_utils import setup_logger
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 from trade_utils import evaluate_signal as live_evaluate_signal
 from trade_utils import precompute_backtest_indicators
+from volatility_regime import atr_percentile
 
 from .types import BacktestProgress, ProgressCallback, emit_progress
 
@@ -53,6 +55,7 @@ class BacktestConfig:
     take_profit_strategy: str = os.getenv("TAKE_PROFIT_STRATEGY", "atr_trailing")
     skip_fraction: float = 0.0
     entry_delay_bars: int = 0
+    random_seed: Optional[int] = 42
 
 
 @dataclass
@@ -106,6 +109,7 @@ class ResearchBacktester:
             "start_ts": cfg.start_ts,
             "end_ts": cfg.end_ts,
             "is_backtest": cfg.is_backtest,
+            "random_seed": cfg.random_seed,
         }
 
     @staticmethod
@@ -122,6 +126,9 @@ class ResearchBacktester:
         df["take_profit_strategy"] = cfg.take_profit_strategy
         df["score_at_entry"] = df.get("score", df.get("signal", np.nan))
 
+        sessions: List[str] = []
+        vol_regimes: List[str] = []
+
         base_sizes: List[float] = []
         quote_sizes: List[float] = []
         fees_paid: List[float] = []
@@ -136,6 +143,10 @@ class ResearchBacktester:
             quote_sizes.append(quote)
             fee = 2 * (cfg.fee_bps / 10_000.0) * quote
             fees_paid.append(fee)
+
+            entry_ts = pd.to_datetime(row.get("entry_time"), utc=True)
+            sessions.append(self._session_from_timestamp(entry_ts))
+            vol_regimes.append(self._volatility_regime(row.get("symbol"), entry_ts))
 
             prices = []
             micro = row.get("microstructure")
@@ -172,13 +183,52 @@ class ResearchBacktester:
         df["holding_time_minutes"] = (
             (df["exit_time"] - df["entry_time"]).dt.total_seconds() / 60.0
         )
+        df["session"] = sessions
+        df["vol_regime"] = vol_regimes
         return df
+
+    @staticmethod
+    def _session_from_timestamp(ts: pd.Timestamp) -> str:
+        if ts is None or pd.isna(ts):
+            return "US"
+        hour = int(ts.hour)
+        if 0 <= hour < 8:
+            return "Asia"
+        if 8 <= hour < 16:
+            return "Europe"
+        return "US"
+
+    def _volatility_regime(self, symbol: str | None, entry_ts: pd.Timestamp) -> str:
+        df = self.historical_data.get(str(symbol)) if symbol is not None else None
+        if df is None or df.empty:
+            return "medium"
+        try:
+            history = df.loc[:entry_ts]
+        except Exception:
+            return "medium"
+        if history.empty:
+            return "medium"
+        try:
+            percentile = atr_percentile(history["high"], history["low"], history["close"])
+        except Exception:
+            return "medium"
+        if not np.isfinite(percentile):
+            return "medium"
+        if percentile < 0.25:
+            return "low"
+        if percentile > 0.75:
+            return "high"
+        return "medium"
 
     def run(
         self,
         cfg: BacktestConfig,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> BacktestResult:
+        if cfg.random_seed is not None:
+            random.seed(cfg.random_seed)
+            np.random.seed(cfg.random_seed)
+
         params = self._build_params(cfg)
         legacy_bt = Backtester(
             historical_data=self.historical_data,

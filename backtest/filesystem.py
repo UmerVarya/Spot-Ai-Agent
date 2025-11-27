@@ -33,6 +33,8 @@ class BacktestRunMetadata:
     start_date: str
     end_date: str
     params: Dict[str, object]
+    label: str | None = None
+    random_seed: int | None = None
     status: str = "queued"
     progress: float = 0.0
     current_bar: int = 0
@@ -141,9 +143,11 @@ def discover_backtest_runs(backtest_dir: Path) -> List[Dict[str, object]]:
         if metrics_path.exists():
             file_metrics = _safe_get_metrics(metrics_path)
             metrics = {**metrics, **file_metrics}
+        metrics_full = _load_json(metrics_path) if metrics_path.exists() else {}
         row: Dict[str, object] = {
             **metadata.to_dict(),
             "metrics": metrics,
+            "metrics_full": metrics_full,
             "trades_path": meta_path.with_name(meta_path.name.replace("_meta.json", "_trades.csv")),
             "equity_path": meta_path.with_name(meta_path.name.replace("_meta.json", "_equity.csv")),
             "metrics_path": metrics_path,
