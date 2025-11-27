@@ -216,6 +216,24 @@ def run_cli(args: Sequence[str] | None = None) -> int:
     parser.add_argument("--fee-bps", type=float, default=10.0, help="Fee in basis points")
     parser.add_argument("--slippage-bps", type=float, default=2.0, help="Slippage in basis points")
     parser.add_argument("--atr-stop-multiplier", type=float, default=1.5, help="ATR stop multiplier")
+    parser.add_argument(
+        "--trade-size-usd",
+        type=float,
+        default=500.0,
+        help="Fixed notional size per trade when using fixed_notional sizing",
+    )
+    parser.add_argument(
+        "--sizing-mode",
+        choices=["fixed_notional", "risk_pct"],
+        default="fixed_notional",
+        help="Position sizing mode",
+    )
+    parser.add_argument(
+        "--exit-mode",
+        choices=["tp_trailing", "atr_trailing"],
+        default="tp_trailing",
+        help="Exit behaviour (TP trailing vs ATR trailing)",
+    )
     parser.add_argument("--latency-bars", type=int, default=0, help="Execution latency (bars)")
     parser.add_argument("--entry-delay-bars", type=int, default=0, help="Entry delay (bars)")
     parser.add_argument("--initial-capital", type=float, default=10_000.0, help="Initial capital for backtest")
@@ -261,6 +279,9 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         risk_per_trade_pct=parsed.risk,
         take_profit_strategy=parsed.take_profit_strategy,
         skip_fraction=parsed.skip_fraction,
+        sizing_mode=parsed.sizing_mode,
+        trade_size_usd=parsed.trade_size_usd,
+        exit_mode=parsed.exit_mode,
     )
 
     print("Configured backtest:")
@@ -294,6 +315,9 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         "initial_capital": parsed.initial_capital,
         "take_profit_strategy": parsed.take_profit_strategy,
         "skip_fraction": parsed.skip_fraction,
+        "sizing_mode": parsed.sizing_mode,
+        "trade_size_usd": parsed.trade_size_usd,
+        "exit_mode": parsed.exit_mode,
     }
 
     backtest_id = parsed.backtest_id or build_backtest_id(

@@ -139,6 +139,7 @@ def render_saved_backtests_section() -> None:
     table_rows: list[dict[str, object]] = []
     for run in runs:
         metrics = run.get("metrics") or run.get("metrics_summary") or {}
+        params = run.get("params", {}) or {}
         table_rows.append(
             {
                 "backtest_id": run["backtest_id"],
@@ -148,6 +149,10 @@ def render_saved_backtests_section() -> None:
                 "timeframe": run.get("timeframe"),
                 "start_date": run.get("start_date"),
                 "end_date": run.get("end_date"),
+                "exit_mode": params.get("exit_mode"),
+                "trade_size_usd": params.get("trade_size_usd"),
+                "score_threshold": params.get("score_threshold", params.get("min_score")),
+                "min_prob": params.get("min_prob"),
                 "total_trades": metrics.get("total_trades", 0.0),
                 "winrate": metrics.get("winrate", 0.0) * 100 if metrics.get("winrate", 0) <= 1 else metrics.get("winrate", 0.0),
                 "net_pnl": metrics.get("net_pnl", 0.0),
@@ -168,6 +173,7 @@ def render_saved_backtests_section() -> None:
     st.markdown("#### Run details")
     for run in runs:
         metrics = run.get("metrics") or run.get("metrics_summary") or {}
+        params = run.get("params", {}) or {}
         total_trades = metrics.get("total_trades", 0.0)
         with st.expander(f"{run['backtest_id']} — {', '.join(run.get('symbols', []))}", expanded=run.get("status") == "running"):
             st.write(f"Timeframe: {run.get('timeframe')} | Range: {run.get('start_date')} → {run.get('end_date')}")
@@ -182,6 +188,9 @@ def render_saved_backtests_section() -> None:
             if metrics:
                 metrics_df = pd.DataFrame({"metric": metrics.keys(), "value": metrics.values()})
                 st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+            if params:
+                st.markdown("**Parameters**")
+                st.json(params)
             files_cols = st.columns(2)
             trades_path = run.get("trades_path")
             equity_path = run.get("equity_path")
@@ -2618,9 +2627,11 @@ def render_backtest_lab() -> None:
         key="backtest_end_date",
     )
 
-    default_universe = get_top_symbols(limit=10) or ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
+    default_universe = get_top_symbols(limit=30) or ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
     default_symbol_count = presets[preset]["symbols"]
-    default_selection = default_universe[: min(default_symbol_count, len(default_universe))]
+    default_selection = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    if not set(default_selection).issubset(set(default_universe)):
+        default_selection = default_universe[: min(default_symbol_count, len(default_universe))]
     if st.session_state.get("backtest_last_preset") != preset:
         st.session_state["backtest_symbols_selection"] = default_selection
 
@@ -2634,27 +2645,32 @@ def render_backtest_lab() -> None:
     st.caption("Historical data will be downloaded automatically for the selected symbols and timeframe.")
     st.text_input("OHLCV glob (auto)", value=f"data/*_{timeframe}.csv", disabled=True)
 
-    risk_cols = st.columns(3)
-    with risk_cols[0]:
-        risk_per_trade = st.number_input("Risk per trade (% equity)", value=1.0, min_value=0.0, max_value=10.0, step=0.25)
-        score_threshold = st.number_input("Score threshold", value=0.2, step=0.05)
-    with risk_cols[1]:
-        take_profit_strategy = st.selectbox("Take profit strategy", ["atr_trailing", TP1_TRAILING_ONLY_STRATEGY, "default"])
-        fee_bps = st.number_input("Fee (bps)", value=10.0)
-    with risk_cols[2]:
-        slippage_bps = st.number_input("Slippage (bps)", value=2.0)
+    sizing_cols = st.columns(3)
+    with sizing_cols[0]:
+        trade_size_usd = st.number_input("Fixed notional per trade (USD)", value=500.0, min_value=0.0, step=50.0)
+        st.caption("Research sizing uses fixed notional per trade; live agent still uses risk-% sizing.")
+    with sizing_cols[1]:
+        fee_bps = st.number_input("Fee (bps)", value=10.0, min_value=0.0)
+        slippage_bps = st.number_input("Slippage (bps)", value=0.0, disabled=True, help="Research runs force zero slippage")
+    with sizing_cols[2]:
+        exit_mode_label = st.radio("Exit mode", ["TP trailing", "ATR trailing"], index=0, horizontal=True)
+        exit_mode = "atr_trailing" if exit_mode_label.lower().startswith("atr") else "tp_trailing"
 
-    overrides_col = st.columns(2)
+    overrides_col = st.columns(3)
     with overrides_col[0]:
+        score_threshold = st.number_input("Score threshold", value=0.2, step=0.05, min_value=0.0)
         min_prob = st.slider("Min probability", 0.0, 1.0, 0.55, 0.01)
-        atr_mult = st.number_input("ATR stop multiplier", value=1.5)
     with overrides_col[1]:
+        atr_mult = st.number_input("ATR stop multiplier", value=1.5)
         latency = st.number_input("Latency bars", value=0, min_value=0, step=1)
+    with overrides_col[2]:
         capital = st.number_input("Initial capital", value=10_000.0, step=1_000.0)
 
-    run_button = st.button("Run Backtest", use_container_width=True)
+    run_col, grid_col = st.columns(2)
+    run_button = run_col.button("Run Backtest", use_container_width=True)
+    grid_button = grid_col.button("Launch 5-run research grid", use_container_width=True)
 
-    if run_button:
+    if run_button or grid_button:
         if not selected_universe:
             st.warning("Select at least one symbol to run a backtest.")
             return
@@ -2664,65 +2680,95 @@ def render_backtest_lab() -> None:
 
         start_label = start_date.isoformat()
         end_label = end_date.isoformat()
-        backtest_id = build_backtest_id(selected_universe, timeframe, start_label, end_label)
-
+        base_backtest_id = build_backtest_id(selected_universe, timeframe, start_label, end_label)
         cli_script = Path(__file__).resolve().parent / "run_backtest_cli.py"
-        cli_args = [
-            sys.executable,
-            str(cli_script),
-            "--backtest-id",
-            backtest_id,
-            "--symbols",
-            *selected_universe,
-            "--timeframe",
-            timeframe,
-            "--start",
-            start_label,
-            "--end",
-            end_label,
-            "--risk",
-            str(risk_per_trade),
-            "--score-threshold",
-            str(score_threshold),
-            "--min-prob",
-            str(min_prob),
-            "--fee-bps",
-            str(fee_bps),
-            "--slippage-bps",
-            str(slippage_bps),
-            "--atr-stop-multiplier",
-            str(atr_mult),
-            "--latency-bars",
-            str(int(latency)),
-            "--initial-capital",
-            str(capital),
-            "--take-profit-strategy",
-            str(take_profit_strategy),
-            "--out-dir",
-            str(BACKTEST_DIR),
-        ]
 
-        log_path = BACKTEST_DIR / f"{backtest_id}.log"
+        def _build_cli_args(bt_id: str, score: float, prob: float, mode: str) -> list[str]:
+            return [
+                sys.executable,
+                str(cli_script),
+                "--backtest-id",
+                bt_id,
+                "--symbols",
+                *selected_universe,
+                "--timeframe",
+                timeframe,
+                "--start",
+                start_label,
+                "--end",
+                end_label,
+                "--score-threshold",
+                str(score),
+                "--min-prob",
+                str(prob),
+                "--fee-bps",
+                str(fee_bps),
+                "--slippage-bps",
+                str(slippage_bps),
+                "--atr-stop-multiplier",
+                str(atr_mult),
+                "--latency-bars",
+                str(int(latency)),
+                "--initial-capital",
+                str(capital),
+                "--take-profit-strategy",
+                mode,
+                "--sizing-mode",
+                "fixed_notional",
+                "--trade-size-usd",
+                str(trade_size_usd),
+                "--exit-mode",
+                mode,
+                "--out-dir",
+                str(BACKTEST_DIR),
+            ]
 
-        try:
-            with open(log_path, "ab") as log_file:
-                # Streamlit is run under systemd on the server, so both the Streamlit server
-                # process and this detached child backtest process will survive the user
-                # closing the dashboard page or their SSH session. ``start_new_session`` keeps
-                # the subprocess fully detached from the launching request lifecycle.
-                subprocess.Popen(
-                    cli_args,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
+        def _launch(bt_id: str, score: float, prob: float, mode: str) -> str | None:
+            cli_args = _build_cli_args(bt_id, score, prob, mode)
+            log_path = BACKTEST_DIR / f"{bt_id}.log"
+            try:
+                with open(log_path, "ab") as log_file:
+                    subprocess.Popen(
+                        cli_args,
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+                return str(log_path)
+            except Exception as exc:  # pragma: no cover - subprocess failures
+                logger.exception("Failed to launch CLI backtest", exc_info=exc)
+                launch_message.error(f"Failed to launch backtest: {exc}")
+                return None
+
+        if run_button:
+            log_path = _launch(base_backtest_id, score_threshold, min_prob, exit_mode)
+            if log_path:
+                launch_message.success(
+                    f"Backtest launched as {base_backtest_id}. Track progress below. Logs: {Path(log_path).name}"
                 )
-            launch_message.success(
-                f"Backtest launched as {backtest_id}. Track progress below. Logs: {log_path.name}"
-            )
-            st.session_state["backtest_result"] = None
-        except Exception as exc:  # pragma: no cover - subprocess failures
-            logger.exception("Failed to launch CLI backtest", exc_info=exc)
-            launch_message.error(f"Failed to launch backtest: {exc}")
+                st.session_state["backtest_result"] = None
+
+        if grid_button:
+            base_score = float(score_threshold)
+            base_prob = float(min_prob)
+            variants: list[tuple[str, float, float, str]] = [
+                ("baseline", base_score, base_prob, exit_mode),
+                ("hi_prob", base_score, min(base_prob + 0.05, 0.9), exit_mode),
+                ("lo_prob", base_score, max(base_prob - 0.05, 0.5), exit_mode),
+                ("tp", base_score, base_prob, "tp_trailing"),
+                ("atr", base_score, base_prob, "atr_trailing"),
+            ]
+            launched_ids: list[str] = []
+            for suffix, sc, prob, mode in variants:
+                bt_id = f"{base_backtest_id}_{suffix}"
+                log_path = _launch(bt_id, sc, prob, mode)
+                if log_path:
+                    launched_ids.append(bt_id)
+            if launched_ids:
+                launch_message.success(
+                    "Launched research grid: " + ", ".join(launched_ids)
+                )
+                st.session_state["backtest_result"] = None
 
     render_saved_backtests_section()
 

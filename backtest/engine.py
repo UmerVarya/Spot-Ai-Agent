@@ -53,6 +53,9 @@ class BacktestConfig:
     take_profit_strategy: str = os.getenv("TAKE_PROFIT_STRATEGY", "atr_trailing")
     skip_fraction: float = 0.0
     entry_delay_bars: int = 0
+    sizing_mode: str = "risk_pct"
+    trade_size_usd: float = 500.0
+    exit_mode: str = "tp_trailing"
 
 
 @dataclass
@@ -106,6 +109,10 @@ class ResearchBacktester:
             "start_ts": cfg.start_ts,
             "end_ts": cfg.end_ts,
             "is_backtest": cfg.is_backtest,
+            "sizing_mode": cfg.sizing_mode,
+            "trade_size_usd": cfg.trade_size_usd,
+            "risk_per_trade_pct": cfg.risk_per_trade_pct,
+            "exit_mode": cfg.exit_mode,
         }
 
     @staticmethod
@@ -131,7 +138,11 @@ class ResearchBacktester:
         for _, row in df.iterrows():
             entry_price = float(row.get("entry_price", 0.0))
             pos_mult = float(row.get("position_multiplier", 0.0))
-            base, quote = self._compute_size(entry_price, pos_mult, cfg.initial_capital)
+            if cfg.sizing_mode == "fixed_notional":
+                quote = float(cfg.trade_size_usd)
+                base = quote / entry_price if entry_price else 0.0
+            else:
+                base, quote = self._compute_size(entry_price, pos_mult, cfg.initial_capital)
             base_sizes.append(base)
             quote_sizes.append(quote)
             fee = 2 * (cfg.fee_bps / 10_000.0) * quote
@@ -172,6 +183,9 @@ class ResearchBacktester:
         df["holding_time_minutes"] = (
             (df["exit_time"] - df["entry_time"]).dt.total_seconds() / 60.0
         )
+        df["exit_mode"] = cfg.exit_mode
+        df["sizing_mode"] = cfg.sizing_mode
+        df["trade_size_usd"] = cfg.trade_size_usd
         return df
 
     def run(
@@ -180,12 +194,28 @@ class ResearchBacktester:
         progress_callback: Optional[ProgressCallback] = None,
     ) -> BacktestResult:
         params = self._build_params(cfg)
+        position_size_func = self.position_size_func
+        if cfg.sizing_mode == "fixed_notional":
+            trade_fraction = (cfg.trade_size_usd or 0.0) / max(cfg.initial_capital, 1e-9)
+
+            def _fixed_notional_sizer(_: float) -> float:
+                return max(trade_fraction, 0.0)
+
+            position_size_func = _fixed_notional_sizer
+        else:
+            risk_pct = max(cfg.risk_per_trade_pct, 0.0)
+
+            def _risk_pct_sizer(_: float) -> float:
+                return risk_pct / 100.0
+
+            position_size_func = _risk_pct_sizer
+
         legacy_bt = Backtester(
             historical_data=self.historical_data,
             evaluate_signal=self.evaluate_signal,
             predict_prob=self.predict_prob,
             macro_filter=self.macro_filter,
-            position_size_func=self.position_size_func,
+            position_size_func=position_size_func,
         )
         total_bars = _count_total_bars(self.historical_data)
         emit_progress(
