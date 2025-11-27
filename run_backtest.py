@@ -11,7 +11,7 @@ from typing import Dict, Mapping, Optional
 import numpy as np
 import pandas as pd
 
-from backtest import Backtester, grid_search
+from backtest import Backtester
 from backtest.data import load_csv_folder
 
 # Import live modules -------------------------------------------------------
@@ -222,53 +222,5 @@ def run_single_backtest(
         print("No trades generated.")
 
 
-def run_grid(
-    data_glob: str = "data/*_1m.csv",
-    param_grid: Dict[str, list] | None = None,
-) -> None:
-    """Execute a simple grid search over backtest parameters."""
-
-    if param_grid is None:
-        param_grid = {
-            "min_score": [0.15, 0.2, 0.25],
-            "min_prob": [0.55, 0.6, 0.65],
-            "atr_mult_sl": [1.2, 1.5, 1.8],
-            "tp_rungs": [(1, 2, 3, 4), (0.8, 1.6, 2.4, 3.2)],
-            "fee_bps": [8, 10, 12],
-            "slippage_bps": [2, 5],
-            "latency_bars": [0, 1],
-            "max_concurrent": [MAX_CONCURRENT_TRADES],
-        }
-
-    bt = Backtester(
-        historical_data=load_csv_folder(data_glob),
-        evaluate_signal=evaluate_signal,
-        predict_prob=predict_prob,
-        macro_filter=macro_filter,
-        position_size_func=position_size_func,
-    )
-
-    results = grid_search(bt, param_grid)
-    rows = [
-        {**res.get("params", {}), **(res.get("performance") or {})}
-        for res in results
-    ]
-
-    df = pd.DataFrame(rows)
-    if not df.empty and "sharpe" in df.columns:
-        df.sort_values("sharpe", ascending=False, inplace=True)
-    out_dir = Path("backtests/out")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    grid_path = out_dir / "grid_results.csv"
-    if not df.empty:
-        df.to_csv(grid_path, index=False)
-        print(f"Saved {grid_path}")
-        print(df.head(5).to_string(index=False))
-    else:
-        print("No grid search results to save.")
-
-
 if __name__ == "__main__":
     run_single_backtest()
-    # To run a grid search, uncomment the following line:
-    # run_grid()
