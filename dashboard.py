@@ -142,13 +142,21 @@ def render_saved_backtests_section() -> None:
         metrics = run.get("metrics") or run.get("metrics_summary") or {}
         display_metrics = {k: v for k, v in metrics.items() if not isinstance(v, dict)}
         params = run.get("params", {}) or {}
+        symbols = run.get("symbols") or params.get("symbols") or []
+        if isinstance(symbols, str):
+            symbol_list = [symbols]
+        else:
+            try:
+                symbol_list = list(symbols)
+            except TypeError:
+                symbol_list = []
         table_rows.append(
             {
                 "backtest_id": run["backtest_id"],
                 "label": run.get("label") or run.get("note"),
                 "status": run.get("status", "unknown"),
                 "progress": run.get("progress", 0.0),
-                "symbols": ", ".join(run.get("symbols", [])),
+                "symbols": ",".join(symbol_list),
                 "timeframe": run.get("timeframe"),
                 "start_date": run.get("start_date"),
                 "end_date": run.get("end_date"),
@@ -167,10 +175,19 @@ def render_saved_backtests_section() -> None:
 
     df = pd.DataFrame(table_rows)
     df.sort_values("started_at", ascending=False, inplace=True)
+    safe_df = arrow_safe_dataframe(df)
     st.dataframe(
-        arrow_safe_dataframe(df),
+        safe_df,
         use_container_width=True,
         hide_index=True,
+        column_config={
+            "progress": st.column_config.ProgressColumn(
+                "Progress",
+                help="0 = not started, 1 = complete",
+                min_value=0.0,
+                max_value=1.0,
+            )
+        },
     )
 
     st.markdown("#### Run details")
@@ -185,11 +202,11 @@ def render_saved_backtests_section() -> None:
             label = run.get("label") or run.get("note")
             if label:
                 st.write(f"Label: {label}")
-            if run.get("status") == "running":
-                progress = run.get("progress", 0.0)
-                current = int(run.get("current_bar") or 0)
-                total = int(run.get("total_bars") or 0)
-                st.progress(progress, text=f"{current:,} / {total:,} bars")
+        if run.get("status") == "running":
+            progress = run.get("progress", 0.0)
+            current = int(run.get("current_bar") or 0)
+            total = int(run.get("total_bars") or 0)
+            st.progress(progress, text=f"{current:,} / {total:,} bars")
             elif total_trades == 0:
                 st.info("0 trades taken for this configuration. Filters likely excluded all signals.")
             if metrics:
@@ -2659,6 +2676,8 @@ def render_backtest_lab() -> None:
         key="backtest_symbols_selection",
     )
 
+    selected_symbols = [sym.upper() for sym in selected_universe]
+
     st.caption("Historical data will be downloaded automatically for the selected symbols and timeframe.")
     st.text_input("OHLCV glob (auto)", value=f"data/*_{timeframe}.csv", disabled=True)
     run_label = st.text_input("Run label / note (optional)")
@@ -2701,7 +2720,7 @@ def render_backtest_lab() -> None:
                 f"You already have {running_count} running backtests; wait for some to complete before launching more."
             )
             return
-        if not selected_universe:
+        if not selected_symbols:
             st.warning("Select at least one symbol to run a backtest.")
             return
         if not start_date or not end_date or start_date > end_date:
@@ -2710,7 +2729,7 @@ def render_backtest_lab() -> None:
 
         start_label = start_date.isoformat()
         end_label = end_date.isoformat()
-        base_backtest_id = build_backtest_id(selected_universe, timeframe, start_label, end_label)
+        base_backtest_id = build_backtest_id(selected_symbols, timeframe, start_label, end_label)
         cli_script = Path(__file__).resolve().parent / "run_backtest_cli.py"
 
         def _build_cli_args(bt_id: str, score: float, prob: float, mode: str) -> list[str]:
@@ -2720,7 +2739,7 @@ def render_backtest_lab() -> None:
                 "--backtest-id",
                 bt_id,
                 "--symbols",
-                *selected_universe,
+                *selected_symbols,
                 "--timeframe",
                 timeframe,
                 "--start",
