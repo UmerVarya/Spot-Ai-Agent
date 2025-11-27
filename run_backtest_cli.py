@@ -11,17 +11,28 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Dict, Sequence
 
+import numpy as np
 import pandas as pd
 
-from backtest.analysis import build_equity_curve
+from backtest.data import load_csv_paths
 from backtest.data_manager import ensure_ohlcv_csvs
 from backtest.engine import BacktestConfig, run_backtest_from_csv_paths
+from backtest.filesystem import (
+    BacktestRunMetadata,
+    build_backtest_id,
+    build_backtest_output_paths,
+    get_backtest_dir,
+    write_csv_atomic,
+    write_json_atomic,
+)
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
+from trade_schema import TRADE_HISTORY_COLUMNS
+from backtest.types import BacktestProgress
 
 
-BACKTEST_DIR = Path.home() / "spot_data" / "backtests"
+BACKTEST_DIR = get_backtest_dir()
 
 
 def _parse_date(value: str) -> pd.Timestamp:
@@ -50,46 +61,147 @@ def _format_date_for_path(ts: pd.Timestamp) -> str:
     return ts.strftime("%Y-%m-%d")
 
 
-def _write_symbol_outputs(
-    symbol: str,
-    trades: pd.DataFrame,
-    cfg: BacktestConfig,
-    timeframe: str,
-    start_ts: pd.Timestamp,
-    end_ts: pd.Timestamp,
-    out_dir: Path,
-) -> dict[str, Path]:
-    safe_symbol = symbol.upper()
-    base_name = f"{safe_symbol}_{timeframe}_{_format_date_for_path(start_ts)}_{_format_date_for_path(end_ts)}"
-
-    trades_path = out_dir / f"{base_name}_trades.csv"
-    trades.to_csv(trades_path, index=False)
-
-    equity_curve = build_equity_curve(trades, cfg.initial_capital)
-    equity_path = out_dir / f"{base_name}_equity.csv"
-    equity_curve.to_csv(equity_path, index=False)
-
-    return {"trades": trades_path, "equity": equity_path}
-
-
-def _build_summary(result) -> dict:
-    summary: dict[str, Any] = {
-        "overall": result.metrics,
-        "symbols": {},
-    }
-    if isinstance(result.by_symbol, pd.DataFrame) and not result.by_symbol.empty:
-        for row in result.by_symbol.to_dict(orient="records"):
-            symbol = row.get("symbol", "UNKNOWN")
-            summary["symbols"][symbol] = {k: v for k, v in row.items() if k != "symbol"}
-    return summary
-
-
-def _print_progress(progress) -> None:
+def _print_progress(progress: BacktestProgress) -> None:
     label = progress.phase.capitalize()
     if progress.message:
         label = f"{label}: {progress.message}"
     percent = progress.percent * 100 if progress.total else 0
     print(f"[{datetime.utcnow().isoformat()}] {label} {percent:5.1f}%", end="\r", file=sys.stderr)
+
+
+def _ensure_trades_with_header(trades: pd.DataFrame) -> pd.DataFrame:
+    if not trades.empty:
+        return trades
+    return pd.DataFrame(columns=list(TRADE_HISTORY_COLUMNS))
+
+
+def _ensure_equity_curve(equity: pd.DataFrame, cfg: BacktestConfig) -> pd.DataFrame:
+    if not equity.empty:
+        return equity
+    start = cfg.start_ts or pd.Timestamp.utcnow()
+    end = (cfg.end_ts or start) - pd.Timedelta(days=1)
+    timestamps = [start, end] if end > start else [start]
+    base = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "equity": [cfg.initial_capital for _ in timestamps],
+        }
+    )
+    base["peak_equity"] = base["equity"]
+    base["drawdown_pct"] = 0.0
+    base["drawdown"] = 0.0
+    return base
+
+
+def _compute_metrics(trades: pd.DataFrame, equity: pd.DataFrame, initial_capital: float) -> Dict[str, float]:
+    pnl_col = "net_pnl_quote" if "net_pnl_quote" in trades.columns else "pnl"
+    pnl_series = trades.get(pnl_col, pd.Series(dtype=float)).astype(float) if not trades.empty else pd.Series(dtype=float)
+    total_trades = int(len(trades))
+    winning = int((pnl_series > 0).sum()) if total_trades else 0
+    losing = int((pnl_series < 0).sum()) if total_trades else 0
+    net_pnl = float(pnl_series.sum()) if total_trades else 0.0
+    gross_pnl = net_pnl
+    r_multiple = trades.get("r_multiple", pd.Series(dtype=float)).astype(float) if not trades.empty else pd.Series(dtype=float)
+    avg_r_multiple = float(np.nanmean(r_multiple)) if len(r_multiple) else 0.0
+    expectancy_r = float(r_multiple.mean()) if len(r_multiple) else 0.0
+    if not np.isfinite(avg_r_multiple):
+        avg_r_multiple = 0.0
+    if not np.isfinite(expectancy_r):
+        expectancy_r = 0.0
+
+    drawdown_pct = equity.get("drawdown_pct") if not equity.empty else pd.Series(dtype=float)
+    dd_min = drawdown_pct.min() if drawdown_pct is not None and len(drawdown_pct) else 0.0
+    if not np.isfinite(dd_min):
+        dd_min = 0.0
+    max_drawdown = float(abs(dd_min))
+
+    equity_series = equity.get("equity", pd.Series(dtype=float)).astype(float) if not equity.empty else pd.Series(dtype=float)
+    returns = equity_series.pct_change().dropna()
+    sharpe_ratio = float(np.sqrt(252) * returns.mean() / (returns.std(ddof=1) or 1e-9)) if not returns.empty else 0.0
+    max_dd_duration = 0
+    if not equity.empty and "drawdown_pct" in equity.columns:
+        dd = equity["drawdown_pct"].values
+        current = 0
+        for value in dd:
+            if value < 0:
+                current += 1
+                max_dd_duration = max(max_dd_duration, current)
+            else:
+                current = 0
+
+    calmar_ratio = 0.0
+    if drawdown_pct is not None and len(drawdown_pct):
+        total_return = (equity_series.iloc[-1] - initial_capital) / initial_capital if len(equity_series) else 0.0
+        denom = abs(dd_min) if abs(dd_min) > 0 else 1e-9
+        calmar_ratio = float(total_return / denom)
+
+    winrate = float(winning / total_trades) if total_trades else 0.0
+
+    return {
+        "total_trades": float(total_trades),
+        "winning_trades": float(winning),
+        "losing_trades": float(losing),
+        "winrate": winrate,
+        "gross_pnl": gross_pnl,
+        "net_pnl": net_pnl,
+        "max_drawdown": max_drawdown,
+        "max_drawdown_duration": float(max_dd_duration),
+        "avg_r_multiple": avg_r_multiple,
+        "expectancy_r": expectancy_r,
+        "sharpe_ratio": sharpe_ratio,
+        "calmar_ratio": float(calmar_ratio),
+    }
+
+
+class _MetaTracker:
+    def __init__(self, metadata: BacktestRunMetadata, meta_path: Path, update_every: int = 5_000) -> None:
+        self.metadata = metadata
+        self.meta_path = meta_path
+        self.last_written = -1
+        self.update_every = update_every
+
+    def write(self) -> None:
+        write_json_atomic(self.meta_path, self.metadata.to_dict())
+
+    def start(self, total_bars: int) -> None:
+        self.metadata.total_bars = int(total_bars)
+        self.metadata.status = "running"
+        self.metadata.started_at = datetime.utcnow().isoformat()
+        self.write()
+
+    def update_progress(self, progress: BacktestProgress) -> None:
+        self.metadata.total_bars = max(int(progress.total or 0), self.metadata.total_bars)
+        self.metadata.current_bar = int(progress.current or 0)
+        if self.metadata.total_bars:
+            self.metadata.progress = min(1.0, self.metadata.current_bar / float(self.metadata.total_bars or 1))
+        else:
+            self.metadata.progress = 0.0
+        if self.metadata.current_bar == 0:
+            return
+        if self.metadata.current_bar == self.metadata.total_bars or self.metadata.current_bar - self.last_written >= self.update_every:
+            self.last_written = self.metadata.current_bar
+            self.metadata.status = "running"
+            self.write()
+
+    def complete(self, metrics: Dict[str, float]) -> None:
+        self.metadata.status = "completed"
+        self.metadata.progress = 1.0
+        self.metadata.finished_at = datetime.utcnow().isoformat()
+        self.metadata.metrics_summary = {
+            "total_trades": metrics.get("total_trades", 0.0),
+            "winrate": metrics.get("winrate", 0.0),
+            "net_pnl": metrics.get("net_pnl", 0.0),
+            "max_drawdown": metrics.get("max_drawdown", 0.0),
+        }
+        self.write()
+
+    def fail(self, message: str) -> None:
+        self.metadata.status = "error"
+        self.metadata.error_message = message
+        self.metadata.finished_at = datetime.utcnow().isoformat()
+        if self.metadata.total_bars:
+            self.metadata.progress = min(1.0, self.metadata.current_bar / float(self.metadata.total_bars))
+        self.write()
 
 
 def run_cli(args: Sequence[str] | None = None) -> int:
@@ -117,6 +229,7 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         default=BACKTEST_DIR,
         help="Output directory for CSV/JSON results",
     )
+    parser.add_argument("--backtest-id", help="Optional explicit backtest identifier for file naming")
     parser.add_argument("--dry-run", action="store_true", help="Print configuration and exit without running")
 
     parsed = parser.parse_args(args=args)
@@ -169,6 +282,38 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         )
         return 1
 
+    params_dict: Dict[str, Any] = {
+        "risk": parsed.risk,
+        "score_threshold": parsed.score_threshold,
+        "min_prob": parsed.min_prob,
+        "fee_bps": parsed.fee_bps,
+        "slippage_bps": parsed.slippage_bps,
+        "atr_stop_multiplier": parsed.atr_stop_multiplier,
+        "latency_bars": parsed.latency_bars,
+        "entry_delay_bars": parsed.entry_delay_bars,
+        "initial_capital": parsed.initial_capital,
+        "take_profit_strategy": parsed.take_profit_strategy,
+        "skip_fraction": parsed.skip_fraction,
+    }
+
+    backtest_id = parsed.backtest_id or build_backtest_id(
+        parsed.symbols,
+        parsed.timeframe,
+        _format_date_for_path(start_ts),
+        _format_date_for_path(end_ts - pd.Timedelta(days=1)),
+    )
+    paths = build_backtest_output_paths(backtest_id, out_dir)
+    metadata = BacktestRunMetadata(
+        backtest_id=backtest_id,
+        symbols=[sym.upper() for sym in parsed.symbols],
+        timeframe=parsed.timeframe,
+        start_date=_format_date_for_path(start_ts),
+        end_date=_format_date_for_path(end_ts - pd.Timedelta(days=1)),
+        params=params_dict,
+    )
+    tracker = _MetaTracker(metadata, paths["meta"])
+    tracker.start(0)
+
     try:
         if parsed.csv_paths:
             csv_paths = [Path(p) for p in parsed.csv_paths]
@@ -180,39 +325,47 @@ def run_cli(args: Sequence[str] | None = None) -> int:
                 end_ts.to_pydatetime(),
                 data_dir=parsed.data_dir,
             )
-        print(f"Running backtest for {parsed.symbols} on {parsed.timeframe} from {parsed.start} to {parsed.end}...")
+        data = load_csv_paths(csv_paths, start=start_ts, end=end_ts)
+        total_bars = int(sum(len(df) for df in data.values()))
+        tracker.start(total_bars)
+        print(
+            f"Running backtest {backtest_id} for {parsed.symbols} on {parsed.timeframe} "
+            f"from {parsed.start} to {parsed.end}..."
+        )
+
+        def _progress(progress: BacktestProgress) -> None:
+            tracker.update_progress(progress)
+            _print_progress(progress)
+
         result = run_backtest_from_csv_paths(
             csv_paths,
             cfg,
             symbols=parsed.symbols,
-            progress_callback=_print_progress,
+            progress_callback=_progress,
         )
     except Exception as exc:  # pragma: no cover - smoke tested via integration
+        tracker.fail(str(exc))
         print(f"Backtest failed: {exc}", file=sys.stderr)
         return 1
 
-    if result.trades.empty:
-        print("No trades generated for the given parameters.")
+    trades = _ensure_trades_with_header(result.trades if hasattr(result, "trades") else pd.DataFrame())
+    equity_curve = _ensure_equity_curve(result.equity_curve if hasattr(result, "equity_curve") else pd.DataFrame(), cfg)
+    metrics = _compute_metrics(trades, equity_curve, cfg.initial_capital)
 
-    written: list[dict[str, Path]] = []
-    for sym in parsed.symbols:
-        sym_trades = pd.DataFrame()
-        if not result.trades.empty and "symbol" in result.trades.columns:
-            sym_mask = result.trades["symbol"].str.upper() == sym.upper()
-            sym_trades = result.trades[sym_mask]
-        if sym_trades.empty:
-            continue
-        paths = _write_symbol_outputs(sym, sym_trades, cfg, parsed.timeframe, start_ts, end_ts - pd.Timedelta(days=1), out_dir)
-        written.append({"symbol": sym, **paths})
+    write_csv_atomic(paths["trades"], trades)
+    write_csv_atomic(paths["equity"], equity_curve)
+    write_json_atomic(paths["metrics"], metrics)
+    tracker.complete(metrics)
 
-    summary = _build_summary(result)
-    summary_path = out_dir / f"summary_{parsed.timeframe}_{_format_date_for_path(start_ts)}_{_format_date_for_path(end_ts - pd.Timedelta(days=1))}.json"
-    summary_path.write_text(json.dumps(summary, indent=2, default=_json_safe))
+    if trades.empty:
+        print("Backtest completed with 0 trades. Outputs have been saved for review.")
+    else:
+        print("\nBacktest complete.")
 
-    print("\nBacktest complete.")
-    for item in written:
-        print(f"{item['symbol']}: trades → {item['trades']}, equity → {item['equity']}")
-    print(f"Summary → {summary_path}")
+    print(f"Trades → {paths['trades']}")
+    print(f"Equity → {paths['equity']}")
+    print(f"Metrics → {paths['metrics']}")
+    print(f"Meta → {paths['meta']}")
 
     return 0
 

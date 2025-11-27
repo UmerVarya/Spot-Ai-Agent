@@ -43,6 +43,7 @@ def build_equity_curve(trades: pd.DataFrame, initial_capital: float) -> pd.DataF
         )
         base["peak_equity"] = base["equity"]
         base["drawdown_pct"] = 0.0
+        base["drawdown"] = base["drawdown_pct"]
         return base
 
     pnl = trades.get("net_pnl_quote")
@@ -62,6 +63,7 @@ def build_equity_curve(trades: pd.DataFrame, initial_capital: float) -> pd.DataF
             "equity": equity,
             "peak_equity": peak,
             "drawdown_pct": dd,
+            "drawdown": dd,
         }
     )
     return df

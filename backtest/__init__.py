@@ -23,7 +23,17 @@ from .metrics import (
 )
 from .scenario import run_fee_slippage_scenarios, run_parameter_scenarios
 from .run import run_backtest
-from .filesystem import BacktestFile, get_backtest_dir, discover_backtest_files
+from .filesystem import (
+    BacktestFile,
+    BacktestRunMetadata,
+    build_backtest_id,
+    build_backtest_output_paths,
+    get_backtest_dir,
+    discover_backtest_files,
+    discover_backtest_runs,
+    write_csv_atomic,
+    write_json_atomic,
+)
 
 __all__ = [
     "Backtester",
@@ -45,6 +55,12 @@ __all__ = [
     "run_fee_slippage_scenarios",
     "run_parameter_scenarios",
     "BacktestFile",
+    "BacktestRunMetadata",
+    "build_backtest_id",
+    "build_backtest_output_paths",
     "get_backtest_dir",
     "discover_backtest_files",
+    "discover_backtest_runs",
+    "write_csv_atomic",
+    "write_json_atomic",
 ]
