@@ -39,6 +39,7 @@ from risk_profiles import (
     get_bnb_profile,
     get_tier_profile,
 )
+from risk_profiles.btc_profile import SymbolProfile
 
 from volatility_regime import atr_percentile, hurst_exponent  # type: ignore
 from multi_timeframe import (
@@ -278,6 +279,33 @@ def get_symbol_tier(symbol: str) -> Optional[str]:
     return _SYMBOL_TIER_MAP.get(str(symbol).upper())
 
 
+def get_symbol_profile(symbol: str, tier: Optional[str] = None) -> Optional[SymbolProfile]:
+    """Return the configured :class:`SymbolProfile` for ``symbol``.
+
+    Tier detection follows the cached symbol→tier map when ``tier`` is not
+    provided. The function returns ``None`` when the symbol is unknown.
+    """
+
+    if not symbol:
+        return None
+
+    symbol_token = str(symbol).upper()
+    if symbol_token == "BTCUSDT":
+        return get_btc_profile()
+    if symbol_token == "ETHUSDT":
+        return get_eth_profile()
+    if symbol_token == "SOLUSDT":
+        return get_sol_profile()
+    if symbol_token == "BNBUSDT":
+        return get_bnb_profile()
+
+    resolved_tier = tier.upper() if tier else get_symbol_tier(symbol_token)
+    if resolved_tier:
+        return get_tier_profile(resolved_tier)
+
+    return None
+
+
 def compute_alt_adj(symbol: str, now: Optional[float] = None) -> Optional[float]:
     """Return additive alternative-data adjustment for ``symbol``.
 
@@ -451,25 +479,12 @@ def passes_volume_gate(
     meta["volume_gate_pass"] = False
     meta.pop("volume_gate_reason", None)
 
-    profile = None
-    if symbol_token == "BTCUSDT":
-        profile = get_btc_profile()
-    elif symbol_token == "ETHUSDT":
-        profile = get_eth_profile()
-    elif symbol_token == "SOLUSDT":
-        profile = get_sol_profile()
-    elif symbol_token == "BNBUSDT":
-        profile = get_bnb_profile()
-    else:
-        tier = None
-        if context:
-            raw_tier = context.get("tier")
-            if isinstance(raw_tier, str) and raw_tier:
-                tier = raw_tier.upper()
-        if not tier:
-            tier = get_symbol_tier(symbol_token)
-        if tier:
-            profile = get_tier_profile(tier)
+    tier = None
+    if context:
+        raw_tier = context.get("tier")
+        if isinstance(raw_tier, str) and raw_tier:
+            tier = raw_tier.upper()
+    profile = get_symbol_profile(symbol_token, tier)
 
     if profile is not None:
         meta["profile_name"] = profile.symbol

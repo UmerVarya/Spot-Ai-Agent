@@ -494,8 +494,8 @@ from trade_constants import (
     TP_ATR_MULTIPLIERS,
 )
 from rl_policy import RLPositionSizer
-from trade_utils import get_rl_state, set_symbol_tiers
-from probability_gating import should_veto_on_probability
+from trade_utils import get_rl_state, get_symbol_profile, set_symbol_tiers
+from probability_gating import get_effective_min_prob_for_symbol, should_veto_on_probability
 from microstructure import plan_execution
 from volatility_regime import atr_percentile
 from cache_evaluator_adapter import evaluator_for_cache
@@ -3079,6 +3079,7 @@ def run_agent_loop() -> None:
                 news_severity = context.get("news_severity", 0)
                 atr_15m_ratio = context.get("atr_15m_ratio")
                 direction = context.get("direction") or "long"
+                profile = get_symbol_profile(symbol, tier)
 
                 if prepared is None:
                     if not isinstance(pre_result, dict):
@@ -3159,13 +3160,20 @@ def run_agent_loop() -> None:
                     llm_confidence=decision_obj.get("llm_confidence", 5.0),
                     micro_features=micro_feature_payload,
                 )
-                ml_veto_flag = should_veto_on_probability(ml_prob)
+                min_prob_for_symbol = get_effective_min_prob_for_symbol(
+                    symbol,
+                    profile=profile,
+                    override_min_prob=None,
+                )
+                ml_veto_flag = should_veto_on_probability(
+                    ml_prob, min_prob=min_prob_for_symbol
+                )
                 _audit_update(
                     symbol_key,
                     ml_probability=ml_prob,
                     ml_veto=ml_veto_flag,
                 )
-                if should_veto_on_probability(ml_prob):
+                if should_veto_on_probability(ml_prob, min_prob=min_prob_for_symbol):
                     logger.info(
                         "ML model predicted low success probability (%.2f) for %s. Skipping trade.",
                         ml_prob,
