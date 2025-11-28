@@ -35,6 +35,7 @@ from log_utils import setup_logger
 from probability_gating import get_effective_min_prob_for_symbol
 from trade_utils import get_symbol_profile
 from .types import BacktestProgress, ProgressCallback, emit_progress
+from .presets import BacktestPresetConfig, PRESET_STANDARD_RESEARCH, resolve_preset
 
 logger = setup_logger(__name__)
 
@@ -432,9 +433,34 @@ class Backtester:
         net_return = raw_return - fee_penalty
         return trade.position_multiplier * net_return
 
+    def _precompute_atr_series(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        if df is None or df.empty:
+            return pd.Series(dtype=float)
+        required = {"high", "low", "close"}
+        if not required.issubset(df.columns):
+            return pd.Series(dtype=float)
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
+        close = df["close"].astype(float)
+        prev_close = close.shift(1)
+        tr_components = pd.concat(
+            [
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        )
+        true_range = tr_components.max(axis=1)
+        return true_range.rolling(period).mean()
+
     def run(
-        self, params: Dict[str, Any], progress_callback: Optional[ProgressCallback] = None
+        self,
+        params: Dict[str, Any],
+        progress_callback: Optional[ProgressCallback] = None,
+        preset: BacktestPresetConfig | None = None,
     ) -> Dict[str, Any]:
+        preset_cfg = resolve_preset(preset or PRESET_STANDARD_RESEARCH)
         conf_thresh = params.get("min_score")
         if conf_thresh is None:
             conf_thresh = params.get("confidence_threshold")
@@ -467,6 +493,11 @@ class Backtester:
         total_bars = int(sum(len(df) for df in self.historical_data.values()))
         processed_bars = 0
 
+        atr_lookup: Dict[str, pd.Series] = {
+            symbol: self._precompute_atr_series(df)
+            for symbol, df in self.historical_data.items()
+        }
+
         equity = 1.0
         equity_curve: List[Tuple[pd.Timestamp, float]] = []
         trade_returns: List[float] = []
@@ -487,227 +518,233 @@ class Backtester:
 
         is_backtest = bool(params.get("is_backtest", False))
 
-        progress_stride = max(1, total_bars // 200) if total_bars else 0
 
-        for idx, current_time in enumerate(timestamps):
-            if not isinstance(current_time, pd.Timestamp):
-                current_time = pd.Timestamp(current_time)
+        progress_stride = max(1, preset_cfg.progress_log_interval_bars)
+        last_progress_at = 0
 
-            if end_ts is not None and current_time > end_ts:
-                break
+        chunk_size = max(1, preset_cfg.processing_chunk_size)
+        for chunk_start in range(0, len(timestamps), chunk_size):
+            chunk_times = timestamps[chunk_start : chunk_start + chunk_size]
+            for current_time in chunk_times:
+                if not isinstance(current_time, pd.Timestamp):
+                    current_time = pd.Timestamp(current_time)
 
-            last_in_range_time = current_time
+                if end_ts is not None and current_time > end_ts:
+                    break
 
-            # Update open trades first (trailing + exits)
-            for trade in list(open_trades):
-                df = self.historical_data.get(trade.symbol)
-                if df is None or current_time not in df.index:
-                    continue
-                bar = df.loc[current_time]
-                history = df.loc[:current_time]
-                atr_value = self._compute_atr(history)
-                if math.isfinite(atr_value) and atr_value > 0:
-                    trade.atr_value = atr_value
-                path_info = self._simulate_intrabar_path(bar)
-                prices = path_info.get("prices", []) if isinstance(path_info, dict) else path_info
-                exit_reason, exit_price = self._process_trade_bar(trade, prices, trade.atr_value)
-                if exit_reason is None:
-                    continue
-                exit_price = self._apply_slippage(float(exit_price), trade.slippage_bps, -trade.direction)
-                trade_return = self._compute_trade_return(trade, exit_price)
-                equity *= (1.0 + trade_return)
-                trade_returns.append(trade_return)
-                holding_bars = df.index.get_loc(current_time) - trade.entry_index
-                microstructure = path_info
-                if not isinstance(microstructure, dict):
-                    micro_prices = list(microstructure or [])
-                    microstructure = {"prices": micro_prices}
-                open_hint = bar.get("open")
-                try:
-                    open_value = float(open_hint)
-                except (TypeError, ValueError):
-                    open_value = float("nan")
-                if math.isfinite(open_value):
-                    price_path = list(microstructure.get("prices") or [])
-                    if not price_path or not math.isclose(price_path[0], open_value, rel_tol=1e-9, abs_tol=1e-9):
-                        price_path = [open_value] + [p for p in price_path if not math.isclose(p, open_value, rel_tol=1e-9, abs_tol=1e-9)]
-                    microstructure["prices"] = price_path
-                trade_entry = {
-                    "symbol": trade.symbol,
-                    "entry_time": trade.entry_time,
-                    "exit_time": current_time,
-                    "direction": trade.direction_label(),
-                    "entry_price": trade.entry_price,
-                    "exit_price": exit_price,
-                    "score": trade.score,
-                    "confidence": trade.confidence,
-                    "probability": trade.probability,
-                    "position_multiplier": trade.position_multiplier,
-                    "return": trade_return,
-                    "reason": exit_reason,
-                    "exit_reason": exit_reason,
-                    "holding_bars": holding_bars,
-                    "metadata": trade.metadata,
-                    "exit_mode": trade.exit_mode,
-                    "microstructure": microstructure,
-                }
-                metadata = trade.metadata
-                if isinstance(metadata, dict) and metadata.get("microstructure") is not None:
-                    trade_entry["microstructure"] = metadata.get("microstructure")
-                trades.append(trade_entry)
-                open_trades.remove(trade)
-                active_symbols.pop(trade.symbol, None)
+                last_in_range_time = current_time
 
-            # Activate pending entries scheduled for this timestamp
-            for entry in list(pending_entries):
-                if current_time != entry.entry_time:
-                    continue
-                df = self.historical_data.get(entry.symbol)
-                if df is None or entry.entry_time not in df.index:
+                # Update open trades first (trailing + exits)
+                for trade in list(open_trades):
+                    df = self.historical_data.get(trade.symbol)
+                    if df is None or current_time not in df.index:
+                        continue
+                    bar = df.loc[current_time]
+                    atr_series = atr_lookup.get(trade.symbol, pd.Series(dtype=float))
+                    if current_time in atr_series.index:
+                        atr_value = float(atr_series.loc[current_time])
+                        if math.isfinite(atr_value) and atr_value > 0:
+                            trade.atr_value = atr_value
+                    path_info = (
+                        self._simulate_intrabar_path(bar)
+                        if preset_cfg.enable_intrabar_simulation
+                        else [float(bar.get("close", bar.get("open", float("nan"))))]
+                    )
+                    prices = path_info.get("prices", []) if isinstance(path_info, dict) else path_info
+                    exit_reason, exit_price = self._process_trade_bar(trade, prices, trade.atr_value)
+                    if exit_reason is None:
+                        continue
+                    applied_slippage = trade.slippage_bps if preset_cfg.enable_slippage_model else 0.0
+                    exit_price = self._apply_slippage(float(exit_price), applied_slippage, -trade.direction)
+                    trade_return = self._compute_trade_return(trade, exit_price)
+                    equity *= (1.0 + trade_return)
+                    trade_returns.append(trade_return)
+                    holding_bars = df.index.get_loc(current_time) - trade.entry_index
+                    microstructure = path_info if preset_cfg.collect_microstructure else None
+                    if preset_cfg.collect_microstructure and not isinstance(microstructure, dict):
+                        microstructure = {
+                            "prices": prices,
+                            "high": max(prices) if prices else float("nan"),
+                            "low": min(prices) if prices else float("nan"),
+                        }
+                    trade_entry = {
+                        "symbol": trade.symbol,
+                        "entry_time": trade.entry_time,
+                        "exit_time": current_time,
+                        "direction": trade.direction_label(),
+                        "entry_price": trade.entry_price,
+                        "exit_price": exit_price,
+                        "score": trade.score,
+                        "confidence": trade.confidence,
+                        "probability": trade.probability,
+                        "position_multiplier": trade.position_multiplier,
+                        "return": trade_return,
+                        "reason": exit_reason,
+                        "exit_reason": exit_reason,
+                        "holding_bars": holding_bars,
+                        "metadata": trade.metadata,
+                        "atr_value": trade.atr_value,
+                    }
+                    if preset_cfg.collect_microstructure and microstructure is not None:
+                        trade_entry["microstructure"] = microstructure
+                    metadata = trade.metadata
+                    if preset_cfg.collect_microstructure and isinstance(metadata, dict) and metadata.get("microstructure") is not None:
+                        trade_entry["microstructure"] = metadata.get("microstructure")
+                    trades.append(trade_entry)
+                    open_trades.remove(trade)
+                    active_symbols.pop(trade.symbol, None)
+
+                # Fill pending entries that are now due to be opened
+                for entry in list(pending_entries):
+                    if entry.entry_time > current_time:
+                        continue
+                    df = self.historical_data.get(entry.symbol)
+                    if df is None or current_time not in df.index:
+                        pending_entries.remove(entry)
+                        continue
+                    bar = df.loc[current_time]
+                    entry_price = float(bar.get("open"))
+                    if not math.isfinite(entry_price):
+                        pending_entries.remove(entry)
+                        continue
+                    applied_slippage = entry.slippage_bps if preset_cfg.enable_slippage_model else 0.0
+                    entry_price = self._apply_slippage(entry_price, applied_slippage, entry.direction)
+                    stop_price = entry_price - entry.atr_multiplier * entry.atr_value
+                    if entry.direction < 0:
+                        stop_price = entry_price + entry.atr_multiplier * entry.atr_value
+                    take_profits = [
+                        entry_price * (1 + entry.atr_multiplier * rung * (1 if entry.direction >= 0 else -1))
+                        for rung in entry.tp_rungs
+                    ]
+                    trade = TradePosition(
+                        symbol=entry.symbol,
+                        entry_time=entry.entry_time,
+                        entry_index=entry.entry_index,
+                        direction=entry.direction,
+                        entry_price=entry_price,
+                        score=entry.score,
+                        confidence=entry.confidence,
+                        probability=entry.probability,
+                        position_multiplier=entry.position_multiplier,
+                        atr_multiplier=entry.atr_multiplier,
+                        stop_price=stop_price,
+                        take_profits=take_profits,
+                        atr_value=entry.atr_value,
+                        best_price=entry_price,
+                        metadata=entry.metadata,
+                        signal_time=entry.signal_time,
+                        fee_bps=entry.fee_bps,
+                        slippage_bps=entry.slippage_bps,
+                        exit_mode=entry.exit_mode,
+                    )
+                    open_trades.append(trade)
+                    active_symbols[trade.symbol] = active_symbols.get(trade.symbol, 0) + 1
                     pending_entries.remove(entry)
+
+                if not _within_range(current_time):
+                    equity_curve.append((current_time, equity))
                     continue
-                bar = df.loc[entry.entry_time]
-                entry_price = float(bar.get("open"))
-                if not math.isfinite(entry_price):
-                    pending_entries.remove(entry)
-                    continue
-                entry_price = self._apply_slippage(entry_price, entry.slippage_bps, entry.direction)
-                atr_value = entry.atr_value
-                if not math.isfinite(atr_value) or atr_value <= 0:
-                    history = df.iloc[: entry.entry_index]
-                    atr_value = self._compute_atr(history)
-                if not math.isfinite(atr_value) or atr_value <= 0:
-                    pending_entries.remove(entry)
-                    continue
-                risk = entry.atr_multiplier * atr_value
-                if entry.direction >= 0:
-                    stop_price = entry_price - risk
-                    take_profits = [entry_price + rung * risk for rung in entry.tp_rungs]
-                else:
-                    stop_price = entry_price + risk
-                    take_profits = [entry_price - rung * risk for rung in entry.tp_rungs]
-                trade = TradePosition(
-                    symbol=entry.symbol,
-                    entry_time=entry.entry_time,
-                    entry_index=entry.entry_index,
-                    direction=entry.direction,
-                    entry_price=entry_price,
-                    score=entry.score,
-                    confidence=entry.confidence,
-                    probability=entry.probability,
-                    position_multiplier=entry.position_multiplier,
-                    atr_multiplier=entry.atr_multiplier,
-                    stop_price=stop_price,
-                    take_profits=take_profits,
-                    atr_value=atr_value,
-                    best_price=entry_price,
-                    metadata=entry.metadata,
-                    signal_time=entry.signal_time,
-                    fee_bps=entry.fee_bps,
-                    slippage_bps=entry.slippage_bps,
-                    exit_mode=entry.exit_mode,
-                )
-                open_trades.append(trade)
-                active_symbols[trade.symbol] = active_symbols.get(trade.symbol, 0) + 1
-                pending_entries.remove(entry)
 
-            if not _within_range(current_time):
-                equity_curve.append((current_time, equity))
-                continue
+                symbols_with_bar = [
+                    (symbol, df)
+                    for symbol, df in self.historical_data.items()
+                    if current_time in df.index
+                ]
 
-            symbols_with_bar = [
-                (symbol, df)
-                for symbol, df in self.historical_data.items()
-                if current_time in df.index
-            ]
+                processed_bars += len(symbols_with_bar)
 
-            processed_bars += len(symbols_with_bar)
-
-            macro_ok = True
-            try:
-                macro_ok = bool(self.macro_filter())
-            except Exception:
                 macro_ok = True
+                try:
+                    macro_ok = bool(self.macro_filter())
+                except Exception:
+                    macro_ok = True
 
-            if macro_ok:
-                available_slots = max_concurrent - len(open_trades) - len(pending_entries)
-                if available_slots > 0:
-                    for symbol, df in symbols_with_bar:
-                        if active_symbols.get(symbol, 0) > 0:
-                            continue
-                        if any(pe.symbol == symbol for pe in pending_entries):
-                            continue
-                        idx = df.index.get_loc(current_time)
-                        if idx <= 0 or idx >= len(df) - 1:
-                            continue
-                        window = df.iloc[: idx + 1]
-                        atr_value = self._compute_atr(window)
-                        if not math.isfinite(atr_value) or atr_value <= 0:
-                            continue
-                        try:
-                            evaluation = self.evaluate_signal(window, symbol, is_backtest=is_backtest)
-                        except Exception as exc:
-                            logger.debug("Signal evaluation failed for %s: %s", symbol, exc, exc_info=True)
-                            continue
-                        signal = self._normalise_signal(evaluation)
-                        score = float(signal.get("score", 0.0))
-                        confidence = float(signal.get("confidence", score))
-                        if not passes_min_score_gate(score, confidence, conf_thresh):
-                            continue
-                        try:
-                            probability = self._call_predict_prob(signal, symbol)
-                        except Exception as exc:
-                            logger.debug("Probability model failed for %s: %s", symbol, exc, exc_info=True)
-                            continue
-                        profile = get_symbol_profile(symbol)
-                        min_prob_for_symbol = get_effective_min_prob_for_symbol(
-                            symbol,
-                            profile=profile,
-                            override_min_prob=prob_thresh,
-                        )
-                        if probability < min_prob_for_symbol:
-                            continue
-                        direction = self._direction_multiplier(signal.get("direction"))
-                        position_multiplier = float(self.position_size_func(confidence))
-                        if position_multiplier <= 0:
-                            continue
-                        metadata = signal.get("metadata") or {}
-                        self._schedule_entry(
-                            pending_entries,
-                            symbol,
-                            df,
-                            idx,
-                            current_time,
-                            direction,
-                            score,
-                            confidence,
-                            probability,
-                            position_multiplier,
-                            atr_value,
-                            atr_mult,
-                            tp_rungs_tuple,
-                            fee_bps,
-                            slippage_bps,
-                            latency_bars,
-                            exit_mode,
-                            metadata,
-                        )
-                        available_slots -= 1
-                        if available_slots <= 0:
-                            break
+                if macro_ok:
+                    available_slots = max_concurrent - len(open_trades) - len(pending_entries)
+                    if available_slots > 0:
+                        for symbol, df in symbols_with_bar:
+                            if active_symbols.get(symbol, 0) > 0:
+                                continue
+                            if any(pe.symbol == symbol for pe in pending_entries):
+                                continue
+                            idx = df.index.get_loc(current_time)
+                            if idx <= 0 or idx >= len(df) - 1:
+                                continue
+                            window = df.iloc[: idx + 1]
+                            atr_series = atr_lookup.get(symbol)
+                            if atr_series is not None and len(atr_series) > idx:
+                                atr_value = float(atr_series.iloc[idx])
+                            else:
+                                atr_value = float("nan")
+                            if not math.isfinite(atr_value) or atr_value <= 0:
+                                continue
+                            try:
+                                evaluation = self.evaluate_signal(window, symbol, is_backtest=is_backtest)
+                            except Exception as exc:
+                                if preset_cfg.enable_per_bar_debug_logging:
+                                    logger.debug("Signal evaluation failed for %s: %s", symbol, exc, exc_info=True)
+                                continue
+                            signal = self._normalise_signal(evaluation)
+                            score = float(signal.get("score", 0.0))
+                            confidence = float(signal.get("confidence", score))
+                            if not passes_min_score_gate(score, confidence, conf_thresh):
+                                continue
+                            try:
+                                probability = self._call_predict_prob(signal, symbol)
+                            except Exception as exc:
+                                if preset_cfg.enable_per_bar_debug_logging:
+                                    logger.debug("Probability model failed for %s: %s", symbol, exc, exc_info=True)
+                                continue
+                            profile = get_symbol_profile(symbol)
+                            min_prob_for_symbol = get_effective_min_prob_for_symbol(
+                                symbol,
+                                profile=profile,
+                                override_min_prob=prob_thresh,
+                            )
+                            if probability < min_prob_for_symbol:
+                                continue
+                            direction = self._direction_multiplier(signal.get("direction"))
+                            position_multiplier = float(self.position_size_func(confidence))
+                            if position_multiplier <= 0:
+                                continue
+                            metadata = signal.get("metadata") or {}
+                            self._schedule_entry(
+                                pending_entries,
+                                symbol,
+                                df,
+                                idx,
+                                current_time,
+                                direction,
+                                score,
+                                confidence,
+                                probability,
+                                position_multiplier,
+                                atr_value,
+                                atr_mult,
+                                tp_rungs_tuple,
+                                fee_bps,
+                                slippage_bps,
+                                latency_bars,
+                                exit_mode,
+                                metadata,
+                            )
+                            available_slots -= 1
+                            if available_slots <= 0:
+                                break
 
-            if progress_stride and total_bars and processed_bars % progress_stride == 0:
-                emit_progress(
-                    progress_callback,
-                    BacktestProgress(
-                        phase="simulating",
-                        current=processed_bars,
-                        total=total_bars,
-                        message=f"Processed {processed_bars}/{total_bars} bars",
-                    ),
-                )
+                if processed_bars - last_progress_at >= progress_stride:
+                    last_progress_at = processed_bars
+                    emit_progress(
+                        progress_callback,
+                        BacktestProgress(
+                            phase="simulating",
+                            current=processed_bars,
+                            total=total_bars,
+                            message=f"Processed {processed_bars}/{total_bars} bars",
+                        ),
+                    )
 
-            equity_curve.append((current_time, equity))
+                equity_curve.append((current_time, equity))
 
         emit_progress(
             progress_callback,
@@ -732,7 +769,8 @@ class Backtester:
                 continue
             last_time = history.index[-1]
             last_price = float(history.iloc[-1]["close"])
-            last_price = self._apply_slippage(last_price, trade.slippage_bps, -trade.direction)
+            applied_slippage = trade.slippage_bps if preset_cfg.enable_slippage_model else 0.0
+            last_price = self._apply_slippage(last_price, applied_slippage, -trade.direction)
             trade_return = self._compute_trade_return(trade, last_price)
             equity *= (1.0 + trade_return)
             trade_returns.append(trade_return)

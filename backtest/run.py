@@ -29,6 +29,7 @@ def run_backtest(
     *,
     progress_callback: Optional[ProgressCallback] = None,
     data_dir: Path = Path("data"),
+    preset: str | None = None,
 ) -> BacktestResult:
     """Run a single-symbol backtest using the research engine.
 
@@ -61,4 +62,5 @@ def run_backtest(
         cfg,
         symbols=[symbol],
         progress_callback=progress_callback,
+        preset=preset,
     )

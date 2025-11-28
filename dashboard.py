@@ -2955,6 +2955,8 @@ def render_backtest_lab() -> None:
                 *selected_symbols,
                 "--timeframe",
                 timeframe,
+                "--preset",
+                preset,
                 "--start",
                 start_label,
                 "--end",
