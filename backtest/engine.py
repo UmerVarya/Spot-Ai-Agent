@@ -41,7 +41,9 @@ class BacktestConfig:
     start_ts: Optional[pd.Timestamp] = None
     end_ts: Optional[pd.Timestamp] = None
     is_backtest: bool = True
-    min_score: float = float(os.getenv("BACKTEST_DEFAULT_SCORE_THRESHOLD", 0.2))
+    # Optional extra global confidence/score gate.
+    # When None, only per-symbol/tier thresholds enforced by evaluate_signal apply.
+    min_score: Optional[float] = None
     min_prob: float = DEFAULT_MIN_PROB_FOR_TRADE
     atr_mult_sl: float = 1.5
     tp_rungs: Iterable[float] = field(default_factory=lambda: (1.0, 2.0, 3.0, 4.0))
