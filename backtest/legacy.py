@@ -32,6 +32,8 @@ import pandas as pd
 
 from risk_metrics import max_drawdown, sharpe_ratio
 from log_utils import setup_logger
+from probability_gating import get_effective_min_prob_for_symbol
+from trade_utils import get_symbol_profile
 from .types import BacktestProgress, ProgressCallback, emit_progress
 
 logger = setup_logger(__name__)
@@ -657,7 +659,13 @@ class Backtester:
                         except Exception as exc:
                             logger.debug("Probability model failed for %s: %s", symbol, exc, exc_info=True)
                             continue
-                        if probability < prob_thresh:
+                        profile = get_symbol_profile(symbol)
+                        min_prob_for_symbol = get_effective_min_prob_for_symbol(
+                            symbol,
+                            profile=profile,
+                            override_min_prob=prob_thresh,
+                        )
+                        if probability < min_prob_for_symbol:
                             continue
                         direction = self._direction_multiplier(signal.get("direction"))
                         position_multiplier = float(self.position_size_func(confidence))

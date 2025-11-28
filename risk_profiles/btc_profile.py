@@ -3,7 +3,7 @@
 # - BTC: Asia 0.7, Europe 1.0, US 1.2
 # - Tier1: Asia 0.85, Europe 1.0, US 1.10
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,9 @@ class SymbolProfile:
     atr_min_ratio: float
     min_score_for_trade: float
     session_multipliers: Dict[str, float]
+    # Optional per-symbol/tier probability threshold. When None, the
+    # global DEFAULT_MIN_PROB_FOR_TRADE is used.
+    min_prob_for_trade: Optional[float] = None
 
 
 BTC_PROFILE = SymbolProfile(
@@ -28,6 +31,7 @@ BTC_PROFILE = SymbolProfile(
     vol_expansion_min=1.03,
     atr_min_ratio=0.55,
     min_score_for_trade=4.5,
+    min_prob_for_trade=None,
     # Session multipliers are intentionally mild (±5–8%) to gently tilt exposure
     # by time-of-day, without completely turning sessions on/off. US gets a
     # slightly higher bar; Asia slightly lower, but all sessions stay in a
@@ -47,6 +51,7 @@ ETH_PROFILE = SymbolProfile(
     vol_expansion_min=1.02,
     atr_min_ratio=0.50,
     min_score_for_trade=4.2,
+    min_prob_for_trade=None,
     session_multipliers={
         "asia": 0.95,
         "europe": 1.0,
@@ -62,6 +67,7 @@ SOL_PROFILE = SymbolProfile(
     vol_expansion_min=1.01,
     atr_min_ratio=0.50,
     min_score_for_trade=4.0,
+    min_prob_for_trade=None,
     session_multipliers={
         "asia": 0.95,
         "europe": 1.0,
@@ -81,6 +87,7 @@ BNB_PROFILE = SymbolProfile(
     atr_min_ratio=0.45,
     # Easier to trade than BTC/ETH; similar or slightly easier than SOL
     min_score_for_trade=4.0,
+    min_prob_for_trade=None,
     session_multipliers={
         "asia": 0.95,
         "europe": 1.0,
@@ -96,6 +103,7 @@ TIER1_PROFILE = SymbolProfile(
     vol_expansion_min=1.00,
     atr_min_ratio=0.50,
     min_score_for_trade=4.0,
+    min_prob_for_trade=None,
     session_multipliers={"asia": 0.95, "europe": 1.0, "us": 1.05},
 )
 
@@ -107,6 +115,7 @@ TIER2_PROFILE = SymbolProfile(
     vol_expansion_min=1.00,
     atr_min_ratio=0.45,
     min_score_for_trade=3.9,
+    min_prob_for_trade=None,
     session_multipliers={"asia": 0.95, "europe": 1.0, "us": 1.08},
 )
 
@@ -118,6 +127,7 @@ TIER3_PROFILE = SymbolProfile(
     vol_expansion_min=1.00,  # just requires "normal" volume
     atr_min_ratio=0.40,
     min_score_for_trade=3.8,
+    min_prob_for_trade=None,
     session_multipliers={"asia": 0.95, "europe": 1.0, "us": 1.08},
 )
 

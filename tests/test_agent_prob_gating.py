@@ -6,6 +6,6 @@ def test_probability_veto_matches_shared_threshold():
     below_threshold = DEFAULT_MIN_PROB_FOR_TRADE - 0.01
     above_threshold = DEFAULT_MIN_PROB_FOR_TRADE + 0.01
 
-    assert should_veto_on_probability(below_threshold) is True
-    assert should_veto_on_probability(above_threshold) is False
+    assert should_veto_on_probability(below_threshold, min_prob=DEFAULT_MIN_PROB_FOR_TRADE) is True
+    assert should_veto_on_probability(above_threshold, min_prob=DEFAULT_MIN_PROB_FOR_TRADE) is False
 
