@@ -495,6 +495,7 @@ from trade_constants import (
 )
 from rl_policy import RLPositionSizer
 from trade_utils import get_rl_state, set_symbol_tiers
+from probability_gating import should_veto_on_probability
 from microstructure import plan_execution
 from volatility_regime import atr_percentile
 from cache_evaluator_adapter import evaluator_for_cache
@@ -3158,13 +3159,13 @@ def run_agent_loop() -> None:
                     llm_confidence=decision_obj.get("llm_confidence", 5.0),
                     micro_features=micro_feature_payload,
                 )
-                ml_veto_flag = bool(ml_prob is not None and ml_prob < 0.5)
+                ml_veto_flag = should_veto_on_probability(ml_prob)
                 _audit_update(
                     symbol_key,
                     ml_probability=ml_prob,
                     ml_veto=ml_veto_flag,
                 )
-                if ml_prob < 0.5:
+                if should_veto_on_probability(ml_prob):
                     logger.info(
                         "ML model predicted low success probability (%.2f) for %s. Skipping trade.",
                         ml_prob,

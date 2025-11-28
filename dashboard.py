@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Callable, Optional
+from config import DEFAULT_MIN_PROB_FOR_TRADE
 from log_utils import setup_logger, LOG_FILE
 from trade_schema import TRADE_HISTORY_COLUMNS, normalise_history_columns
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
@@ -2697,7 +2698,7 @@ def render_backtest_lab() -> None:
     overrides_col = st.columns(3)
     with overrides_col[0]:
         score_threshold = st.number_input("Score threshold", value=0.2, step=0.05, min_value=0.0)
-        min_prob = st.slider("Min probability", 0.0, 1.0, 0.55, 0.01)
+        min_prob = st.slider("Min probability", 0.0, 1.0, DEFAULT_MIN_PROB_FOR_TRADE, 0.01)
     with overrides_col[1]:
         atr_mult = st.number_input("ATR stop multiplier", value=1.5)
         latency = st.number_input("Latency bars", value=0, min_value=0, step=1)

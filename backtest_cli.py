@@ -17,6 +17,7 @@ from backtest.filesystem import (
     write_csv_atomic,
     write_json_atomic,
 )
+from config import DEFAULT_MIN_PROB_FOR_TRADE
 from backtest.types import BacktestProgress
 from run_backtest_cli import (
     _compute_metrics,
@@ -183,7 +184,12 @@ def main(cli_args: Sequence[str] | None = None) -> int:
     parser.add_argument("--end", help="End date (YYYY-MM-DD)")
     parser.add_argument("--output-dir", help="Output directory for artifacts")
     parser.add_argument("--score-threshold", type=float, default=0.20)
-    parser.add_argument("--min-prob", type=float, default=0.55)
+    parser.add_argument(
+        "--min-prob",
+        type=float,
+        default=DEFAULT_MIN_PROB_FOR_TRADE,
+        help=f"Minimum model probability threshold (default {DEFAULT_MIN_PROB_FOR_TRADE})",
+    )
     parser.add_argument("--exit-mode", choices=["tp_trailing", "atr_trailing"], default="tp_trailing")
     parser.add_argument("--trade-size-usd", type=float, default=500.0)
     parser.add_argument("--fee-bps", type=float, default=10.0)

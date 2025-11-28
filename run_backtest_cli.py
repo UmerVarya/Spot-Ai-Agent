@@ -27,6 +27,7 @@ from backtest.filesystem import (
     write_csv_atomic,
     write_json_atomic,
 )
+from config import DEFAULT_MIN_PROB_FOR_TRADE
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 from trade_schema import TRADE_HISTORY_COLUMNS
 from backtest.types import BacktestProgress
@@ -249,7 +250,12 @@ def run_cli(args: Sequence[str] | None = None) -> int:
     parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
     parser.add_argument("--risk", type=float, default=1.0, help="Risk per trade as a percent of equity")
     parser.add_argument("--score-threshold", type=float, default=0.2, help="Minimum score threshold")
-    parser.add_argument("--min-prob", type=float, default=0.55, help="Minimum model probability threshold")
+    parser.add_argument(
+        "--min-prob",
+        type=float,
+        default=DEFAULT_MIN_PROB_FOR_TRADE,
+        help=f"Minimum model probability threshold (default {DEFAULT_MIN_PROB_FOR_TRADE})",
+    )
     parser.add_argument("--fee-bps", type=float, default=10.0, help="Fee in basis points")
     parser.add_argument("--slippage-bps", type=float, default=2.0, help="Slippage in basis points")
     parser.add_argument("--atr-stop-multiplier", type=float, default=1.5, help="ATR stop multiplier")

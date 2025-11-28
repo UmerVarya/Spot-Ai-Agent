@@ -11,6 +11,12 @@ load_dotenv()
 
 import os
 
+# Global default minimum ML success probability to allow a trade.
+# This is used consistently by both backtests and live trading.
+# It may be tuned later or elevated into per-symbol configuration, but the
+# baseline is shared to avoid divergence between environments.
+DEFAULT_MIN_PROB_FOR_TRADE: float = 0.5
+
 
 def _clean_path(value: str | None) -> str:
     """Return ``value`` without inline comments or surrounding whitespace."""
