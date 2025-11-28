@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 import pandas as pd
 
@@ -78,7 +78,7 @@ def _print_summary(
     timeframe: str,
     start: datetime,
     end_exclusive: datetime,
-    score_threshold: float,
+    score_threshold: Optional[float],
     min_prob: float,
     exit_mode: str,
     trade_size_usd: float,
@@ -91,7 +91,8 @@ def _print_summary(
     print(f"  timeframe: {timeframe}")
     print(f"  start: {start.date()}")
     print(f"  end: {end_inclusive.date()}")
-    print(f"  score_threshold: {score_threshold}")
+    threshold_display = score_threshold if score_threshold is not None else "disabled"
+    print(f"  score_threshold: {threshold_display}")
     print(f"  min_prob: {min_prob}")
     print(f"  exit_mode: {exit_mode}")
     print(f"  trade_size_usd: {trade_size_usd}")
@@ -183,7 +184,15 @@ def main(cli_args: Sequence[str] | None = None) -> int:
     parser.add_argument("--start", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", help="End date (YYYY-MM-DD)")
     parser.add_argument("--output-dir", help="Output directory for artifacts")
-    parser.add_argument("--score-threshold", type=float, default=0.20)
+    parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Optional extra global score/confidence threshold; by default no extra gate "
+            "is applied beyond per-symbol/tier profiles."
+        ),
+    )
     parser.add_argument(
         "--min-prob",
         type=float,

@@ -37,6 +37,18 @@ from .types import BacktestProgress, ProgressCallback, emit_progress
 logger = setup_logger(__name__)
 
 
+def passes_min_score_gate(score: float, confidence: float, min_score: Optional[float]) -> bool:
+    """Return True when the optional min_score gate is satisfied.
+
+    When ``min_score`` is None the gate is disabled and the caller should rely on
+    per-symbol thresholds enforced by ``evaluate_signal``.
+    """
+
+    if min_score is None:
+        return True
+    return score >= min_score and confidence >= min_score
+
+
 @dataclass(slots=True)
 class PendingEntry:
     symbol: str
@@ -423,7 +435,7 @@ class Backtester:
     ) -> Dict[str, Any]:
         conf_thresh = params.get("min_score")
         if conf_thresh is None:
-            conf_thresh = params.get("confidence_threshold", 0.0)
+            conf_thresh = params.get("confidence_threshold")
         prob_thresh = params.get("min_prob")
         if prob_thresh is None:
             prob_thresh = params.get("prob_threshold", 0.0)
@@ -638,7 +650,7 @@ class Backtester:
                         signal = self._normalise_signal(evaluation)
                         score = float(signal.get("score", 0.0))
                         confidence = float(signal.get("confidence", score))
-                        if score < conf_thresh or confidence < conf_thresh:
+                        if not passes_min_score_gate(score, confidence, conf_thresh):
                             continue
                         try:
                             probability = self._call_predict_prob(signal, symbol)

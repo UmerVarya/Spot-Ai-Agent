@@ -249,7 +249,15 @@ def run_cli(args: Sequence[str] | None = None) -> int:
     parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
     parser.add_argument("--risk", type=float, default=1.0, help="Risk per trade as a percent of equity")
-    parser.add_argument("--score-threshold", type=float, default=0.2, help="Minimum score threshold")
+    parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Optional extra global score/confidence threshold; when omitted only per-symbol "
+            "profile thresholds apply."
+        ),
+    )
     parser.add_argument(
         "--min-prob",
         type=float,
