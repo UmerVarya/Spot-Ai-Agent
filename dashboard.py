@@ -50,6 +50,11 @@ from ml_model import train_model
 import requests
 from daily_summary import generate_daily_summary
 from news_risk import load_news_status, format_news_status_line
+from spot.analytics.live_scan_stats import (
+    aggregate_symbol_stats,
+    list_scan_stat_files,
+    load_scan_stats,
+)
 from trade_utils import get_top_symbols
 from ml_model import train_model
 import requests
@@ -1290,6 +1295,125 @@ def to_bool(val) -> bool:
         return True
     return bool(val)
 
+
+def _load_scan_stats(path: Path) -> dict:
+    try:
+        return load_scan_stats(path)
+    except Exception:
+        return {}
+
+
+def _render_daily_scan_stats() -> None:
+    st.subheader("📊 Daily Scan Stats")
+    stat_files = list_scan_stat_files()
+    if not stat_files:
+        st.info("No scan stats found yet. Files will appear in spot_data/live_scan_stats.")
+        return
+    options = {path.stem.replace("scan_stats_", ""): path for path in stat_files}
+    selected_key = st.selectbox(
+        "Select date",
+        options=list(options.keys()),
+        index=0,
+    )
+    selected_path = options.get(selected_key)
+    if not selected_path:
+        st.warning("Selected stats file missing on disk.")
+        return
+    data = _load_scan_stats(selected_path)
+    symbols_block = data.get("symbols") or {}
+    if not symbols_block:
+        st.info("Selected file contains no symbol stats yet.")
+        return
+    all_symbols = sorted(symbols_block.keys())
+    selected_symbols = st.multiselect(
+        "Symbols",
+        options=all_symbols,
+        default=all_symbols,
+        help="Aggregate metrics across the selected symbols.",
+    )
+    effective_symbols = selected_symbols or all_symbols
+    aggregate = aggregate_symbol_stats(data, effective_symbols)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total scans", int(aggregate.get("total_scans", 0)))
+    c2.metric("Total candidates", int(aggregate.get("scans_with_candidate", 0)))
+    c3.metric("Passed alpha gate", int(aggregate.get("passed_alpha", 0)))
+    c4.metric("Passed probability gate", int(aggregate.get("passed_prob", 0)))
+    c5.metric("Trades entered", int(aggregate.get("trades_entered", 0)))
+    funnel_df = pd.DataFrame(
+        {
+            "stage": [
+                "Scans",
+                "Candidates",
+                "Passed Alpha",
+                "Passed Prob",
+                "LLM Approved",
+                "Trades Entered",
+            ],
+            "count": [
+                aggregate.get("total_scans", 0),
+                aggregate.get("scans_with_candidate", 0),
+                aggregate.get("passed_alpha", 0),
+                aggregate.get("passed_prob", 0),
+                aggregate.get("llm_approved", 0),
+                aggregate.get("trades_entered", 0),
+            ],
+        }
+    ).set_index("stage")
+    st.markdown("#### Conversion funnel")
+    st.bar_chart(funnel_df)
+    reasons = aggregate.get("primary_reasons", {}) or {}
+    if reasons:
+        reasons_df = pd.DataFrame(
+            {"reason": list(reasons.keys()), "count": [int(v) for v in reasons.values()]}
+        ).set_index("reason")
+        st.markdown("#### Primary no-trade reasons")
+        st.bar_chart(reasons_df)
+    table_rows: list[dict[str, object]] = []
+    selected_set = {sym.upper() for sym in effective_symbols}
+    for sym, payload in symbols_block.items():
+        if sym.upper() not in selected_set:
+            continue
+        filters = payload.get("filters", {})
+        finals = payload.get("final", {})
+        total_scans = int(payload.get("total_scans", 0))
+        candidates = int(payload.get("scans_with_candidate", 0))
+        alpha_pass = int(filters.get("passed_alpha_score_gate", 0))
+        prob_pass = int(filters.get("passed_prob_gate", 0))
+        trades_entered = int(finals.get("trades_entered", 0))
+        denom = candidates if candidates else max(total_scans, 1)
+        table_rows.append(
+            {
+                "symbol": sym,
+                "total_scans": total_scans,
+                "candidates": candidates,
+                "trades_entered": trades_entered,
+                "pass_alpha_rate": alpha_pass / denom,
+                "pass_prob_rate": prob_pass / denom,
+            }
+        )
+    if table_rows:
+        df = pd.DataFrame(table_rows)
+        st.markdown("#### Per-symbol summary")
+        st.dataframe(
+            df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "pass_alpha_rate": st.column_config.ProgressColumn(
+                    "Alpha pass rate", min_value=0.0, max_value=1.0
+                ),
+                "pass_prob_rate": st.column_config.ProgressColumn(
+                    "Prob pass rate", min_value=0.0, max_value=1.0
+                ),
+            },
+        )
+    st.download_button(
+        "Download JSON",
+        data=json.dumps(data, indent=2),
+        file_name=selected_path.name,
+        mime="application/json",
+    )
+
 def format_active_row(symbol: str, data: dict) -> dict | None:
     """
     Format a single active trade dictionary into a row for display.
@@ -1631,6 +1755,7 @@ def render_live_tab() -> None:
         c1.metric("Approved", f"{approved} ({approved / total_decisions:.0%})")
         c2.metric("Vetoed", f"{vetoed} ({vetoed / total_decisions:.0%})")
         c3.metric("Errors", f"{errors} ({errors / total_decisions:.0%})")
+    _render_daily_scan_stats()
     # Display live PnL section
     st.subheader("📈 Live PnL – Active Trades")
     source_label = "live API" if source == "api" else "local cache"
