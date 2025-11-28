@@ -175,6 +175,7 @@ from decision_metrics import (
     record_trade_opened,
     update_breakdown_reason,
 )
+from spot.analytics.live_scan_stats import DailyScanStats
 
 # Centralized configuration loader
 import config
@@ -957,6 +958,21 @@ def run_streamlit() -> None:
 def run_agent_loop() -> None:
     """Main loop that scans the market, evaluates signals and opens trades."""
     logger.info("Spot AI Super Agent running in paper trading mode...")
+    stats_session_id = f"{int(time.time())}-{os.getpid()}"
+    stats_date = datetime.now(timezone.utc).date()
+    daily_scan_stats = DailyScanStats.load_or_create(stats_date, stats_session_id)
+    last_stats_flush = time.time()
+
+    def _maybe_roll_scan_stats() -> None:
+        nonlocal stats_date, daily_scan_stats
+        current_date = datetime.now(timezone.utc).date()
+        if current_date != stats_date:
+            try:
+                daily_scan_stats.flush()
+            except Exception:
+                logger.debug("Failed to flush scan stats before rollover", exc_info=True)
+            stats_date = current_date
+            daily_scan_stats = DailyScanStats.load_or_create(current_date, stats_session_id)
     # start news and dashboard threads
     def _handle_news_alert(alert) -> None:
         try:
@@ -1527,6 +1543,7 @@ def run_agent_loop() -> None:
     btc_bars_len_last: Optional[int] = None
     while True:
         triggered = scan_trigger.wait(timeout=guard_interval)
+        _maybe_roll_scan_stats()
         if not triggered:
             continue
         now = time.time()
@@ -1893,6 +1910,32 @@ def run_agent_loop() -> None:
             cache_miss_symbols: list[str] = []
             for symbol in symbols_to_fetch:
                 symbol_key = str(symbol or "").upper()
+                scan_record = {
+                    "symbol": symbol_key,
+                    "had_candidate": False,
+                    "score": None,
+                    "prob": None,
+                    "filter_flags": {
+                        "session_ok": True,
+                        "volume_ok": False,
+                        "atr_ok": True,
+                        "macro_ok": True,
+                        "alpha_ok": False,
+                        "prob_ok": True,
+                    },
+                    "llm_info": {
+                        "llm_called": False,
+                        "llm_success": False,
+                        "llm_approved": None,
+                        "llm_unavailable": False,
+                    },
+                    "final_decision": {
+                        "entered_trade": False,
+                        "blocked_by_risk": False,
+                        "rejected_pre_llm": False,
+                        "rejected_by_llm": False,
+                    },
+                }
                 breakdown_data: Optional[Dict[str, Any]] = None
                 signal_snapshot: Mapping[str, Any] = {}
                 custom_skip_reason_key: Optional[str] = None
@@ -1911,13 +1954,15 @@ def run_agent_loop() -> None:
                         logger.warning("Skipping %s due to insufficient data.", symbol)
                         continue
                     tier = symbol_tier_lookup.get(symbol_key)
-
+    
                     score = cached_signal.score
+                    scan_record["score"] = score
                     raw_score = float(score)
                     direction = cached_signal.direction
                     position_size = cached_signal.position_size
                     pattern_name = cached_signal.pattern
                     signal_snapshot = price_data.attrs.get("signal_features", {}) or {}
+                    scan_record["filter_flags"]["volume_ok"] = bool(position_size > 0)
                     macro_meta_raw = signal_snapshot.get("macro_context")
                     if isinstance(macro_meta_raw, Mapping):
                         macro_meta = dict(macro_meta_raw)
@@ -2086,6 +2131,7 @@ def run_agent_loop() -> None:
                     breakdown_data["alt_adj"] = alt_adjustment
                     breakdown_data["adjusted_score"] = adjusted_score
                     breakdown_data["alt_adj_block"] = adjusted_score < entry_cutoff
+                    scan_record["filter_flags"]["alpha_ok"] = adjusted_score >= entry_cutoff
                     _audit_update(
                         symbol_key,
                         alt_adjustment=alt_adjustment,
@@ -2096,6 +2142,7 @@ def run_agent_loop() -> None:
                     volume_ok = position_size > 0
                     macro_state = macro_news_assessment or {}
                     macro_veto_flag = not bool(macro_state.get("safe", True))
+                    scan_record["filter_flags"]["macro_ok"] = not macro_veto_flag
                     news_veto_flag = bool(
                         monitor_state and bool(monitor_state.get("halt_trading"))
                     )
@@ -2586,6 +2633,7 @@ def run_agent_loop() -> None:
                                 "Bearish order flow detected in %s. Proceeding with caution (penalized score handled in evaluate_signal).",
                                 symbol,
                             )
+                    scan_record["had_candidate"] = True
                     _log_decision("enter")
                     _emit_metrics("enter")
                     if (row := audit_rows.get(symbol_key)):
@@ -2615,43 +2663,43 @@ def run_agent_loop() -> None:
                         auction_state,
                     )
                 except Exception as e:
-                    logger.error("Error evaluating %s: %s", symbol, e, exc_info=True)
-                    if "price_data" in locals() and hasattr(price_data, "attrs"):
-                        breakdown_snapshot = price_data.attrs.get("decision_breakdown")
-                        signal_features = price_data.attrs.get("signal_features", {})
-                    else:
-                        breakdown_snapshot = None
-                        signal_features = {}
-                    symbol_for_metrics = locals().get("symbol_key", str(symbol).upper())
-                    try:
-                        structured_breakdown = ensure_breakdown_fields(
-                            breakdown_snapshot,
-                            required_fields=("symbol",),
-                        )
-                    except Exception:
-                        structured_breakdown = None
-                    if structured_breakdown is not None:
-                        structured_breakdown.setdefault("symbol", symbol_for_metrics)
-                        structured_breakdown.setdefault("decision_type", "error")
-                        update_breakdown_reason(
-                            structured_breakdown,
-                            "evaluation_error",
-                            "signal evaluation raised",
-                        )
-                        record_skip_reason("evaluation_error")
+                        logger.error("Error evaluating %s: %s", symbol, e, exc_info=True)
+                        if "price_data" in locals() and hasattr(price_data, "attrs"):
+                            breakdown_snapshot = price_data.attrs.get("decision_breakdown")
+                            signal_features = price_data.attrs.get("signal_features", {})
+                        else:
+                            breakdown_snapshot = None
+                            signal_features = {}
+                        symbol_for_metrics = locals().get("symbol_key", str(symbol).upper())
                         try:
-                            log_decision_breakdown(
-                                symbol_for_metrics,
-                                signal_features,
-                                structured_breakdown,
+                            structured_breakdown = ensure_breakdown_fields(
+                                breakdown_snapshot,
+                                required_fields=("symbol",),
                             )
                         except Exception:
-                            logger.debug(
-                                "Failed to emit decision metrics after exception",
-                                exc_info=True,
+                            structured_breakdown = None
+                        if structured_breakdown is not None:
+                            structured_breakdown.setdefault("symbol", symbol_for_metrics)
+                            structured_breakdown.setdefault("decision_type", "error")
+                            update_breakdown_reason(
+                                structured_breakdown,
+                                "evaluation_error",
+                                "signal evaluation raised",
                             )
-                    metrics_logged = True
-                    continue
+                            record_skip_reason("evaluation_error")
+                            try:
+                                log_decision_breakdown(
+                                    symbol_for_metrics,
+                                    signal_features,
+                                    structured_breakdown,
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "Failed to emit decision metrics after exception",
+                                    exc_info=True,
+                                )
+                        metrics_logged = True
+                        continue
                 finally:
                     if (
                         evaluation_started
@@ -2670,6 +2718,26 @@ def run_agent_loop() -> None:
                                 "Final decision metric emission failed for %s", symbol_key,
                                 exc_info=True,
                             )
+                    if scan_record["had_candidate"] and not scan_record["final_decision"].get("entered_trade"):
+                        fd = scan_record["final_decision"]
+                        if not (
+                            fd.get("rejected_pre_llm")
+                            or fd.get("rejected_by_llm")
+                            or fd.get("blocked_by_risk")
+                        ):
+                            fd["rejected_pre_llm"] = True
+                    try:
+                        daily_scan_stats.record_scan(
+                            symbol=scan_record["symbol"],
+                            had_candidate=scan_record["had_candidate"],
+                        score=scan_record["score"],
+                        prob=scan_record["prob"],
+                            filter_flags=scan_record["filter_flags"],
+                            llm_info=scan_record["llm_info"],
+                            final_decision=scan_record["final_decision"],
+                        )
+                    except Exception:
+                        logger.debug("Unable to update daily scan stats", exc_info=True)
                     maybe_log_summary()
             maybe_log_summary()
             if not symbol_scores:
@@ -3078,6 +3146,11 @@ def run_agent_loop() -> None:
                 tier = context.get("tier")
                 news_severity = context.get("news_severity", 0)
                 atr_15m_ratio = context.get("atr_15m_ratio")
+                if atr_15m_ratio is not None:
+                    try:
+                        scan_record["filter_flags"]["atr_ok"] = math.isfinite(float(atr_15m_ratio))
+                    except Exception:
+                        scan_record["filter_flags"]["atr_ok"] = True
                 direction = context.get("direction") or "long"
                 profile = get_symbol_profile(symbol, tier)
 
@@ -3104,7 +3177,14 @@ def run_agent_loop() -> None:
                         "macro_news_reason": macro_news_assessment.get("reason") if macro_news_assessment else None,
                         "news_summary": macro_news_summary,
                     }
-                    llm_decision = get_llm_trade_decision(trade_context)
+                    scan_record["llm_info"]["llm_called"] = True
+                    try:
+                        llm_decision = get_llm_trade_decision(trade_context)
+                        scan_record["llm_info"]["llm_success"] = True
+                    except Exception:
+                        scan_record["llm_info"]["llm_success"] = False
+                        scan_record["llm_info"]["llm_unavailable"] = True
+                        raise
                     decision_obj = finalize_trade_decision(prepared, llm_decision)
 
                 ml_prob: Optional[float] = None
@@ -3115,6 +3195,9 @@ def run_agent_loop() -> None:
                 reason = decision_obj.get("reason", "")
                 llm_signal = decision_obj.get("llm_decision")
                 llm_approval = decision_obj.get("llm_approval")
+                scan_record["llm_info"]["llm_approved"] = llm_approval
+                if decision_obj.get("llm_error"):
+                    scan_record["llm_info"]["llm_unavailable"] = True
                 technical_score = decision_obj.get("technical_indicator_score")
                 if technical_score is None:
                     technical_score = summarise_technical_score(indicators, "long")
@@ -3130,6 +3213,12 @@ def run_agent_loop() -> None:
 
                 if not decision:
                     rejection_reason = reason or "Unknown reason"
+                    if scan_record["llm_info"].get("llm_called"):
+                        scan_record["final_decision"]["rejected_by_llm"] = True
+                        if scan_record["llm_info"].get("llm_approved") is None:
+                            scan_record["llm_info"]["llm_approved"] = False
+                    else:
+                        scan_record["final_decision"]["rejected_pre_llm"] = True
                     log_simple_decision_metric(
                         symbol,
                         action="skip",
@@ -3168,6 +3257,8 @@ def run_agent_loop() -> None:
                 ml_veto_flag = should_veto_on_probability(
                     ml_prob, min_prob=min_prob_for_symbol
                 )
+                scan_record["prob"] = ml_prob
+                scan_record["filter_flags"]["prob_ok"] = not ml_veto_flag
                 _audit_update(
                     symbol_key,
                     ml_probability=ml_prob,
@@ -3269,6 +3360,7 @@ def run_agent_loop() -> None:
                         float(risk_review.get("max_rr", 0.0)),
                     )
                     risk_reason = f"Risk veto: {conflict_text or 'guardrail failure'}"
+                    scan_record["final_decision"]["blocked_by_risk"] = True
                     log_simple_decision_metric(
                         symbol,
                         action="skip",
@@ -3536,6 +3628,7 @@ def run_agent_loop() -> None:
                         lvn_entry_level=lvn_entry_value,
                         orderflow_analysis=orderflow_metadata,
                     ):
+                        scan_record["final_decision"]["entered_trade"] = True
                         active_trades.append(new_trade)
                         save_active_trades(active_trades)
                         _audit_update(symbol_key, final_trade_taken=1)
@@ -3626,6 +3719,13 @@ def run_agent_loop() -> None:
                 logger.info("Saved symbol scores (persistent memory updated).")
             except Exception as e:
                 logger.error("Error saving symbol scores: %s", e, exc_info=True)
+            now = time.time()
+            if now - last_stats_flush >= 45:
+                try:
+                    daily_scan_stats.flush()
+                    last_stats_flush = now
+                except Exception:
+                    logger.debug("Failed to flush scan stats", exc_info=True)
         except Exception as e:
             logger.error("Main Loop Error: %s", e, exc_info=True)
             guard_stop.wait(10)
