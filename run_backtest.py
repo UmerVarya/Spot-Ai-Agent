@@ -13,6 +13,7 @@ import pandas as pd
 
 from backtest import Backtester
 from backtest.data import load_csv_folder
+from config import DEFAULT_MIN_PROB_FOR_TRADE
 
 # Import live modules -------------------------------------------------------
 import trade_utils as trade_utils_module
@@ -157,7 +158,7 @@ def position_size_func(confidence: float) -> float:
 def run_single_backtest(
     data_glob: str = "data/*_1m.csv",
     min_score: float = 0.2,
-    min_prob: float = 0.55,
+    min_prob: float = DEFAULT_MIN_PROB_FOR_TRADE,
     atr_mult_sl: float = 1.5,
     tp_rungs: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0),
     fee_bps: float = 10.0,
