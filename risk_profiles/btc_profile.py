@@ -1,4 +1,7 @@
 """BTC-specific in-memory risk profile configuration."""
+# Previous session multipliers before softening for gentle tilts:
+# - BTC: Asia 0.7, Europe 1.0, US 1.2
+# - Tier1: Asia 0.85, Europe 1.0, US 1.10
 from dataclasses import dataclass
 from typing import Dict
 
@@ -25,10 +28,14 @@ BTC_PROFILE = SymbolProfile(
     vol_expansion_min=1.03,
     atr_min_ratio=0.55,
     min_score_for_trade=4.5,
+    # Session multipliers are intentionally mild (±5–8%) to gently tilt exposure
+    # by time-of-day, without completely turning sessions on/off. US gets a
+    # slightly higher bar; Asia slightly lower, but all sessions stay in a
+    # narrow band around 1.0.
     session_multipliers={
-        "asia": 0.7,
+        "asia": 0.95,
         "europe": 1.0,
-        "us": 1.2,
+        "us": 1.05,
     },
 )
 
@@ -41,9 +48,9 @@ ETH_PROFILE = SymbolProfile(
     atr_min_ratio=0.50,
     min_score_for_trade=4.2,
     session_multipliers={
-        "asia": 0.8,
+        "asia": 0.95,
         "europe": 1.0,
-        "us": 1.15,
+        "us": 1.05,
     },
 )
 
@@ -56,9 +63,9 @@ SOL_PROFILE = SymbolProfile(
     atr_min_ratio=0.50,
     min_score_for_trade=4.0,
     session_multipliers={
-        "asia": 0.9,
+        "asia": 0.95,
         "europe": 1.0,
-        "us": 1.15,
+        "us": 1.05,
     },
 )
 
@@ -77,7 +84,7 @@ BNB_PROFILE = SymbolProfile(
     session_multipliers={
         "asia": 0.95,
         "europe": 1.0,
-        "us": 1.10,
+        "us": 1.05,
     },
 )
 
@@ -89,7 +96,7 @@ TIER1_PROFILE = SymbolProfile(
     vol_expansion_min=1.00,
     atr_min_ratio=0.50,
     min_score_for_trade=4.0,
-    session_multipliers={"asia": 0.85, "europe": 1.0, "us": 1.10},
+    session_multipliers={"asia": 0.95, "europe": 1.0, "us": 1.05},
 )
 
 TIER2_PROFILE = SymbolProfile(
@@ -100,7 +107,7 @@ TIER2_PROFILE = SymbolProfile(
     vol_expansion_min=1.00,
     atr_min_ratio=0.45,
     min_score_for_trade=3.9,
-    session_multipliers={"asia": 0.9, "europe": 1.0, "us": 1.08},
+    session_multipliers={"asia": 0.95, "europe": 1.0, "us": 1.08},
 )
 
 TIER3_PROFILE = SymbolProfile(
@@ -111,7 +118,7 @@ TIER3_PROFILE = SymbolProfile(
     vol_expansion_min=1.00,  # just requires "normal" volume
     atr_min_ratio=0.40,
     min_score_for_trade=3.8,
-    session_multipliers={"asia": 0.95, "europe": 1.0, "us": 1.05},
+    session_multipliers={"asia": 0.95, "europe": 1.0, "us": 1.08},
 )
 
 
