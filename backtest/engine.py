@@ -18,6 +18,7 @@ from trade_utils import evaluate_signal as live_evaluate_signal
 from trade_utils import precompute_backtest_indicators
 
 from .types import BacktestProgress, ProgressCallback, emit_progress
+from .presets import BacktestPresetConfig, resolve_preset
 
 from .analysis import (
     build_equity_curve,
@@ -252,7 +253,9 @@ class ResearchBacktester:
         self,
         cfg: BacktestConfig,
         progress_callback: Optional[ProgressCallback] = None,
+        preset: BacktestPresetConfig | str | None = None,
     ) -> BacktestResult:
+        preset_cfg = resolve_preset(preset)
         if cfg.random_seed is not None:
             try:
                 import random
@@ -306,7 +309,11 @@ class ResearchBacktester:
 
             legacy_bt.macro_filter = gated_macro
 
-        raw_result = legacy_bt.run(params, progress_callback=progress_callback)
+        raw_result = legacy_bt.run(
+            params,
+            progress_callback=progress_callback,
+            preset=preset_cfg,
+        )
         trades_df = raw_result.get("trades_df") or pd.DataFrame(raw_result.get("trades", []))
         emit_progress(
             progress_callback,
@@ -371,6 +378,7 @@ def run_backtest_from_csv_paths(
     symbols: Optional[Iterable[str]] = None,
     scenario_runner: Optional[Callable[[ResearchBacktester, BacktestConfig], pd.DataFrame]] = None,
     progress_callback: Optional[ProgressCallback] = None,
+    preset: BacktestPresetConfig | str | None = None,
 ) -> BacktestResult:
     """Run a backtest using explicitly provided CSV files."""
 
@@ -395,7 +403,7 @@ def run_backtest_from_csv_paths(
     )
 
     bt = ResearchBacktester(data)
-    result = bt.run(cfg, progress_callback=progress_callback)
+    result = bt.run(cfg, progress_callback=progress_callback, preset=preset)
     if scenario_runner:
         result.scenarios = scenario_runner(bt, cfg)
     return result

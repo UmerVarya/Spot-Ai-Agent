@@ -31,6 +31,12 @@ from config import DEFAULT_MIN_PROB_FOR_TRADE
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 from trade_schema import TRADE_HISTORY_COLUMNS
 from backtest.types import BacktestProgress
+from backtest.presets import (
+    PRESET_FULL_AUDIT,
+    PRESET_QUICK_SMOKE,
+    PRESET_STANDARD_RESEARCH,
+    resolve_preset,
+)
 
 
 BACKTEST_DIR = get_backtest_dir()
@@ -280,6 +286,16 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         help="Position sizing mode",
     )
     parser.add_argument(
+        "--preset",
+        default=PRESET_STANDARD_RESEARCH.name,
+        choices=[
+            PRESET_QUICK_SMOKE.name,
+            PRESET_STANDARD_RESEARCH.name,
+            PRESET_FULL_AUDIT.name,
+        ],
+        help="Performance/observability preset",
+    )
+    parser.add_argument(
         "--exit-mode",
         choices=["tp_trailing", "atr_trailing"],
         default="tp_trailing",
@@ -342,6 +358,7 @@ def run_cli(args: Sequence[str] | None = None) -> int:
     print(json.dumps(cfg.__dict__, indent=2, default=_json_safe))
     print(f"Symbols: {parsed.symbols}")
     print(f"Timeframe: {parsed.timeframe}")
+    print(f"Preset: {preset_cfg.name}")
     print(f"Output directory: {parsed.out_dir}")
     if parsed.dry_run:
         return 0
@@ -356,6 +373,8 @@ def run_cli(args: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    preset_cfg = resolve_preset(parsed.preset)
 
     params_dict: Dict[str, Any] = {
         "risk": parsed.risk,
@@ -373,6 +392,7 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         "trade_size_usd": parsed.trade_size_usd,
         "exit_mode": parsed.exit_mode,
         "random_seed": parsed.random_seed,
+        "preset": preset_cfg.name,
     }
 
     backtest_id = parsed.backtest_id or build_backtest_id(
@@ -423,6 +443,7 @@ def run_cli(args: Sequence[str] | None = None) -> int:
             cfg,
             symbols=parsed.symbols,
             progress_callback=_progress,
+            preset=preset_cfg,
         )
     except Exception as exc:  # pragma: no cover - smoke tested via integration
         tracker.fail(str(exc))
