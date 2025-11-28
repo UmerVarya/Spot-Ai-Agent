@@ -55,6 +55,14 @@ from spot.analytics.live_scan_stats import (
     list_scan_stat_files,
     load_scan_stats,
 )
+from spot.analytics.historical_scan_funnel import (
+    aggregate_by_day,
+    aggregate_by_symbol,
+    filter_stats_by_date_and_symbols,
+    load_all_daily_stats,
+    to_funnel_dataframe,
+    to_reasons_dataframe,
+)
 from trade_utils import get_top_symbols
 from ml_model import train_model
 import requests
@@ -66,6 +74,7 @@ BINANCE_FEE_RATE = 0.00075
 
 BACKTEST_DIR = get_backtest_dir()
 MAX_RUNNING_BACKTESTS = 5
+SCAN_STATS_BASE_DIR = Path("spot_data/live_scan_stats")
 
 try:
     import altair as alt  # type: ignore
@@ -1303,6 +1312,11 @@ def _load_scan_stats(path: Path) -> dict:
         return {}
 
 
+@st.cache_data(show_spinner=False)
+def _load_all_scan_stats_cached():
+    return load_all_daily_stats(SCAN_STATS_BASE_DIR)
+
+
 def _render_daily_scan_stats() -> None:
     st.subheader("📊 Daily Scan Stats")
     stat_files = list_scan_stat_files()
@@ -1413,6 +1427,77 @@ def _render_daily_scan_stats() -> None:
         file_name=selected_path.name,
         mime="application/json",
     )
+
+
+def _render_historical_scan_funnel() -> None:
+    st.subheader("📈 Historical Scan Funnel")
+    all_stats = _load_all_scan_stats_cached()
+    if not all_stats:
+        st.info("No historical scan stats found yet.")
+        return
+
+    available_dates = sorted({s.date for s in all_stats})
+    available_symbols = sorted({s.symbol for s in all_stats})
+
+    date_range = st.date_input(
+        "Date range",
+        value=(available_dates[0], available_dates[-1]),
+        min_value=available_dates[0],
+        max_value=available_dates[-1],
+    )
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        selected_start, selected_end = date_range
+    else:
+        selected_start, selected_end = available_dates[0], available_dates[-1]
+
+    selected_symbols = st.multiselect(
+        "Symbols",
+        options=available_symbols,
+        default=available_symbols,
+        help="Filter metrics to specific symbols.",
+    )
+
+    filtered_stats = filter_stats_by_date_and_symbols(
+        all_stats,
+        start_date=selected_start,
+        end_date=selected_end,
+        symbols=selected_symbols or None,
+    )
+    daily_agg = aggregate_by_day(filtered_stats)
+
+    if not daily_agg:
+        st.info("No stats available for this range / symbols.")
+        return
+
+    funnel_df = to_funnel_dataframe(daily_agg)
+    st.markdown("#### Day-over-day funnel")
+    st.dataframe(funnel_df, hide_index=True, use_container_width=True)
+    st.line_chart(funnel_df.set_index("date"))
+
+    reasons_df = to_reasons_dataframe(daily_agg)
+    if not reasons_df.empty:
+        st.markdown("#### No-trade reasons over time")
+        st.bar_chart(reasons_df)
+
+    symbol_df = aggregate_by_symbol(filtered_stats)
+    if not symbol_df.empty:
+        st.markdown("#### Per-symbol summary (selected range)")
+        st.dataframe(
+            symbol_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "conv_candidates_per_scan": st.column_config.ProgressColumn(
+                    "Candidates / scan", min_value=0.0, max_value=1.0
+                ),
+                "conv_trades_per_candidate": st.column_config.ProgressColumn(
+                    "Trades / candidate", min_value=0.0, max_value=1.0
+                ),
+                "conv_trades_per_scan": st.column_config.ProgressColumn(
+                    "Trades / scan", min_value=0.0, max_value=1.0
+                ),
+            },
+        )
 
 def format_active_row(symbol: str, data: dict) -> dict | None:
     """
@@ -1756,6 +1841,7 @@ def render_live_tab() -> None:
         c2.metric("Vetoed", f"{vetoed} ({vetoed / total_decisions:.0%})")
         c3.metric("Errors", f"{errors} ({errors / total_decisions:.0%})")
     _render_daily_scan_stats()
+    _render_historical_scan_funnel()
     # Display live PnL section
     st.subheader("📈 Live PnL – Active Trades")
     source_label = "live API" if source == "api" else "local cache"
