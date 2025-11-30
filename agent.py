@@ -470,6 +470,7 @@ from brain import (
 )
 from sentiment import get_macro_sentiment
 from macro_data import get_btc_dominance_cached, get_fear_greed_cached
+from macro_gate import MacroDecisionDebug, evaluate_macro_gate
 from orderflow import detect_aggression
 from volume_profile import (
     VolumeProfileResult,
@@ -846,6 +847,20 @@ def macro_filter_decision(
     btc_dom: Optional[float], fear_greed: Optional[int], bias: str, conf: float
 ):
     """Return macro gating decision.
+
+    The filter is an inexpensive pre-flight gate that keeps the agent idle when
+    broad market structure is unfavourable.  Signals considered:
+
+    * ``btc_dom`` (>60) increases risk for altcoins.
+    * ``fear_greed`` (<10 hard veto, <20 contributes to caution).
+    * ``bias``/``conf`` from :func:`get_macro_sentiment` tilt the caution level
+      when strongly bearish.
+
+    Environment flags:
+    * ``MACRO_REQUIRED`` (via ``macro_filter.py``) controls whether missing macro
+      data is treated as neutral elsewhere, but the filter itself is tolerant of
+      ``None`` inputs and treats them as "data unavailable" rather than a hard
+      veto.
 
     Parameters
     ----------
@@ -2141,8 +2156,30 @@ def run_agent_loop() -> None:
                     should_log_decision = raw_score >= entry_cutoff
                     volume_ok = position_size > 0
                     macro_state = macro_news_assessment or {}
-                    macro_veto_flag = not bool(macro_state.get("safe", True))
-                    scan_record["filter_flags"]["macro_ok"] = not macro_veto_flag
+                    macro_debug: MacroDecisionDebug = evaluate_macro_gate(
+                        macro_state,
+                        skip_all=skip_all,
+                        skip_alt=skip_alt,
+                        macro_filter_reasons=macro_reasons,
+                    )
+                    macro_veto_flag = not macro_debug.strict_macro_ok
+                    scan_record["filter_flags"]["macro_ok"] = macro_debug.strict_macro_ok
+                    scan_record["filter_flags"]["macro_reasons"] = list(
+                        macro_debug.reasons
+                    )
+                    if not macro_debug.strict_macro_ok and macro_debug.macro_ok:
+                        logger.info(
+                            "Macro strict mode bypassed veto (soft advisory). Reasons=%s",
+                            ", ".join(macro_debug.reasons) if macro_debug.reasons else "none",
+                        )
+                    if macro_veto_flag:
+                        logger.info(
+                            "Macro veto active (strict=%s). Reasons=%s Inputs=%s",
+                            macro_debug.strict_macro_ok,
+                            ", ".join(macro_debug.reasons) if macro_debug.reasons else "unknown",
+                            macro_debug.inputs,
+                        )
+
                     news_veto_flag = bool(
                         monitor_state and bool(monitor_state.get("halt_trading"))
                     )
@@ -2154,6 +2191,8 @@ def run_agent_loop() -> None:
                         cooldown_active=cooldown_active,
                     )
                     breakdown_data["macro_veto"] = macro_veto_flag
+                    breakdown_data["macro_reasons"] = list(macro_debug.reasons)
+                    breakdown_data["macro_inputs"] = dict(macro_debug.inputs)
                     breakdown_data["news_veto"] = news_veto_flag
                     breakdown_data["cooldown_block"] = cooldown_active
 

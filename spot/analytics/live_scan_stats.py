@@ -170,6 +170,13 @@ class DailyScanStats:
         filters["passed_prob_gate"] = filters.get("passed_prob_gate", 0) + bool(
             flags.get("prob_ok", False)
         )
+        macro_reasons = flags.get("macro_reasons")
+        if macro_reasons:
+            sub = entry.setdefault("macro_subreasons", {})
+            for reason in macro_reasons:
+                if not reason:
+                    continue
+                sub[str(reason)] = sub.get(str(reason), 0) + 1
 
     def _update_llm(self, entry: Dict[str, Any], llm_info: Mapping[str, Any]) -> None:
         llm_data = entry.setdefault("llm", {})
