@@ -129,6 +129,35 @@ def run_cli(args: Sequence[str] | None = None) -> int:
         valid = ", ".join(preset_mod.list_presets())
         raise SystemExit(f"Unknown preset: {preset_cfg_name!r}. Expected one of: {valid}")
 
+    launch_params: dict[str, Any] = {
+        "symbols": parsed.symbols,
+        "timeframe": parsed.timeframe,
+        "start": start_ts,
+        "end": end_ts,
+        "risk": parsed.risk,
+        "score_threshold": parsed.score_threshold,
+        "min_prob": parsed.min_prob,
+        "trade_size_usd": parsed.trade_size_usd,
+        "preset_name": preset_cfg_name,
+        "fee_bps": parsed.fee_bps,
+        "slippage_bps": parsed.slippage_bps,
+        "atr_stop_multiplier": parsed.atr_stop_multiplier,
+        "sizing_mode": parsed.sizing_mode,
+        "exit_mode": parsed.exit_mode,
+        "latency_bars": parsed.latency_bars,
+        "entry_delay_bars": parsed.entry_delay_bars,
+        "initial_capital": parsed.initial_capital,
+        "skip_fraction": parsed.skip_fraction,
+        "random_seed": parsed.random_seed,
+        "run_label": parsed.run_label,
+        "backtest_id": parsed.backtest_id,
+        "data_dir": parsed.data_dir,
+        "out_dir": parsed.out_dir,
+        "csv_paths": parsed.csv_paths,
+        "take_profit_strategy": parsed.take_profit_strategy,
+        "progress_callback": _print_progress,
+    }
+
     cfg_preview: dict[str, Any] = {
         "start_ts": start_ts,
         "end_ts": end_ts,
@@ -157,38 +186,11 @@ def run_cli(args: Sequence[str] | None = None) -> int:
     print(f"Preset: {preset_cfg_name}")
     print(f"Output directory: {parsed.out_dir}")
     if parsed.dry_run:
+        launch_backtest(**{**launch_params, "dry_run": True})
         return 0
 
     try:
-        result = launch_backtest(
-            symbols=parsed.symbols,
-            timeframe=parsed.timeframe,
-            start=start_ts,
-            end=end_ts,
-            risk=parsed.risk,
-            score_threshold=parsed.score_threshold,
-            min_prob=parsed.min_prob,
-            trade_size_usd=parsed.trade_size_usd,
-            preset_name=preset_cfg_name,
-            fee_bps=parsed.fee_bps,
-            slippage_bps=parsed.slippage_bps,
-            atr_stop_multiplier=parsed.atr_stop_multiplier,
-            sizing_mode=parsed.sizing_mode,
-            exit_mode=parsed.exit_mode,
-            latency_bars=parsed.latency_bars,
-            entry_delay_bars=parsed.entry_delay_bars,
-            initial_capital=parsed.initial_capital,
-            skip_fraction=parsed.skip_fraction,
-            random_seed=parsed.random_seed,
-            run_label=parsed.run_label,
-            backtest_id=parsed.backtest_id,
-            data_dir=parsed.data_dir,
-            out_dir=parsed.out_dir,
-            csv_paths=parsed.csv_paths,
-            dry_run=parsed.dry_run,
-            take_profit_strategy=parsed.take_profit_strategy,
-            progress_callback=_print_progress,
-        )
+        result = launch_backtest(**{**launch_params, "dry_run": False})
     except Exception as exc:  # pragma: no cover - surfaced to CLI user
         print(f"Backtest failed: {exc}", file=sys.stderr)
         return 1
