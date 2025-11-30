@@ -3,6 +3,8 @@ import pandas as pd
 
 from backtest.presets import (
     BacktestPresetConfig,
+    get_preset,
+    list_presets,
     PRESET_FULL_AUDIT,
     PRESET_QUICK_SMOKE,
     PRESET_STANDARD_RESEARCH,
@@ -30,6 +32,23 @@ def test_resolve_preset_defaults():
     assert resolve_preset(None).name == PRESET_STANDARD_RESEARCH.name
     assert resolve_preset(PRESET_QUICK_SMOKE).name == PRESET_QUICK_SMOKE.name
     assert resolve_preset(PRESET_FULL_AUDIT.name).name == PRESET_FULL_AUDIT.name
+
+
+def test_get_preset_accepts_known_names():
+    for name in list_presets():
+        cfg = get_preset(name)
+        assert cfg.name == name
+
+
+def test_get_preset_invalid_name_raises():
+    invalid = "totally-invalid"
+    assert invalid not in list_presets()
+    try:
+        get_preset(invalid)
+    except KeyError:
+        pass
+    else:  # pragma: no cover - future-proofing
+        raise AssertionError("Expected get_preset to raise for invalid preset")
 
 
 def test_custom_preset_streams_progress_and_disables_slippage():
