@@ -324,9 +324,6 @@ def launch_backtest(
 
     paths = build_backtest_output_paths(effective_backtest_id, resolved_out_dir)
 
-    if dry_run:
-        return {"backtest_id": effective_backtest_id, "paths": paths, "preset": preset_cfg.name}
-
     cfg = _build_backtest_config(
         start_ts=start_ts,
         end_ts=end_ts,
@@ -395,6 +392,18 @@ def launch_backtest(
         data_frames = load_csv_paths(resolved_csv_paths, start=start_ts, end=end_ts)
         total_bars = int(sum(len(df) for df in data_frames.values()))
         tracker.start(total_bars)
+
+        if dry_run:
+            tracker.metadata.status = "pending"
+            tracker.metadata.progress = 0.0
+            tracker.write()
+            return {
+                "backtest_id": effective_backtest_id,
+                "paths": paths,
+                "preset": preset_cfg.name,
+                "metadata": metadata.to_dict(),
+                "total_bars": total_bars,
+            }
 
         def _progress(progress: BacktestProgress) -> None:
             tracker.update_progress(progress)

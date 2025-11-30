@@ -26,6 +26,7 @@ import numpy as np
 import csv
 import json
 import os
+import subprocess
 import re
 import sys
 from pathlib import Path
@@ -2972,10 +2973,64 @@ def render_backtest_lab() -> None:
                 out_dir=BACKTEST_DIR,
                 data_dir=Path("data"),
                 take_profit_strategy=exit_mode,
+                dry_run=True,
             )
         except Exception as exc:  # pragma: no cover - surfaced in UI
             logger.exception("Failed to launch backtest", exc_info=exc)
             launch_message.error(f"Failed to launch backtest: {exc}")
+            return
+
+        cli_args = [
+            sys.executable,
+            "run_backtest_cli.py",
+            "--symbols",
+            *selected_symbols,
+            "--timeframe",
+            timeframe,
+            "--start",
+            start_ts.strftime("%Y-%m-%d"),
+            "--end",
+            (end_ts - timedelta(days=1)).strftime("%Y-%m-%d"),
+            "--trade-size-usd",
+            str(trade_size_usd),
+            "--fee-bps",
+            str(fee_bps),
+            "--slippage-bps",
+            str(slippage_bps),
+            "--atr-stop-multiplier",
+            str(atr_mult),
+            "--sizing-mode",
+            "fixed_notional",
+            "--exit-mode",
+            exit_mode,
+            "--latency-bars",
+            str(int(latency)),
+            "--initial-capital",
+            str(capital),
+            "--min-prob",
+            str(min_prob),
+            "--preset",
+            preset,
+            "--random-seed",
+            str(int(random_seed)),
+            "--take-profit-strategy",
+            exit_mode,
+            "--out-dir",
+            str(BACKTEST_DIR),
+            "--backtest-id",
+            backtest_id,
+        ]
+
+        if score_threshold is not None:
+            cli_args.extend(["--score-threshold", str(score_threshold)])
+        if run_label:
+            cli_args.extend(["--run-label", run_label])
+
+        try:
+            subprocess.Popen(cli_args)
+        except Exception as exc:  # pragma: no cover - surfaced in UI
+            logger.exception("Failed to spawn CLI backtest", exc_info=exc)
+            st.error("Failed to launch backtest")
             return
 
         launch_message.success(
