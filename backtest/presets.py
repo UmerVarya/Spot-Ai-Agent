@@ -92,9 +92,21 @@ PRESETS_BY_NAME = {
 }
 
 
+DEFAULT_PRESET_NAME = PRESET_STANDARD_RESEARCH.name
+
+
+def list_presets() -> list[str]:
+    return list(PRESETS_BY_NAME.keys())
+
+
+def get_preset(name: str | None = None) -> BacktestPresetConfig:
+    preset_name = DEFAULT_PRESET_NAME if name is None else name
+    return PRESETS_BY_NAME[preset_name]
+
+
 def resolve_preset(name: str | BacktestPresetConfig | None) -> BacktestPresetConfig:
     if isinstance(name, BacktestPresetConfig):
         return name
     if name is None:
-        return PRESET_STANDARD_RESEARCH
+        return PRESETS_BY_NAME[DEFAULT_PRESET_NAME]
     return PRESETS_BY_NAME.get(name, PRESET_STANDARD_RESEARCH)

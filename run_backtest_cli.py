@@ -31,12 +31,7 @@ from config import DEFAULT_MIN_PROB_FOR_TRADE
 from trade_constants import TP1_TRAILING_ONLY_STRATEGY
 from trade_schema import TRADE_HISTORY_COLUMNS
 from backtest.types import BacktestProgress
-from backtest.presets import (
-    PRESET_FULL_AUDIT,
-    PRESET_QUICK_SMOKE,
-    PRESET_STANDARD_RESEARCH,
-    resolve_preset,
-)
+from backtest import presets as preset_mod
 
 
 BACKTEST_DIR = get_backtest_dir()
@@ -287,13 +282,12 @@ def run_cli(args: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--preset",
-        default=PRESET_STANDARD_RESEARCH.name,
-        choices=[
-            PRESET_QUICK_SMOKE.name,
-            PRESET_STANDARD_RESEARCH.name,
-            PRESET_FULL_AUDIT.name,
-        ],
-        help="Performance/observability preset",
+        default=None,
+        help=(
+            "Performance/observability preset. "
+            f"Choices: {', '.join(preset_mod.list_presets())}. "
+            f"Default: {preset_mod.DEFAULT_PRESET_NAME}"
+        ),
     )
     parser.add_argument(
         "--exit-mode",
@@ -333,6 +327,19 @@ def run_cli(args: Sequence[str] | None = None) -> int:
     # Include the full end date by adding one day similar to the dashboard behaviour
     end_ts = end_input + pd.Timedelta(days=1)
 
+    if parsed.preset is None:
+        preset_cfg_name = getattr(preset_mod, "DEFAULT_PRESET_NAME", "Standard research")
+        preset_cfg = preset_mod.get_preset(preset_cfg_name)
+    else:
+        preset_cfg_name = parsed.preset
+        try:
+            preset_cfg = preset_mod.get_preset(preset_cfg_name)
+        except KeyError:
+            valid = ", ".join(preset_mod.list_presets())
+            raise SystemExit(
+                f"Unknown preset: {preset_cfg_name!r}. Expected one of: {valid}"
+            )
+
     cfg = BacktestConfig(
         start_ts=start_ts,
         end_ts=end_ts,
@@ -358,7 +365,7 @@ def run_cli(args: Sequence[str] | None = None) -> int:
     print(json.dumps(cfg.__dict__, indent=2, default=_json_safe))
     print(f"Symbols: {parsed.symbols}")
     print(f"Timeframe: {parsed.timeframe}")
-    print(f"Preset: {preset_cfg.name}")
+    print(f"Preset: {preset_cfg_name}")
     print(f"Output directory: {parsed.out_dir}")
     if parsed.dry_run:
         return 0
@@ -373,8 +380,6 @@ def run_cli(args: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-
-    preset_cfg = resolve_preset(parsed.preset)
 
     params_dict: Dict[str, Any] = {
         "risk": parsed.risk,
