@@ -67,8 +67,8 @@ def test_cli_writes_artifacts_and_meta(tmp_path, monkeypatch):
             progress_callback(BacktestProgress(phase="simulating", current=5, total=5))
         return result
 
-    monkeypatch.setattr(backtest_cli, "ensure_ohlcv_csvs", _fake_ensure)
-    monkeypatch.setattr(backtest_cli, "run_backtest_from_csv_paths", _fake_run)
+    monkeypatch.setattr("backtest.run.ensure_ohlcv_csvs", _fake_ensure)
+    monkeypatch.setattr("backtest.run.run_backtest_from_csv_paths", _fake_run)
 
     out_dir = tmp_path / "out"
     args = [
@@ -132,8 +132,8 @@ def test_cli_legacy_symbol_flag(tmp_path, monkeypatch):
     csv_path = _sample_csv(tmp_path)
     result = _stub_result()
 
-    monkeypatch.setattr(backtest_cli, "ensure_ohlcv_csvs", lambda *_, **__: [csv_path])
-    monkeypatch.setattr(backtest_cli, "run_backtest_from_csv_paths", lambda *_, **__: result)
+    monkeypatch.setattr("backtest.run.ensure_ohlcv_csvs", lambda *_, **__: [csv_path])
+    monkeypatch.setattr("backtest.run.run_backtest_from_csv_paths", lambda *_, **__: result)
 
     out_dir = tmp_path / "out"
     args = [

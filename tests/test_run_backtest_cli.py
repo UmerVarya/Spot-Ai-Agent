@@ -64,13 +64,13 @@ def stub_backtest_result() -> BacktestResult:
 def test_cli_writes_outputs_with_meta(tmp_path: Path, sample_csv: Path, stub_backtest_result: BacktestResult, monkeypatch):
     out_dir = tmp_path / "out"
 
-    def _fake_run(csv_paths, cfg, symbols=None, progress_callback=None):
+    def _fake_run(csv_paths, cfg, symbols=None, progress_callback=None, preset=None):
         if progress_callback:
             progress_callback(BacktestProgress(phase="simulating", current=10, total=10))
         return stub_backtest_result
 
     monkeypatch.chdir(Path.cwd())
-    monkeypatch.setattr("run_backtest_cli.run_backtest_from_csv_paths", _fake_run)
+    monkeypatch.setattr("backtest.run.run_backtest_from_csv_paths", _fake_run)
 
     args = [
         "--symbols",
@@ -122,12 +122,12 @@ def test_cli_handles_no_trades(tmp_path: Path, sample_csv: Path, monkeypatch):
     )
     empty_result = BacktestResult(cfg, pd.DataFrame(), pd.DataFrame(), {}, pd.DataFrame(), {}, None, {})
 
-    def _fake_run(csv_paths, cfg, symbols=None, progress_callback=None):
+    def _fake_run(csv_paths, cfg, symbols=None, progress_callback=None, preset=None):
         if progress_callback:
             progress_callback(BacktestProgress(phase="simulating", current=0, total=0))
         return empty_result
 
-    monkeypatch.setattr("run_backtest_cli.run_backtest_from_csv_paths", _fake_run)
+    monkeypatch.setattr("backtest.run.run_backtest_from_csv_paths", _fake_run)
 
     args = [
         "--symbols",

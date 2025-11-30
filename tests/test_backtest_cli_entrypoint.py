@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 import backtest_cli
-from backtest.filesystem import discover_backtest_files
+from backtest.filesystem import discover_backtest_files, build_backtest_output_paths
 from backtest.engine import BacktestConfig, BacktestResult
 
 
@@ -29,11 +29,18 @@ def sample_result():
 def test_cli_writes_expected_outputs(tmp_path: Path, sample_result, monkeypatch):
     called_args = {}
 
-    def _fake_run_backtest(**kwargs):
+    def _fake_launch_backtest(**kwargs):
         called_args.update(kwargs)
-        return sample_result
+        paths = build_backtest_output_paths(kwargs["backtest_id"], kwargs["out_dir"])
+        paths["trades"].parent.mkdir(parents=True, exist_ok=True)
+        sample_result.trades.to_csv(paths["trades"], index=False)
+        sample_result.equity_curve.to_csv(paths["equity"], index=False)
+        metrics_path = paths["metrics"]
+        pd.DataFrame([sample_result.metrics]).to_json(metrics_path, orient="records")
+        paths["meta"].write_text(json.dumps({"status": "completed"}))
+        return {"paths": paths}
 
-    monkeypatch.setattr(backtest_cli, "run_backtest", _fake_run_backtest)
+    monkeypatch.setattr(backtest_cli, "launch_backtest", _fake_launch_backtest)
 
     start = "2024-01-01"
     end = "2024-01-02"
@@ -53,19 +60,19 @@ def test_cli_writes_expected_outputs(tmp_path: Path, sample_result, monkeypatch)
     )
 
     assert exit_code == 0
-    assert called_args["symbol"] == "BTCUSDT"
+    assert called_args["symbols"] == ["BTCUSDT"]
     assert called_args["timeframe"] == "1m"
 
     base = tmp_path / "BTCUSDT_1m_2024-01-01_2024-01-02"
     trades_path = base.with_name(base.name + "_trades.csv")
     equity_path = base.with_name(base.name + "_equity.csv")
-    metrics_path = base.with_name(base.name + "_metrics.csv")
+    metrics_path = base.with_name(base.name + "_metrics.json")
 
     assert trades_path.exists()
     assert equity_path.exists()
     assert metrics_path.exists()
 
-    metrics_df = pd.read_csv(metrics_path)
+    metrics_df = pd.read_json(metrics_path)
     assert metrics_df.loc[0, "win_rate"] == 0.5
 
     discovered = discover_backtest_files(tmp_path)

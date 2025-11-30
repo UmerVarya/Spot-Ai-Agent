@@ -27,7 +27,6 @@ import csv
 import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -46,6 +45,7 @@ from backtest import (
     get_backtest_dir,
     build_backtest_id,
 )
+from backtest.run import launch_backtest
 from ml_model import train_model
 import requests
 from daily_summary import generate_daily_summary
@@ -2940,80 +2940,48 @@ def render_backtest_lab() -> None:
             st.error("Please provide a valid start and end date.")
             return
 
-        start_label = start_date.isoformat()
-        end_label = end_date.isoformat()
-        base_backtest_id = build_backtest_id(selected_symbols, timeframe, start_label, end_label)
-        cli_script = Path(__file__).resolve().parent / "run_backtest_cli.py"
+        start_ts = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+        end_ts = datetime.combine(end_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(days=1)
+        backtest_id = build_backtest_id(
+            selected_symbols,
+            timeframe,
+            start_ts.strftime("%Y-%m-%d"),
+            (end_ts - timedelta(days=1)).strftime("%Y-%m-%d"),
+        )
 
-        def _build_cli_args(bt_id: str, score: float, prob: float, mode: str) -> list[str]:
-            return [
-                sys.executable,
-                str(cli_script),
-                "--backtest-id",
-                bt_id,
-                "--symbols",
-                *selected_symbols,
-                "--timeframe",
-                timeframe,
-                "--preset",
-                preset,
-                "--start",
-                start_label,
-                "--end",
-                end_label,
-                "--score-threshold",
-                str(score),
-                "--min-prob",
-                str(prob),
-                "--fee-bps",
-                str(fee_bps),
-                "--slippage-bps",
-                str(slippage_bps),
-                "--atr-stop-multiplier",
-                str(atr_mult),
-                "--latency-bars",
-                str(int(latency)),
-                "--initial-capital",
-                str(capital),
-                "--take-profit-strategy",
-                mode,
-                "--sizing-mode",
-                "fixed_notional",
-                "--trade-size-usd",
-                str(trade_size_usd),
-                "--exit-mode",
-                mode,
-                "--random-seed",
-                str(int(random_seed)),
-                "--out-dir",
-                str(BACKTEST_DIR),
-            ]
-
-        def _launch(bt_id: str, score: float, prob: float, mode: str) -> str | None:
-            cli_args = _build_cli_args(bt_id, score, prob, mode)
-            if run_label:
-                cli_args.extend(["--run-label", run_label])
-            log_path = BACKTEST_DIR / f"{bt_id}.log"
-            try:
-                with open(log_path, "ab") as log_file:
-                    subprocess.Popen(
-                        cli_args,
-                        stdout=log_file,
-                        stderr=subprocess.STDOUT,
-                        start_new_session=True,
-                    )
-                return str(log_path)
-            except Exception as exc:  # pragma: no cover - subprocess failures
-                logger.exception("Failed to launch CLI backtest", exc_info=exc)
-                launch_message.error(f"Failed to launch backtest: {exc}")
-                return None
-
-        log_path = _launch(base_backtest_id, score_threshold, min_prob, exit_mode)
-        if log_path:
-            launch_message.success(
-                f"Backtest launched as {base_backtest_id}. Track progress below. Logs: {Path(log_path).name}"
+        try:
+            launch_backtest(
+                symbols=selected_symbols,
+                timeframe=timeframe,
+                start=start_ts,
+                end=end_ts,
+                score_threshold=score_threshold,
+                min_prob=min_prob,
+                trade_size_usd=trade_size_usd,
+                preset_name=preset,
+                fee_bps=fee_bps,
+                slippage_bps=slippage_bps,
+                atr_stop_multiplier=atr_mult,
+                sizing_mode="fixed_notional",
+                exit_mode=exit_mode,
+                latency_bars=int(latency),
+                initial_capital=capital,
+                random_seed=int(random_seed),
+                backtest_id=backtest_id,
+                run_label=run_label,
+                out_dir=BACKTEST_DIR,
+                data_dir=Path("data"),
+                take_profit_strategy=exit_mode,
             )
-            st.session_state["backtest_result"] = None
+        except Exception as exc:  # pragma: no cover - surfaced in UI
+            logger.exception("Failed to launch backtest", exc_info=exc)
+            launch_message.error(f"Failed to launch backtest: {exc}")
+            return
+
+        launch_message.success(
+            f"Backtest launched as {backtest_id}. Track progress below. Results will appear once complete."
+        )
+        st.session_state["backtest_result"] = None
 
     render_saved_backtests_section()
 

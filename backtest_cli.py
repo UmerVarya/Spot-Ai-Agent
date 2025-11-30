@@ -3,30 +3,14 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Iterable, Optional, Sequence
 
 import pandas as pd
 
-from backtest.engine import BacktestConfig, BacktestResult, run_backtest_from_csv_paths
-from backtest.data_manager import ensure_ohlcv_csvs
-from backtest.filesystem import (
-    BacktestRunMetadata,
-    build_backtest_id,
-    build_backtest_output_paths,
-    get_backtest_dir,
-    write_csv_atomic,
-    write_json_atomic,
-)
+from backtest import presets as preset_mod
+from backtest.filesystem import build_backtest_id, get_backtest_dir
+from backtest.run import launch_backtest
 from config import DEFAULT_MIN_PROB_FOR_TRADE
-from backtest.types import BacktestProgress
-from run_backtest_cli import (
-    _compute_metrics,
-    _ensure_equity_curve,
-    _ensure_trades_with_header,
-    _format_date_for_path,
-    _MetaTracker,
-    _print_progress,
-)
 
 
 DEFAULT_OUTPUT_DIR = get_backtest_dir()
@@ -101,80 +85,6 @@ def _print_summary(
     print(f"  backtest_id: {backtest_id}")
 
 
-def _run_backtest(
-    *,
-    symbols: list[str],
-    timeframe: str,
-    start: datetime,
-    end: datetime,
-    cfg: BacktestConfig,
-    backtest_id: str,
-    output_dir: Path,
-    data_dir: Path,
-) -> BacktestRunMetadata:
-    paths = build_backtest_output_paths(backtest_id, output_dir)
-    params_dict: dict[str, Any] = {
-        "score_threshold": cfg.min_score,
-        "min_prob": cfg.min_prob,
-        "exit_mode": cfg.exit_mode,
-        "trade_size_usd": cfg.trade_size_usd,
-        "fee_bps": cfg.fee_bps,
-        "slippage_bps": cfg.slippage_bps,
-        "random_seed": cfg.random_seed,
-    }
-
-    metadata = BacktestRunMetadata(
-        backtest_id=backtest_id,
-        symbols=[sym.upper() for sym in symbols],
-        timeframe=timeframe,
-        start_date=_format_date_for_path(pd.Timestamp(start)),
-        end_date=_format_date_for_path(pd.Timestamp(end) - pd.Timedelta(days=1)),
-        params=params_dict,
-        random_seed=cfg.random_seed,
-    )
-    tracker = _MetaTracker(metadata, paths["meta"])
-    tracker.start(0)
-
-    try:
-        csv_paths = ensure_ohlcv_csvs(symbols, timeframe, start, end, data_dir=data_dir)
-    except Exception as exc:  # pragma: no cover - surfaced to user
-        tracker.fail(str(exc))
-        raise
-
-    try:
-        total_bars = 0
-        try:
-            from backtest.data import load_csv_paths
-
-            data_frames = load_csv_paths(csv_paths, start=pd.Timestamp(start), end=pd.Timestamp(end))
-            total_bars = int(sum(len(df) for df in data_frames.values()))
-        except Exception:
-            data_frames = None
-        tracker.start(total_bars)
-
-        def _progress(progress: BacktestProgress) -> None:
-            tracker.update_progress(progress)
-            _print_progress(progress)
-
-        result: BacktestResult = run_backtest_from_csv_paths(
-            csv_paths, cfg, symbols=symbols, progress_callback=_progress
-        )
-    except Exception as exc:  # pragma: no cover - surfaced to user
-        tracker.fail(str(exc))
-        raise
-
-    trades = _ensure_trades_with_header(result.trades if hasattr(result, "trades") else pd.DataFrame())
-    equity = _ensure_equity_curve(result.equity_curve if hasattr(result, "equity_curve") else pd.DataFrame(), cfg)
-    metrics = _compute_metrics(trades, equity, cfg.initial_capital)
-
-    write_csv_atomic(paths["trades"], trades)
-    write_csv_atomic(paths["equity"], equity)
-    write_json_atomic(paths["metrics"], metrics)
-    tracker.complete(metrics)
-
-    return metadata
-
-
 def main(cli_args: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Spot-AI research backtests from the CLI.")
     parser.add_argument("--symbols", help="Comma-separated Binance symbols, e.g. BTCUSDT,ETHUSDT")
@@ -204,6 +114,12 @@ def main(cli_args: Sequence[str] | None = None) -> int:
     parser.add_argument("--fee-bps", type=float, default=10.0)
     parser.add_argument("--slippage-bps", type=float, default=0.0)
     parser.add_argument("--random-seed", type=int)
+    parser.add_argument(
+        "--preset",
+        choices=list(preset_mod.list_presets()),
+        default=None,
+        help=f"Optional performance preset (default {preset_mod.DEFAULT_PRESET_NAME})",
+    )
 
     args = parser.parse_args(cli_args)
 
@@ -218,22 +134,8 @@ def main(cli_args: Sequence[str] | None = None) -> int:
     backtest_id = build_backtest_id(
         symbols,
         args.timeframe,
-        _format_date_for_path(pd.Timestamp(start)),
-        _format_date_for_path(pd.Timestamp(end) - pd.Timedelta(days=1)),
-    )
-
-    cfg = BacktestConfig(
-        start_ts=pd.Timestamp(start),
-        end_ts=pd.Timestamp(end),
-        is_backtest=True,
-        min_score=args.score_threshold,
-        min_prob=args.min_prob,
-        fee_bps=args.fee_bps,
-        slippage_bps=args.slippage_bps,
-        sizing_mode="fixed_notional",
-        trade_size_usd=args.trade_size_usd,
-        exit_mode=args.exit_mode,
-        random_seed=args.random_seed,
+        pd.Timestamp(start).strftime("%Y-%m-%d"),
+        (pd.Timestamp(end) - pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
     )
 
     _print_summary(
@@ -251,14 +153,22 @@ def main(cli_args: Sequence[str] | None = None) -> int:
     )
 
     try:
-        _run_backtest(
+        launch_backtest(
             symbols=symbols,
             timeframe=args.timeframe,
             start=start,
             end=end,
-            cfg=cfg,
+            score_threshold=args.score_threshold,
+            min_prob=args.min_prob,
+            trade_size_usd=args.trade_size_usd,
+            preset_name=args.preset or preset_mod.DEFAULT_PRESET_NAME,
+            fee_bps=args.fee_bps,
+            slippage_bps=args.slippage_bps,
+            sizing_mode="fixed_notional",
+            exit_mode=args.exit_mode,
+            random_seed=args.random_seed,
             backtest_id=backtest_id,
-            output_dir=output_dir,
+            out_dir=output_dir,
             data_dir=Path("data"),
         )
     except Exception as exc:  # pragma: no cover - surface error to user
