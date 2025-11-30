@@ -43,6 +43,17 @@ def _truthy(x: str | None) -> bool:
     return str(x or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def macro_strict_mode() -> bool:
+    """Return whether macro gating should veto trades (strict mode).
+
+    When disabled (``MACRO_STRICT=false``) macro checks remain advisory but do
+    not block orders.  Strict mode remains the default to preserve existing
+    behaviour until explicitly loosened.
+    """
+
+    return _truthy(os.getenv("MACRO_STRICT", "true"))
+
+
 def use_groq() -> bool:
     return _truthy(os.getenv("USE_GROQ", "true"))
 
